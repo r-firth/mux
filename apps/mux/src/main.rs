@@ -369,6 +369,14 @@ impl Application {
         self.refresh_view()
     }
 
+    fn backend_error(&mut self, message: String) -> Result<()> {
+        if let Some(surface) = &mut self.agent_surface {
+            surface.loading = false;
+        }
+        self.message = Some(message);
+        self.refresh_view()
+    }
+
     fn apply_agent_event(&mut self, event: &AgentEvent) {
         let found = self
             .agents
@@ -2719,10 +2727,7 @@ impl ApplicationHandler<UserEvent> for Application {
                 self.apply_agent_event(&event);
                 Ok(())
             }
-            UserEvent::BackendError(message) => {
-                self.message = Some(message);
-                self.refresh_view()
-            }
+            UserEvent::BackendError(message) => self.backend_error(message),
             UserEvent::ExitRequested => unreachable!("handled above"),
         };
         if let Err(error) = result {
@@ -3358,6 +3363,36 @@ mod input_tests {
                 .expect("agent surface")
                 .draft,
             "\n"
+        );
+    }
+
+    #[test]
+    fn failed_agent_start_returns_the_launcher_to_a_retryable_state() {
+        let mut application = Application {
+            agent_surface: Some(AgentSurface {
+                selected: 0,
+                draft: String::new(),
+                loading: true,
+                launcher: Some(AgentLauncher {
+                    selected_profile: 0,
+                    cwd_override: None,
+                }),
+                context: AgentContextMode::None,
+                pending_end: None,
+                timeline_scroll: 0,
+                command_selection: 0,
+            }),
+            ..Application::default()
+        };
+
+        application
+            .backend_error("agent runtime unavailable".to_owned())
+            .expect("surface update");
+
+        assert!(!application.agent_surface.as_ref().expect("surface").loading);
+        assert_eq!(
+            application.message.as_deref(),
+            Some("agent runtime unavailable")
         );
     }
 }

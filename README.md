@@ -69,7 +69,10 @@ GUI binary or set `MUX_STATE_DIR`. See
 
 Press `Shift+Command+A` to open the agent surface. With no existing sessions,
 choose an agent and press Enter or click Start. Working directory defaults to
-the focused pane's live directory.
+the focused pane's live directory. Built-in adapters are exact-version ACP
+packages downloaded and cached by `npx` on first use, so Node.js must be
+available in the daemon's `PATH`. If it is not, the launcher stays retryable
+and shows the required fix instead of leaving a half-created agent session.
 
 The composer accepts normal ACP prompts and a small local command layer:
 

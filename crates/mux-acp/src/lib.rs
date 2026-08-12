@@ -5,6 +5,7 @@
 //! protocol types out of the daemon IPC and native UI.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -129,19 +130,20 @@ pub fn built_in_agent_profiles() -> Vec<AgentProfile> {
         AgentProfile {
             id: "codex-acp".to_owned(),
             name: "Codex".to_owned(),
-            description: "OpenAI Codex through the official ACP adapter".to_owned(),
+            description: "Official ACP adapter · downloaded and cached on first use".to_owned(),
             spec: AgentSpec::codex(),
         },
         AgentProfile {
             id: "claude-acp".to_owned(),
             name: "Claude Agent".to_owned(),
-            description: "Anthropic Claude Agent through ACP".to_owned(),
+            description: "Claude Agent ACP adapter · downloaded and cached on first use".to_owned(),
             spec: AgentSpec::claude(),
         },
         AgentProfile {
             id: "gemini".to_owned(),
             name: "Gemini CLI".to_owned(),
-            description: "Google Gemini CLI in native ACP mode".to_owned(),
+            description: "Gemini CLI native ACP mode · downloaded and cached on first use"
+                .to_owned(),
             spec: AgentSpec::gemini(),
         },
     ]
@@ -601,6 +603,7 @@ impl AgentManager {
             )));
         }
         let prepared = spec.prepare()?;
+        ensure_agent_command_available(spec)?;
         let session_id = AgentSessionId::new();
         let snapshot = AgentSessionSnapshot {
             id: session_id,
@@ -1638,6 +1641,8 @@ pub enum AgentError {
     InvalidSpec(String),
     #[error("invalid working directory: {0}")]
     InvalidWorkingDirectory(String),
+    #[error("agent runtime unavailable: {0}")]
+    RuntimeUnavailable(String),
     #[error("agent session not found: {0}")]
     SessionNotFound(AgentSessionId),
     #[error("agent session is closed: {0}")]
@@ -1648,6 +1653,84 @@ pub enum AgentError {
     EmptyPrompt,
     #[error("ACP connection failed: {0}")]
     Protocol(String),
+}
+
+fn ensure_agent_command_available(spec: &AgentSpec) -> Result<(), AgentError> {
+    if find_agent_command(&spec.command, &spec.environment).is_some() {
+        return Ok(());
+    }
+    let command = spec.command.display();
+    let message = if spec.command == Path::new("npx") {
+        format!(
+            "could not find `{command}` in PATH; install Node.js (which includes npx), then start {} again",
+            spec.name
+        )
+    } else {
+        format!(
+            "could not find executable `{command}` in PATH; install it or update this agent's command"
+        )
+    };
+    Err(AgentError::RuntimeUnavailable(message))
+}
+
+fn find_agent_command(command: &Path, environment: &[(String, String)]) -> Option<PathBuf> {
+    if command.components().count() > 1 {
+        return executable_file(command).then(|| command.to_path_buf());
+    }
+    let search_path = environment
+        .iter()
+        .rev()
+        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+        .map(|(_, value)| OsString::from(value))
+        .or_else(|| std::env::var_os("PATH"))?;
+    let extensions = executable_extensions();
+    std::env::split_paths(&search_path).find_map(|directory| {
+        extensions.iter().find_map(|extension| {
+            let mut filename = command.as_os_str().to_os_string();
+            filename.push(extension);
+            let candidate = directory.join(filename);
+            executable_file(&candidate).then_some(candidate)
+        })
+    })
+}
+
+#[cfg(windows)]
+fn executable_extensions() -> Vec<OsString> {
+    std::env::var_os("PATHEXT").map_or_else(
+        || vec![OsString::from(".COM"), OsString::from(".EXE")],
+        |extensions| {
+            extensions
+                .to_string_lossy()
+                .split(';')
+                .filter(|extension| !extension.is_empty())
+                .map(OsString::from)
+                .chain(std::iter::once(OsString::new()))
+                .collect()
+        },
+    )
+}
+
+#[cfg(not(windows))]
+fn executable_extensions() -> [OsString; 1] {
+    [OsString::new()]
+}
+
+fn executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -1720,6 +1803,25 @@ mod tests {
             prepared.arguments(),
             ["-y", "@agentclientprotocol/codex-acp@1.2.0"]
         );
+    }
+
+    #[test]
+    fn unavailable_agent_runtime_is_reported_before_session_start() {
+        let spec = AgentSpec {
+            name: "Unavailable test agent".to_owned(),
+            command: PathBuf::from("mux-definitely-missing-agent-runtime"),
+            args: Vec::new(),
+            environment: vec![("PATH".to_owned(), String::new())],
+        };
+        let error = ensure_agent_command_available(&spec).expect_err("missing runtime");
+        assert!(matches!(error, AgentError::RuntimeUnavailable(_)));
+        assert!(error.to_string().contains("could not find executable"));
+
+        let manager = AgentManager::new();
+        manager
+            .start(&spec, std::env::current_dir().expect("current directory"))
+            .expect_err("session start must fail synchronously");
+        assert!(manager.list().is_empty());
     }
 
     #[test]
