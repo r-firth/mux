@@ -5,6 +5,10 @@
 
 #include <ghostty/vt.h>
 
+#ifndef MUX_VERSION
+#define MUX_VERSION "dev"
+#endif
+
 typedef void *mux_ghostty_terminal_t;
 typedef void *mux_ghostty_renderer_t;
 typedef void *mux_ghostty_response_collector_t;
@@ -204,7 +208,7 @@ static GhosttyString on_xtversion(
     void *userdata) {
   (void)terminal;
   (void)userdata;
-  static const uint8_t version[] = "mux 0.1.0";
+  static const uint8_t version[] = "mux " MUX_VERSION;
   GhosttyString result = {version, sizeof(version) - 1};
   return result;
 }
