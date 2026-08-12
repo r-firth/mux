@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gpui::{
     App, Bounds, Font, Hsla, IntoElement, Pixels, ShapedLine, StrikethroughStyle, Styled, TextRun,
-    UnderlineStyle, Window, canvas, fill, font, point, px, size,
+    TextSystem, UnderlineStyle, Window, canvas, fill, font, point, px, size,
 };
 use mux_terminal::{CellStyle, CellWidth, CursorStyle, RenderCell, RenderFrame, Rgb};
 
@@ -24,14 +24,20 @@ pub struct GridPadding {
 }
 
 impl GridMetrics {
-    pub fn from_font(font_size: f32) -> Self {
-        // GPUI reports text advances during prepaint, after layout has already
-        // happened. A stable 0.6em terminal advance is the correct initial
-        // grid contract for the monospace faces Mux supports and avoids a
-        // resize feedback loop. The rendered runs are still positioned on
-        // exact cell boundaries, so fallback glyphs cannot move later cells.
+    pub fn from_font(font_family: &str, font_size: f32, text_system: &TextSystem) -> Self {
+        let font_id = text_system.resolve_font(&font(font_family.to_owned()));
+        let measured_advance = text_system
+            .advance(font_id, px(font_size), '0')
+            .ok()
+            .map(|advance| f32::from(advance.width))
+            .filter(|advance| advance.is_finite() && *advance > 0.0);
+
+        // The PTY, libghostty replica, cursor, backgrounds, and GPUI glyph
+        // origins must all share the resolved face's exact advance. Rounding
+        // this value (or assuming the usual 0.6em) accumulates visible error
+        // across long runs and makes right-aligned prompts drift.
         Self {
-            cell_width: (font_size * 0.6 * 2.0).round() / 2.0,
+            cell_width: measured_advance.unwrap_or(font_size * 0.6),
             cell_height: (font_size * 1.42 * 2.0).round() / 2.0,
             font_size,
             padding_x: 2.0,
