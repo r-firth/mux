@@ -17,6 +17,6 @@ MUX_ZIG=/path/to/zig cargo clippy --workspace --all-targets --features mux/produ
 ```
 
 Use [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`,
-`fix:`, `perf:`, and so on). release-plz turns those commits into a versioned
-release PR and changelog; merging that PR creates the GitHub release and its
-macOS artifacts.
+`fix:`, `perf:`, and so on). Release Please turns those commits into a versioned
+release PR and changelog; merging that PR and passing CI creates the GitHub
+release and its macOS artifacts.

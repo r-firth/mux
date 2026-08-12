@@ -117,10 +117,10 @@ MUX_ZIG=/path/to/zig cargo test -p mux-daemon --features ghostty-vendored --all-
 ## Releases
 
 CI runs formatting, tests, Clippy, the vendored Ghostty product build, and a
-macOS bundle smoke check. Conventional Commits feed release-plz; merging its
-release PR creates a GitHub release, then Apple Silicon and Intel app archives
-plus SHA-256 checksums are built and attached automatically. Local archives can
-be created with:
+macOS bundle smoke check. Conventional Commits feed Release Please; merging its
+release PR and passing CI creates a GitHub release, then Apple Silicon and Intel
+app archives plus portable SHA-256 checksums are built and attached
+automatically. Local archives can be created with:
 
 ```sh
 MUX_ZIG=/path/to/zig scripts/package-macos.sh

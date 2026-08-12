@@ -14,7 +14,7 @@ mkdir -p "$distribution_dir"
 archive_path="$distribution_dir/$archive_name.zip"
 checksum_path="$archive_path.sha256"
 ditto -c -k --sequesterRsrc --keepParent "$app_path" "$archive_path"
-shasum -a 256 "$archive_path" > "$checksum_path"
+(cd "$distribution_dir" && shasum -a 256 "$archive_name.zip" > "$archive_name.zip.sha256")
 
 echo "$archive_path"
 echo "$checksum_path"
