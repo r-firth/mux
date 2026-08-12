@@ -60,7 +60,7 @@
         {
           "type": "toml",
           "path": "Cargo.lock",
-          "jsonpath": "$.package[?(@.name == 'mux' || @.name == 'muxctl' || @.name == 'mux-acp' || @.name == 'mux-client' || @.name == 'mux-daemon' || @.name == 'mux-protocol' || @.name == 'mux-terminal' || @.name == 'mux-terminal-ghostty' || @.name == 'mux-workspace')].version"
+          "jsonpath": "$.package[?(@.name.value == 'mux' || @.name.value == 'muxctl' || @.name.value == 'mux-acp' || @.name.value == 'mux-client' || @.name.value == 'mux-daemon' || @.name.value == 'mux-protocol' || @.name.value == 'mux-terminal' || @.name.value == 'mux-terminal-ghostty' || @.name.value == 'mux-workspace')].version"
         }
       ]
     }
