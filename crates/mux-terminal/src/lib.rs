@@ -125,6 +125,14 @@ impl TerminalScrollState {
 
 pub trait TerminalRenderer {
     fn render_frame(&mut self) -> Result<RenderFrame, TerminalError>;
+
+    /// Refresh an existing owned frame. Backends may override this to retain
+    /// viewport and grapheme allocations across frames; the default preserves
+    /// compatibility for renderers without reusable storage.
+    fn render_frame_into(&mut self, frame: &mut RenderFrame) -> Result<(), TerminalError> {
+        *frame = self.render_frame()?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
