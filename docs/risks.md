@@ -85,7 +85,9 @@ and has been exercised for prompt streaming, tool calls, mode and reasoning
 configuration, permission rejection, explicit context, GUI detach/reattach,
 process termination, and live agent-advertised slash commands. Launch recipes
 are pinned to versions observed in the official ACP registry so a package
-update cannot silently change a released Mux build.
+update cannot silently change a released Mux build. Streaming snapshot changes
+are coalesced at the native redraw boundary, so token deltas do not repeatedly
+reshape the agent surface between display frames or starve terminal rendering.
 
 Authentication remains owned by each agent. Existing Codex credentials are
 inherited by its external process. For fresh installs, Mux now persists the

@@ -167,6 +167,7 @@ struct Application {
     session: Option<Session>,
     panes: HashMap<PaneId, PaneReplica>,
     dirty_panes: HashSet<PaneId>,
+    view_dirty: bool,
     geometry: WorkspaceGeometry,
     sent_sizes: HashMap<PaneId, TerminalSize>,
     keymap: Keymap,
@@ -209,6 +210,7 @@ impl Default for Application {
             session: None,
             panes: HashMap::new(),
             dirty_panes: HashSet::new(),
+            view_dirty: false,
             geometry: WorkspaceGeometry::default(),
             sent_sizes: HashMap::new(),
             keymap: Keymap::zellij_default(),
@@ -324,7 +326,10 @@ impl Application {
                 self.refresh_view()?;
             }
             ServerEvent::ResyncRequired { .. } | ServerEvent::WorkspaceChanged { .. } => {}
-            ServerEvent::Agent(event) => return self.apply_agent_event(&event),
+            ServerEvent::Agent(event) => {
+                self.apply_agent_event(&event);
+                return Ok(());
+            }
             ServerEvent::AgentResyncRequired => {
                 if let Some(backend) = &self.backend {
                     backend.send(CommandMessage::ListAgents);
@@ -334,7 +339,7 @@ impl Application {
         Ok(())
     }
 
-    fn replace_agents(&mut self, agents: Vec<AgentSessionSnapshot>) -> Result<()> {
+    fn replace_agents(&mut self, agents: Vec<AgentSessionSnapshot>) {
         self.agents = agents;
         if let Some(surface) = &mut self.agent_surface {
             surface.loading = false;
@@ -346,7 +351,7 @@ impl Application {
                 });
             }
         }
-        self.refresh_view()
+        self.schedule_view_refresh();
     }
 
     fn agent_started(&mut self, agent: AgentSessionSnapshot) -> Result<()> {
@@ -364,7 +369,7 @@ impl Application {
         self.refresh_view()
     }
 
-    fn apply_agent_event(&mut self, event: &AgentEvent) -> Result<()> {
+    fn apply_agent_event(&mut self, event: &AgentEvent) {
         let found = self
             .agents
             .iter_mut()
@@ -375,7 +380,7 @@ impl Application {
             if let Some(backend) = &self.backend {
                 backend.send(CommandMessage::ListAgents);
             }
-            return Ok(());
+            return;
         }
         if matches!(
             event,
@@ -414,7 +419,7 @@ impl Application {
                 _ => {}
             }
         }
-        self.refresh_view()
+        self.schedule_view_refresh();
     }
 
     fn sync_view(&mut self, changed_panes: &HashSet<PaneId>) -> Result<()> {
@@ -513,12 +518,18 @@ impl Application {
 
     fn refresh_view(&mut self) -> Result<()> {
         self.sync_view(&HashSet::new())?;
+        self.view_dirty = false;
         self.request_redraw();
         Ok(())
     }
 
+    fn schedule_view_refresh(&mut self) {
+        self.view_dirty = true;
+        self.request_redraw();
+    }
+
     fn flush_terminal_frames(&mut self) -> Result<()> {
-        if self.dirty_panes.is_empty() {
+        if self.dirty_panes.is_empty() && !self.view_dirty {
             return Ok(());
         }
         let changed_panes = std::mem::take(&mut self.dirty_panes);
@@ -530,7 +541,9 @@ impl Application {
         let reset_cursor = std::mem::take(&mut self.cursor_blink.reset_pending);
         self.sync_cursor_blink(reset_cursor);
         self.update_hyperlink_hover();
-        self.sync_view(&changed_panes)
+        self.sync_view(&changed_panes)?;
+        self.view_dirty = false;
+        Ok(())
     }
 
     fn focused_cursor_blinks(&self) -> bool {
@@ -2697,9 +2710,15 @@ impl ApplicationHandler<UserEvent> for Application {
                 self.refresh_view()
             }
             UserEvent::Server(event) => self.apply_server_event(event),
-            UserEvent::Agents(agents) => self.replace_agents(agents),
+            UserEvent::Agents(agents) => {
+                self.replace_agents(agents);
+                Ok(())
+            }
             UserEvent::AgentStarted(agent) => self.agent_started(agent),
-            UserEvent::Agent(event) => self.apply_agent_event(&event),
+            UserEvent::Agent(event) => {
+                self.apply_agent_event(&event);
+                Ok(())
+            }
             UserEvent::BackendError(message) => {
                 self.message = Some(message);
                 self.refresh_view()
@@ -2761,7 +2780,7 @@ impl ApplicationHandler<UserEvent> for Application {
             }
             WindowEvent::RedrawRequested => {
                 if self.advance_ui_animation() {
-                    let _ = self.sync_view(&HashSet::new());
+                    self.view_dirty = true;
                     self.request_redraw();
                 }
                 if let Err(error) = self.flush_terminal_frames() {
