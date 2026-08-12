@@ -8,7 +8,8 @@ sessions through the same stable Agent Client Protocol used by Zed.
 ## What works now
 
 - A persistent daemon owns sessions and real PTY-backed processes.
-- The native macOS GUI renders pinned libghostty state with `wgpu` and `glyphon`.
+- The native macOS GUI is built with GPUI and `gpui-component`; a focused GPUI
+  canvas renders pinned libghostty state without a second windowing stack.
 - A session contains tabs, split layouts, and independent terminal panes.
 - Clients attach through a versioned, length-delimited local protocol.
 - Closing the GUI leaves shells alive; reopening restores Ghostty checkpoints
@@ -20,34 +21,30 @@ sessions through the same stable Agent Client Protocol used by Zed.
   panes and across tabs at horizontal edges. Normal terminal input reserves no
   other application shortcuts, so Vim keybindings pass through unchanged.
 - The primary `font-family` and `font-size` follow the user's Ghostty config,
-  with a bundled JetBrains Mono Nerd Font as the portable default. Grid,
-  cursor, PTY, mouse, and selection geometry all derive from the resolved
-  face's measured advance; system fallback covers Unicode, CJK, and emoji.
+  with a bundled JetBrains Mono Nerd Font as the portable default. Text runs,
+  cursor, PTY, mouse, and selection geometry share one exact cell grid; wide
+  and fallback glyphs are anchored so they cannot shift later columns.
 - Ghostty owns mode-aware key, paste, scrollback, mouse-protocol, and selection
   gesture semantics—including word/line clicks, directional dragging, block
   selection, and autoscroll. The GUI supplies native input and scheduling; Shift
   temporarily releases mouse-reporting applications for local selection/scroll.
-- OSC 8 hyperlinks come directly from Ghostty cell state. Hold Command to reveal
-  a link with native pointer feedback and Command-click it without interfering
-  with ordinary terminal mouse input.
 - Ghostty-compatible background, foreground, cursor, palette, primary font,
-  and font size are loaded from the current user configuration; terminal RGB
-  is rendered in the correct sRGB colour space. Cursor visibility and
-  DECSCUSR/DEC blink policy come from Ghostty, with its 600 ms cadence and
-  activity/focus resets scheduled natively.
+  and font size are loaded from the current user configuration. Terminal RGB,
+  cell attributes, selection, and cursor style come from libghostty render
+  frames rather than a second VT implementation.
 - Terminal and ACP integrations have explicit internal boundaries.
 - New panes and tabs start in the focused shell's live working directory; a
   brand-new workspace starts in the user's home directory.
 - `Shift+Command+S` opens a lightweight session surface for creating,
   attaching, renaming, and explicitly killing daemon-owned sessions.
-- A native, animated agent surface launches Codex, Claude Agent, or Gemini as
-  external ACP processes without turning the terminal into an IDE.
+- A native, animated agent sheet launches Codex, Claude Agent, Gemini CLI, or
+  GitHub Copilot CLI as external ACP processes without turning the terminal
+  into an IDE. Integrations can be enabled independently in Settings.
 - Agent sessions survive closing the GUI, stream conversation/tool/plan state,
   expose agent-provided model, effort, and mode controls, and present permission
   decisions in the application.
-- Pane context is explicit and opt-in: attach selected text or the focused
-  terminal viewport to a prompt, with untrusted-context boundaries at the ACP
-  adapter.
+- Pane context is explicit: the focused terminal viewport can be attached to a
+  prompt or disabled, with untrusted-context boundaries at the ACP adapter.
 
 See [the architecture](docs/architecture.md) and
 [validated risks](docs/risks.md).
@@ -70,9 +67,9 @@ GUI binary or set `MUX_STATE_DIR`. See
 
 ## Agents
 
-Press `Shift+Command+A` to open the agent surface. With no existing sessions,
-choose an agent and press Enter or click Start. Working directory defaults to
-the focused pane's live directory. Built-in adapters are exact-version ACP
+Press `Shift+Command+A` or the agent button to open the agent sheet. With no
+existing sessions, choose an agent. Working directory defaults to the focused
+pane's live directory and can be overridden before launch. Built-in adapters are exact-version ACP
 packages downloaded and cached by `npx` on first use, so Node.js must be
 available in the daemon's `PATH`. If it is not, the launcher stays retryable
 and shows the required fix instead of leaving a half-created agent session.
@@ -82,29 +79,23 @@ The composer accepts normal ACP prompts and a small local command layer:
 | Command | Action |
 | --- | --- |
 | `/new [agent]` | Start a new ACP session (Codex by default) |
-| `/agents` | Return to existing sessions |
-| `/cwd [path]` | Inspect or override the next session's directory |
-| `/context none\|selection\|pane` | Choose explicit terminal context |
-| `/login [method]` | Run an agent-advertised ACP sign-in method |
+| `/context none\|pane` | Choose explicit terminal context |
 | `/model [value]` | Inspect or change the ACP model option |
 | `/effort [value]` | Inspect or change reasoning effort |
 | `/mode [value]` | Inspect or change the ACP session mode |
-| `/config <id> <value>` | Change any other agent-provided option |
-| `/end` | End the selected session after a second confirmation |
+| `/cancel` | Cancel the active turn |
+| `/end` | End the selected session |
+| `/help` | Show the local command summary |
 
-Typing `/` opens a compact command palette that merges Mux lifecycle commands
-with the selected agent's live ACP `available_commands_update` catalog. Arrow
-keys choose and Tab completes; unknown slash commands are still sent to the
-agent, preserving its native command vocabulary. Page Up/Down or the mouse
-wheel navigates conversation history. Permission choices work with number keys
-or the mouse. `Shift+Enter` inserts a newline, `Command+V` pastes, and
-`Ctrl+U` or `Command+Backspace` clears the composer.
+Unknown slash commands are sent to the agent, preserving its native command
+vocabulary. Conversation history scrolls independently. Permission requests,
+agent modes, model, effort, authentication methods, cancellation, and session
+end controls are presented with native components.
 
-If an agent rejects session creation with ACP `auth_required`, the surface
-keeps the process alive, presents a sign-in-required state, and lets `/login`
-run one of the stable agent-owned methods advertised during initialization.
-Mux never asks for or stores the credential in this flow; the external agent
-owns its browser or other sign-in interaction.
+If an agent rejects session creation with ACP `auth_required`, the sheet keeps
+the process alive and presents the stable agent-owned sign-in methods advertised
+during initialization. Mux never asks for or stores the credential in this
+flow; the external agent owns its browser or other sign-in interaction.
 
 ## Diagnostic CLI
 

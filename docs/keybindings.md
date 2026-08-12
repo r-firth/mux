@@ -14,7 +14,7 @@ the GUI and daemon do not hardcode key behavior into workspace mutations.
 | `Option+l` / `Option+Right` | Focus right pane, or next tab at the edge |
 | `Option+j` / `Option+Down` | Focus pane below |
 | `Option+k` / `Option+Up` | Focus pane above |
-| `Shift+Command+A` | Toggle the native ACP agent surface |
+| `Shift+Command+A` | Open the native ACP agent surface |
 | `Shift+Command+S` | Open the native session switcher |
 
 `Alt` is the same modifier as `Option` on macOS. Shared bindings remain active
@@ -52,15 +52,13 @@ Normal-mode `Ctrl+n` from Vim and other terminal applications.
 | `r` | Rename the active tab |
 | `x` | Close the active tab and return to Normal |
 
-The session switcher attaches with Enter or a number key. `n` creates and
-attaches a session in the focused pane's live working directory, `r` renames,
-and `x` asks for a second press before killing the selected session. Zellij's
-`Ctrl+o` session prefix intentionally has no Normal-mode binding yet. This keeps
-foreground Control-key input untouched except for `Ctrl+p` and `Ctrl+t`.
+The session dialog exposes create, attach, rename, and confirmed kill actions.
+Zellij's `Ctrl+o` session prefix intentionally has no Normal-mode binding yet.
+This keeps foreground Control-key input untouched except for `Ctrl+p` and
+`Ctrl+t`.
 
 The agent surface is an application-level overlay rather than a terminal mode.
-While open, Escape or `Shift+Command+A` closes it, `Ctrl+c` cancels the active
-turn, Page Up/Down navigates history, and number keys answer a visible
-permission request. `Shift+Enter` inserts a newline, `Command+V` pastes, and
-`Ctrl+U` or `Command+Backspace` clears the composer. Its slash commands and
-agent-advertised command palette are documented in the README.
+Escape or its close button dismisses it without ending the agent session.
+Conversation, configuration, authentication, cancellation, end-session, and
+permission actions use the native sheet controls. Its local slash commands are
+documented in the README.
