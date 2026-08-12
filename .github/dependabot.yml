@@ -7,6 +7,17 @@ updates:
     groups:
       rust-dependencies:
         patterns: ["*"]
+    ignore:
+      # These packages sit directly on latency-, rendering-, or MSRV-critical
+      # paths. Upgrade them deliberately with native-product validation.
+      - dependency-name: glyphon
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: pollster
+        update-types: ["version-update:semver-major"]
+      - dependency-name: sysinfo
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: wgpu
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
