@@ -17,7 +17,7 @@ use layout::WorkspaceGeometry;
 use mux_acp::{
     AgentConfigCategory, AgentConfigValue, AgentConfigValueSelection, AgentContext,
     AgentContextKind, AgentEvent, AgentProfile, AgentPrompt, AgentSessionSnapshot,
-    AgentSessionStatus, built_in_agent_profiles,
+    AgentSessionStatus, AgentSlashCommand, built_in_agent_profiles,
 };
 use mux_protocol::{ServerEvent, SessionAttachment, SessionSummary};
 use mux_terminal::{
@@ -34,6 +34,7 @@ use mux_workspace::{
 };
 use render::{
     AgentLauncherView, AgentSurfaceView, Renderer, SessionSwitcherView, TextPromptView, UiState,
+    agent_composer_height,
 };
 use tracing::{error, info};
 use unicode_segmentation::UnicodeSegmentation;
@@ -81,7 +82,24 @@ struct AgentSurface {
     context: AgentContextMode,
     pending_end: Option<mux_workspace::AgentSessionId>,
     timeline_scroll: usize,
+    command_selection: usize,
 }
+
+const MUX_AGENT_COMMANDS: &[(&str, &str)] = &[
+    ("new", "Start a new persistent agent session"),
+    ("agents", "Return to running agent sessions"),
+    ("cwd", "Inspect or set the next agent working directory"),
+    (
+        "context",
+        "Attach no context, selected text, or the focused pane",
+    ),
+    ("model", "Inspect or select an agent-advertised model"),
+    ("effort", "Inspect or select reasoning effort"),
+    ("mode", "Inspect or select the agent mode"),
+    ("config", "Set another agent-advertised option"),
+    ("end", "End the selected persistent agent session"),
+    ("help", "Show Mux agent commands"),
+];
 
 struct AgentLauncher {
     selected_profile: usize,
@@ -415,6 +433,7 @@ impl Application {
             }
         }
 
+        let command_suggestions = self.agent_command_suggestions();
         let frames = self
             .panes
             .iter()
@@ -462,6 +481,10 @@ impl Application {
                     context_label: surface.context.label(),
                     notice: self.message.as_deref(),
                     timeline_scroll: surface.timeline_scroll,
+                    command_suggestions: &command_suggestions,
+                    command_selection: surface
+                        .command_selection
+                        .min(command_suggestions.len().saturating_sub(1)),
                 }),
                 ime_preedit: (!self.ime_preedit.is_empty()).then_some(self.ime_preedit.as_str()),
                 hovered_hyperlink: self
@@ -800,18 +823,14 @@ impl Application {
             return;
         }
 
-        let active_id = self
-            .agent_surface
-            .as_ref()
-            .filter(|surface| surface.launcher.is_none())
-            .and_then(|surface| self.agents.get(surface.selected))
-            .map(|agent| agent.id);
+        if self.handle_agent_composer_shortcut(&key) {
+            return;
+        }
+
         if self.modifiers.control_key()
             && matches!(key, Key::Character(ref value) if value.eq_ignore_ascii_case("c"))
         {
-            if let (Some(backend), Some(session_id)) = (&self.backend, active_id) {
-                backend.send(CommandMessage::CancelAgent(session_id));
-            }
+            self.cancel_active_agent();
             return;
         }
 
@@ -831,20 +850,25 @@ impl Application {
             Key::Named(NamedKey::Backspace) => {
                 if let Some(surface) = &mut self.agent_surface {
                     pop_grapheme(&mut surface.draft);
+                    surface.command_selection = 0;
                 }
                 let _ = self.refresh_view();
             }
             Key::Named(NamedKey::ArrowUp) => {
-                if let Some(surface) = &mut self.agent_surface
-                    && surface.draft.is_empty()
-                {
-                    if let Some(launcher) = &mut surface.launcher {
+                let suggestion_count = self.agent_command_suggestions().len();
+                if let Some(surface) = &mut self.agent_surface {
+                    if suggestion_count > 0 {
+                        surface.command_selection =
+                            (surface.command_selection + suggestion_count - 1) % suggestion_count;
+                    } else if surface.draft.is_empty()
+                        && let Some(launcher) = &mut surface.launcher
+                    {
                         if !self.agent_profiles.is_empty() {
                             launcher.selected_profile =
                                 (launcher.selected_profile + self.agent_profiles.len() - 1)
                                     % self.agent_profiles.len();
                         }
-                    } else if !self.agents.is_empty() {
+                    } else if surface.draft.is_empty() && !self.agents.is_empty() {
                         surface.selected =
                             (surface.selected + self.agents.len() - 1) % self.agents.len();
                         surface.timeline_scroll = 0;
@@ -852,16 +876,21 @@ impl Application {
                 }
                 let _ = self.refresh_view();
             }
+            Key::Named(NamedKey::Tab) if self.complete_agent_slash_command() => {}
             Key::Named(NamedKey::ArrowDown | NamedKey::Tab) => {
-                if let Some(surface) = &mut self.agent_surface
-                    && surface.draft.is_empty()
-                {
-                    if let Some(launcher) = &mut surface.launcher {
+                let suggestion_count = self.agent_command_suggestions().len();
+                if let Some(surface) = &mut self.agent_surface {
+                    if suggestion_count > 0 {
+                        surface.command_selection =
+                            (surface.command_selection + 1) % suggestion_count;
+                    } else if surface.draft.is_empty()
+                        && let Some(launcher) = &mut surface.launcher
+                    {
                         if !self.agent_profiles.is_empty() {
                             launcher.selected_profile =
                                 (launcher.selected_profile + 1) % self.agent_profiles.len();
                         }
-                    } else if !self.agents.is_empty() {
+                    } else if surface.draft.is_empty() && !self.agents.is_empty() {
                         surface.selected = (surface.selected + 1) % self.agents.len();
                         surface.timeline_scroll = 0;
                     }
@@ -878,12 +907,130 @@ impl Application {
                 }) {
                     if let Some(surface) = &mut self.agent_surface {
                         surface.draft.push_str(text);
+                        surface.command_selection = 0;
                     }
                     let _ = self.refresh_view();
                 }
             }
             _ => {}
         }
+    }
+
+    fn cancel_active_agent(&self) {
+        let session_id = self
+            .agent_surface
+            .as_ref()
+            .filter(|surface| surface.launcher.is_none())
+            .and_then(|surface| self.agents.get(surface.selected))
+            .map(|agent| agent.id);
+        if let (Some(backend), Some(session_id)) = (&self.backend, session_id) {
+            backend.send(CommandMessage::CancelAgent(session_id));
+        }
+    }
+
+    fn handle_agent_composer_shortcut(&mut self, key: &Key) -> bool {
+        if self.modifiers.super_key()
+            && matches!(key, Key::Character(value) if value.eq_ignore_ascii_case("v"))
+        {
+            match self
+                .clipboard
+                .as_mut()
+                .ok_or_else(|| anyhow!("system clipboard is unavailable"))
+                .and_then(|clipboard| clipboard.get_text().context("read system clipboard"))
+            {
+                Ok(text) => {
+                    if let Some(surface) = &mut self.agent_surface {
+                        surface.draft.push_str(&text);
+                        surface.command_selection = 0;
+                    }
+                    self.message = None;
+                }
+                Err(error) => self.message = Some(format!("{error:#}")),
+            }
+        } else if (self.modifiers.control_key()
+            && matches!(key, Key::Character(value) if value.eq_ignore_ascii_case("u")))
+            || (self.modifiers.super_key() && matches!(key, Key::Named(NamedKey::Backspace)))
+        {
+            if let Some(surface) = &mut self.agent_surface {
+                surface.draft.clear();
+                surface.command_selection = 0;
+            }
+        } else if self.modifiers.shift_key() && matches!(key, Key::Named(NamedKey::Enter)) {
+            if let Some(surface) = &mut self.agent_surface {
+                surface.draft.push('\n');
+                surface.command_selection = 0;
+            }
+        } else {
+            return false;
+        }
+        let _ = self.refresh_view();
+        true
+    }
+
+    fn agent_command_suggestions(&self) -> Vec<AgentSlashCommand> {
+        let Some(surface) = &self.agent_surface else {
+            return Vec::new();
+        };
+        let Some(command) = surface.draft.strip_prefix('/') else {
+            return Vec::new();
+        };
+        if command.chars().any(char::is_whitespace) {
+            return Vec::new();
+        }
+        if surface.launcher.is_some() {
+            return Vec::new();
+        }
+        let Some(agent) = self.agents.get(surface.selected) else {
+            return Vec::new();
+        };
+        if agent.pending_permission().is_some() {
+            return Vec::new();
+        }
+        let prefix = command.to_ascii_lowercase();
+        let mut commands = Vec::new();
+        let mut seen = HashSet::new();
+
+        for advertised in &agent.available_commands {
+            let name = advertised.name.trim_start_matches('/');
+            let normalized = name.to_ascii_lowercase();
+            if normalized.starts_with(&prefix)
+                && !MUX_AGENT_COMMANDS
+                    .iter()
+                    .any(|(local, _)| local.eq_ignore_ascii_case(name))
+                && seen.insert(normalized)
+            {
+                commands.push(AgentSlashCommand {
+                    name: name.to_owned(),
+                    description: advertised.description.clone(),
+                });
+            }
+        }
+
+        for &(name, description) in MUX_AGENT_COMMANDS {
+            let normalized = name.to_ascii_lowercase();
+            if normalized.starts_with(&prefix) && seen.insert(normalized) {
+                commands.push(AgentSlashCommand {
+                    name: name.to_owned(),
+                    description: description.to_owned(),
+                });
+            }
+        }
+        commands.truncate(8);
+        commands
+    }
+
+    fn complete_agent_slash_command(&mut self) -> bool {
+        let suggestions = self.agent_command_suggestions();
+        let Some(surface) = &mut self.agent_surface else {
+            return false;
+        };
+        let Some(command) = suggestions.get(surface.command_selection) else {
+            return false;
+        };
+        surface.draft = format!("/{} ", command.name);
+        surface.command_selection = 0;
+        let _ = self.refresh_view();
+        true
     }
 
     fn permission_choice(
@@ -924,6 +1071,7 @@ impl Application {
         if draft.starts_with('/') && self.handle_agent_slash_command(&draft) {
             if let Some(surface) = &mut self.agent_surface {
                 surface.draft.clear();
+                surface.command_selection = 0;
             }
             let _ = self.refresh_view();
             return;
@@ -973,6 +1121,7 @@ impl Application {
                     surface.draft.clear();
                     surface.pending_end = None;
                     surface.timeline_scroll = 0;
+                    surface.command_selection = 0;
                 }
                 if let Some(backend) = &self.backend {
                     backend.send(CommandMessage::PromptAgent {
@@ -1334,6 +1483,7 @@ impl Application {
             context: AgentContextMode::None,
             pending_end: None,
             timeline_scroll: 0,
+            command_selection: 0,
         });
         self.agent_surface_target = 1.0;
         self.last_animation_frame = Some(Instant::now());
@@ -1604,6 +1754,7 @@ impl Application {
         state: ElementState,
         button: MouseButton,
     ) -> bool {
+        let command_suggestions = self.agent_command_suggestions();
         let Some(surface) = &self.agent_surface else {
             return false;
         };
@@ -1684,7 +1835,26 @@ impl Application {
                 }
             }
         } else {
-            let composer_y = panel_y + panel_height - 80.0 * scale;
+            let composer_height = agent_composer_height(&surface.draft) * scale;
+            let composer_y = panel_y + panel_height - composer_height - 16.0 * scale;
+            if !command_suggestions.is_empty()
+                && x >= panel_x + 18.0 * scale
+                && x < window_width - 18.0 * scale
+            {
+                let palette_height = (28.0 + command_suggestions.len() as f32 * 30.0) * scale;
+                let palette_y = composer_y - palette_height - 8.0 * scale;
+                for (index, command) in command_suggestions.iter().enumerate() {
+                    let row_y = palette_y + (25.0 + index as f32 * 30.0) * scale;
+                    if y >= row_y && y < row_y + 27.0 * scale {
+                        if let Some(surface) = &mut self.agent_surface {
+                            surface.draft = format!("/{} ", command.name);
+                            surface.command_selection = 0;
+                        }
+                        let _ = self.refresh_view();
+                        return true;
+                    }
+                }
+            }
             if x >= window_width - 91.0 * scale
                 && x < window_width - 30.0 * scale
                 && y >= composer_y + 26.0 * scale
@@ -2547,6 +2717,7 @@ impl ApplicationHandler<UserEvent> for Application {
                 self.ime_preedit.clear();
                 if let Some(surface) = &mut self.agent_surface {
                     surface.draft.push_str(&text);
+                    surface.command_selection = 0;
                 }
                 let _ = self.refresh_view();
             }
@@ -3049,5 +3220,39 @@ mod input_tests {
         assert_eq!(earliest_deadline(Some(first), Some(second)), Some(first));
         assert_eq!(earliest_deadline(None, Some(second)), Some(second));
         assert_eq!(earliest_deadline(None, None), None);
+    }
+
+    #[test]
+    fn agent_composer_supports_clear_and_multiline_shortcuts() {
+        let mut application = Application {
+            agent_surface: Some(AgentSurface {
+                selected: 0,
+                draft: "first line".to_owned(),
+                loading: false,
+                launcher: None,
+                context: AgentContextMode::None,
+                pending_end: None,
+                timeline_scroll: 0,
+                command_selection: 3,
+            }),
+            ..Application::default()
+        };
+
+        application.modifiers = ModifiersState::CONTROL;
+        assert!(application.handle_agent_composer_shortcut(&Key::Character("u".into())));
+        let surface = application.agent_surface.as_ref().expect("agent surface");
+        assert!(surface.draft.is_empty());
+        assert_eq!(surface.command_selection, 0);
+
+        application.modifiers = ModifiersState::SHIFT;
+        assert!(application.handle_agent_composer_shortcut(&Key::Named(NamedKey::Enter)));
+        assert_eq!(
+            application
+                .agent_surface
+                .as_ref()
+                .expect("agent surface")
+                .draft,
+            "\n"
+        );
     }
 }

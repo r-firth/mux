@@ -85,9 +85,13 @@ The composer accepts normal ACP prompts and a small local command layer:
 | `/config <id> <value>` | Change any other agent-provided option |
 | `/end` | End the selected session after a second confirmation |
 
-Unknown slash commands are sent to the agent, preserving each agent's native
-command vocabulary. Page Up/Down or the mouse wheel navigates conversation
-history. Permission choices work with number keys or the mouse.
+Typing `/` opens a compact command palette that merges Mux lifecycle commands
+with the selected agent's live ACP `available_commands_update` catalog. Arrow
+keys choose and Tab completes; unknown slash commands are still sent to the
+agent, preserving its native command vocabulary. Page Up/Down or the mouse
+wheel navigates conversation history. Permission choices work with number keys
+or the mouse. `Shift+Enter` inserts a newline, `Command+V` pastes, and
+`Ctrl+U` or `Command+Backspace` clears the composer.
 
 ## Diagnostic CLI
 
