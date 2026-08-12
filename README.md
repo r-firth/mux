@@ -19,8 +19,10 @@ sessions through the same stable Agent Client Protocol used by Zed.
   UI-independent. `Ctrl+p d/r` splits down/right, Option+arrows move between
   panes and across tabs at horizontal edges. Normal terminal input reserves no
   other application shortcuts, so Vim keybindings pass through unchanged.
-- A bundled JetBrains Mono Nerd Font and system fallback cover shell glyphs,
-  Unicode, CJK, emoji, bold, italic, faint, and terminal decorations.
+- The primary `font-family` and `font-size` follow the user's Ghostty config,
+  with a bundled JetBrains Mono Nerd Font as the portable default. Grid,
+  cursor, PTY, mouse, and selection geometry all derive from the resolved
+  face's measured advance; system fallback covers Unicode, CJK, and emoji.
 - Ghostty owns mode-aware key, paste, scrollback, mouse-protocol, and selection
   gesture semantics—including word/line clicks, directional dragging, block
   selection, and autoscroll. The GUI supplies native input and scheduling; Shift
@@ -28,10 +30,11 @@ sessions through the same stable Agent Client Protocol used by Zed.
 - OSC 8 hyperlinks come directly from Ghostty cell state. Hold Command to reveal
   a link with native pointer feedback and Command-click it without interfering
   with ordinary terminal mouse input.
-- Ghostty-compatible background, foreground, cursor, and palette values are
-  loaded from the current user theme; terminal RGB is rendered in the correct
-  sRGB colour space. Cursor visibility and DECSCUSR/DEC blink policy come from
-  Ghostty, with its 600 ms cadence and activity/focus resets scheduled natively.
+- Ghostty-compatible background, foreground, cursor, palette, primary font,
+  and font size are loaded from the current user configuration; terminal RGB
+  is rendered in the correct sRGB colour space. Cursor visibility and
+  DECSCUSR/DEC blink policy come from Ghostty, with its 600 ms cadence and
+  activity/focus resets scheduled natively.
 - Terminal and ACP integrations have explicit internal boundaries.
 - New panes and tabs start in the focused shell's live working directory; a
   brand-new workspace starts in the user's home directory.

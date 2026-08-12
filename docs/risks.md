@@ -56,6 +56,17 @@ updates. It still copies cell fields before row shaping; measure that remaining
 copy under sustained output before considering a more incremental borrowed or
 delta API.
 
+Mux loads Ghostty's primary `font-family` and `font-size` settings at startup,
+resolves the requested local face in the native shaping database, and measures
+that face rather than assuming a fixed advance. The same resolved cell metrics
+drive rendering, cursor placement, pane sizing, PTY resize, mouse reporting,
+selection, and IME placement. An unavailable configured face falls back to the
+bundled JetBrains Mono Nerd Font, while the shaping stack retains system glyph
+fallback. Broader Ghostty font features such as per-style family overrides,
+variation axes, synthetic-style controls, and explicit fallback lists remain
+outside the supported configuration subset and should be added at this boundary
+rather than leaking font assumptions into workspace code.
+
 ## ACP
 
 ACP v1 is the current stable protocol; v2 is draft. The maintained Rust SDK is
