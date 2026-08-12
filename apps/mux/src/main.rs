@@ -122,6 +122,26 @@ struct SelectionDrag {
     autoscroll: TerminalSelectionAutoscroll,
 }
 
+struct CursorBlinkState {
+    visible: bool,
+    next: Option<Instant>,
+    last_reset: Option<Instant>,
+    reset_pending: bool,
+    window_focused: bool,
+}
+
+impl Default for CursorBlinkState {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            next: None,
+            last_reset: None,
+            reset_pending: false,
+            window_focused: true,
+        }
+    }
+}
+
 struct Application {
     renderer: Option<Renderer>,
     backend: Option<BackendHandle>,
@@ -144,6 +164,7 @@ struct Application {
     selection_gesture_pane: Option<PaneId>,
     next_selection_scroll: Option<Instant>,
     selection_clock_origin: Instant,
+    cursor_blink: CursorBlinkState,
     selected_pane: Option<PaneId>,
     clipboard: Option<arboard::Clipboard>,
     message: Option<String>,
@@ -185,6 +206,7 @@ impl Default for Application {
             selection_gesture_pane: None,
             next_selection_scroll: None,
             selection_clock_origin: Instant::now(),
+            cursor_blink: CursorBlinkState::default(),
             selected_pane: None,
             clipboard: arboard::Clipboard::new().ok(),
             message: None,
@@ -247,6 +269,7 @@ impl Application {
         let changed_panes = self.panes.keys().copied().collect();
         self.dirty_panes.clear();
         self.message = None;
+        self.sync_cursor_blink(true);
         self.sync_view(&changed_panes)?;
         self.request_redraw();
         Ok(())
@@ -263,6 +286,7 @@ impl Application {
                 if let Some(pane) = self.panes.get_mut(&pane_id) {
                     pane.engine.apply_output(sequence, &bytes)?;
                     self.dirty_panes.insert(pane_id);
+                    self.note_cursor_activity();
                     self.request_redraw();
                 }
             }
@@ -444,6 +468,7 @@ impl Application {
                     .hovered_hyperlink
                     .as_ref()
                     .map(|(pane_id, uri)| (*pane_id, uri.as_str())),
+                cursor_blink_visible: self.cursor_blink.visible,
             },
         );
         Ok(())
@@ -465,8 +490,59 @@ impl Application {
                 pane.frame = pane.engine.render_frame()?;
             }
         }
+        let reset_cursor = std::mem::take(&mut self.cursor_blink.reset_pending);
+        self.sync_cursor_blink(reset_cursor);
         self.update_hyperlink_hover();
         self.sync_view(&changed_panes)
+    }
+
+    fn focused_cursor_blinks(&self) -> bool {
+        self.cursor_blink.window_focused
+            && self
+                .focused_pane()
+                .and_then(|pane_id| self.panes.get(&pane_id))
+                .and_then(|pane| pane.frame.cursor)
+                .is_some_and(|cursor| cursor.visible && cursor.blinking)
+    }
+
+    fn sync_cursor_blink(&mut self, reset: bool) {
+        if !self.focused_cursor_blinks() {
+            self.cursor_blink.visible = true;
+            self.cursor_blink.next = None;
+            return;
+        }
+        if reset || self.cursor_blink.next.is_none() {
+            self.cursor_blink.visible = true;
+            self.cursor_blink.next = Some(Instant::now() + Duration::from_millis(600));
+        }
+    }
+
+    fn note_cursor_activity(&mut self) {
+        let now = Instant::now();
+        if self
+            .cursor_blink
+            .last_reset
+            .is_none_or(|last| now.duration_since(last) > Duration::from_millis(500))
+        {
+            self.cursor_blink.last_reset = Some(now);
+            self.cursor_blink.reset_pending = true;
+        }
+    }
+
+    fn advance_cursor_blink(&mut self) -> bool {
+        let Some(deadline) = self.cursor_blink.next else {
+            return false;
+        };
+        if Instant::now() < deadline {
+            return false;
+        }
+        if !self.focused_cursor_blinks() {
+            self.sync_cursor_blink(false);
+            return false;
+        }
+        self.cursor_blink.visible = !self.cursor_blink.visible;
+        self.cursor_blink.next = Some(Instant::now() + Duration::from_millis(600));
+        true
     }
 
     fn request_redraw(&self) {
@@ -1988,6 +2064,10 @@ impl Application {
     }
 
     fn prepare_terminal_input(&mut self) {
+        let cursor_was_hidden = !self.cursor_blink.visible;
+        self.cursor_blink.last_reset = Some(Instant::now());
+        self.cursor_blink.reset_pending = false;
+        self.sync_cursor_blink(true);
         if let Err(error) = self.cancel_selection_gesture() {
             self.message = Some(error.to_string());
         }
@@ -2001,6 +2081,8 @@ impl Application {
                 .is_some_and(|pane| pane.frame.scroll.is_scrolled())
         {
             self.scroll_pane(pane_id, TerminalViewportScroll::Bottom);
+        } else if cursor_was_hidden {
+            let _ = self.refresh_view();
         }
     }
 
@@ -2381,10 +2463,11 @@ impl ApplicationHandler<UserEvent> for Application {
         {
             self.selection_autoscroll_tick();
         }
-        event_loop.set_control_flow(
-            self.next_selection_scroll
-                .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
-        );
+        if self.advance_cursor_blink() {
+            let _ = self.refresh_view();
+        }
+        let deadline = earliest_deadline(self.next_selection_scroll, self.cursor_blink.next);
+        event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
     fn window_event(
@@ -2414,6 +2497,11 @@ impl ApplicationHandler<UserEvent> for Application {
                 if let Err(error) = self.refresh_view() {
                     self.message = Some(error.to_string());
                 }
+            }
+            WindowEvent::Focused(focused) => {
+                self.cursor_blink.window_focused = focused;
+                self.sync_cursor_blink(focused);
+                let _ = self.refresh_view();
             }
             WindowEvent::RedrawRequested => {
                 if self.advance_ui_animation() {
@@ -2486,6 +2574,14 @@ impl ApplicationHandler<UserEvent> for Application {
             WindowEvent::MouseWheel { delta, .. } => self.handle_mouse_wheel(delta),
             _ => {}
         }
+    }
+}
+
+fn earliest_deadline(first: Option<Instant>, second: Option<Instant>) -> Option<Instant> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(first.min(second)),
+        (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+        (None, None) => None,
     }
 }
 
@@ -2943,5 +3039,15 @@ mod input_tests {
         assert!(validate_hyperlink_uri("not a URI").is_err());
         assert!(validate_hyperlink_uri("1nvalid:value").is_err());
         assert!(validate_hyperlink_uri("https://example.com\ncommand").is_err());
+    }
+
+    #[test]
+    fn event_loop_uses_the_earliest_interaction_deadline() {
+        let now = Instant::now();
+        let first = now + Duration::from_millis(15);
+        let second = now + Duration::from_millis(600);
+        assert_eq!(earliest_deadline(Some(first), Some(second)), Some(first));
+        assert_eq!(earliest_deadline(None, Some(second)), Some(second));
+        assert_eq!(earliest_deadline(None, None), None);
     }
 }

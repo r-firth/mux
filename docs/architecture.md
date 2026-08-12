@@ -68,8 +68,10 @@ selection, and rectangular selection aligned with Ghostty. The GUI adds native
 clipboard handling, a contextual history indicator, and visible IME preedit with
 the platform candidate surface anchored to the active input area.
 OSC 8 targets also come from Ghostty cell state rather than terminal-text
-guessing; the GUI adds modifier-gated hover and URI activation. Accessibility,
-search, and broader platform behavior remain base-terminal work.
+guessing; the GUI adds modifier-gated hover and URI activation. The renderer
+honours Ghostty's cursor blink state with the same 600 ms cadence, waking the
+event loop only at the next interaction deadline. Accessibility, search, and
+broader platform behavior remain base-terminal work.
 
 No rendering dependency is pulled into the daemon, and no GUI type crosses the
 wire. This keeps an AppKit-specific shell or a future renderer experiment from
