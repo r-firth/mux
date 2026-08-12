@@ -75,10 +75,6 @@ enum UserEvent {
     Agents(Vec<AgentSessionSnapshot>),
     AgentStarted(AgentSessionSnapshot),
     Agent(AgentEvent),
-    CompatibilityMode {
-        daemon_protocol: u16,
-        app_protocol: u16,
-    },
     BackendError(String),
 }
 
@@ -243,18 +239,6 @@ impl MuxApp {
                 } else {
                     self.backend.send(CommandMessage::ListAgents);
                 }
-                Ok(())
-            }
-            UserEvent::CompatibilityMode {
-                daemon_protocol,
-                app_protocol,
-            } => {
-                window.push_notification(
-                    Notification::warning(format!(
-                        "Attached safely to your older workspace (protocol {daemon_protocol}). Terminal sessions remain available; ACP is paused until this workspace can move to protocol {app_protocol}."
-                    )),
-                    cx,
-                );
                 Ok(())
             }
             UserEvent::BackendError(message) => Err(anyhow!(message)),
@@ -1356,7 +1340,6 @@ impl UserEvent {
             Self::Agents(_) => "agents",
             Self::AgentStarted(_) => "agent-started",
             Self::Agent(_) => "agent",
-            Self::CompatibilityMode { .. } => "compatibility-mode",
             Self::BackendError(_) => "backend-error",
         }
     }
