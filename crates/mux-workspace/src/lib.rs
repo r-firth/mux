@@ -791,6 +791,14 @@ impl Keymap {
                 Action::EnterMode(InputMode::Normal),
             ]),
         );
+        self.bind(
+            InputMode::Pane,
+            KeyChord::plain(Key::Character('a')),
+            Action::Sequence(vec![
+                Action::OpenAgentSurface,
+                Action::EnterMode(InputMode::Normal),
+            ]),
+        );
     }
 
     fn bind_zellij_resize_mode(&mut self) {
@@ -994,6 +1002,13 @@ mod tests {
         assert_eq!(
             keymap.resolve(InputMode::Pane, KeyChord::control('n')),
             Some(&Action::EnterMode(InputMode::Resize))
+        );
+        assert_eq!(
+            keymap.resolve(InputMode::Pane, KeyChord::plain(Key::Character('a'))),
+            Some(&Action::Sequence(vec![
+                Action::OpenAgentSurface,
+                Action::EnterMode(InputMode::Normal),
+            ])),
         );
         assert_eq!(
             keymap.resolve(InputMode::Normal, KeyChord::control('o')),

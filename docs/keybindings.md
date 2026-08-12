@@ -33,6 +33,7 @@ mode to normal terminal input. All other Normal-mode keys, including
 | `Ctrl+n` | Enter Resize mode (Normal-mode `Ctrl+n` still reaches the terminal) |
 | `f` | Toggle focused-pane zoom and return to Normal |
 | `x` | Close the focused pane and return to Normal |
+| `a` | Open the agent pane and return to Normal |
 
 ## Resize mode
 
@@ -57,8 +58,7 @@ Zellij's `Ctrl+o` session prefix intentionally has no Normal-mode binding yet.
 This keeps foreground Control-key input untouched except for `Ctrl+p` and
 `Ctrl+t`.
 
-The agent surface is an application-level overlay rather than a terminal mode.
-Escape or its close button dismisses it without ending the agent session.
-Conversation, configuration, authentication, cancellation, end-session, and
-permission actions use the native sheet controls. Its local slash commands are
-documented in the README.
+The agent pane opens with its prompt focused. Return sends, Shift+Return inserts
+a newline, and Escape dismisses the pane without ending the agent session. All
+agent operations are available as slash commands; native controls remain as an
+optional mouse path.

@@ -20,16 +20,16 @@ use backend::{BackendHandle, CommandMessage};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Application, Bounds, Context, Entity, FocusHandle, Hsla,
-    InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowOptions, div, px, rgb, size,
+    InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent, ParentElement as _,
+    Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowOptions, div, px, rgb, size,
 };
 use gpui_component::{
     Icon, IconName, InteractiveElementExt as _, Selectable as _, Sizable as _, StyledExt as _,
     Theme, ThemeMode, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Input, InputState},
+    input::{Enter, Input, InputEvent, InputState},
     notification::Notification,
     scroll::ScrollableElement as _,
     switch::Switch,
@@ -110,7 +110,9 @@ struct MuxApp {
     agents: Vec<AgentSessionSnapshot>,
     selected_agent: usize,
     agent_input: Entity<InputState>,
-    agent_cwd_input: Entity<InputState>,
+    _agent_input_subscription: gpui::Subscription,
+    pending_agent_prompt: Option<AgentPrompt>,
+    agent_scroll: ScrollHandle,
     agent_context: AgentContextMode,
     selected_pane: Option<PaneId>,
     selection_drag: Option<PaneId>,
@@ -156,10 +158,17 @@ impl MuxApp {
         let agent_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .auto_grow(1, 5)
-                .placeholder("Ask an agent, or type /help…")
+                .placeholder("Message an agent…")
         });
-        let agent_cwd_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Focused pane cwd (default)"));
+        let agent_input_subscription = cx.subscribe_in(
+            &agent_input,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { secondary: false }) {
+                    this.submit_agent_prompt(window, cx);
+                }
+            },
+        );
         let (events, receiver) = async_channel::unbounded();
         let backend = backend::spawn(events, state_dir.clone());
         backend.send(CommandMessage::ListAgents);
@@ -196,7 +205,9 @@ impl MuxApp {
             agents: Vec::new(),
             selected_agent: 0,
             agent_input,
-            agent_cwd_input,
+            _agent_input_subscription: agent_input_subscription,
+            pending_agent_prompt: None,
+            agent_scroll: ScrollHandle::new(),
             agent_context: AgentContextMode::Pane,
             selected_pane: None,
             selection_drag: None,
@@ -222,14 +233,22 @@ impl MuxApp {
             UserEvent::Agents(agents) => {
                 self.agents = agents;
                 self.selected_agent = self.selected_agent.min(self.agents.len().saturating_sub(1));
+                self.agent_scroll.scroll_to_bottom();
                 Ok(())
             }
             UserEvent::AgentStarted(agent) => {
+                let session_id = agent.id;
                 self.agents.push(agent);
                 self.selected_agent = self.agents.len().saturating_sub(1);
+                if let Some(prompt) = self.pending_agent_prompt.take() {
+                    self.backend
+                        .send(CommandMessage::PromptAgent { session_id, prompt });
+                }
+                self.agent_scroll.scroll_to_bottom();
                 Ok(())
             }
             UserEvent::Agent(event) => {
+                let follow_tail = self.agent_scroll_is_near_bottom();
                 if let Some(agent) = self
                     .agents
                     .iter_mut()
@@ -239,9 +258,15 @@ impl MuxApp {
                 } else {
                     self.backend.send(CommandMessage::ListAgents);
                 }
+                if follow_tail {
+                    self.agent_scroll.scroll_to_bottom();
+                }
                 Ok(())
             }
-            UserEvent::BackendError(message) => Err(anyhow!(message)),
+            UserEvent::BackendError(message) => {
+                self.pending_agent_prompt = None;
+                Err(anyhow!(message))
+            }
         };
         if let Err(error) = result {
             error!(%error, "Mux UI update failed");
@@ -675,60 +700,40 @@ impl MuxApp {
 
     fn open_agents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.backend.send(CommandMessage::ListAgents);
+        self.agent_scroll.scroll_to_bottom();
+        let sheet_width = (f32::from(window.viewport_size().width) * 0.46).clamp(410.0, 560.0);
         let app = cx.weak_entity();
         window.open_sheet(cx, move |sheet, _window, cx| {
             let Some(entity) = app.upgrade() else {
                 return sheet;
             };
             let this = entity.read(cx);
-            let mut content = v_flex().gap_3();
-
-            content = content.child(agent_session_picker(&app, this));
+            let mut content = v_flex().h_full().min_h_0().gap_2();
+            if this.agents.len() > 1 {
+                content = content.child(agent_session_picker(&app, this));
+            }
             if let Some(agent) = this.agents.get(this.selected_agent) {
-                content = content.child(agent_timeline(agent));
-                content = content.child(agent_configuration(&app, agent));
+                content = content.child(agent_timeline(agent, &this.agent_scroll));
                 content = content.child(agent_auth_controls(&app, agent));
                 content = content.child(agent_permission_controls(&app, agent));
-                let prompt_app = app.clone();
-                content = content.child(
-                    v_flex()
-                        .gap_2()
-                        .mt_2()
-                        .child(Input::new(&this.agent_input).h(px(92.0)))
-                        .child(
-                            h_flex()
-                                .justify_between()
-                                .child(div().text_xs().text_color(rgb(MUTED_TEXT)).child(
-                                    if this.agent_context == AgentContextMode::Pane {
-                                        "Context: focused pane"
-                                    } else {
-                                        "Context: none"
-                                    },
-                                ))
-                                .child(
-                                    Button::new("agent-send")
-                                        .label("Send")
-                                        .primary()
-                                        .compact()
-                                        .on_click(move |_, window, cx| {
-                                            let _ = prompt_app.update(cx, |this, cx| {
-                                                this.submit_agent_prompt(window, cx);
-                                            });
-                                            window.refresh();
-                                        }),
-                                ),
-                        ),
-                );
             } else {
-                content = content.child(agent_launcher(&app, this));
+                content = content.child(agent_empty_state(this));
             }
 
             sheet
-                .title("Agents")
-                .size(px(430.0))
+                .title(agent_sheet_title(this))
+                .size(px(sheet_width))
                 .margin_top(px(layout::TAB_BAR_HEIGHT))
+                .overlay(false)
+                .overlay_closable(false)
+                .h_full()
+                .pt_1()
+                .pb_0()
+                .footer(agent_composer(&app, this))
                 .child(content)
         });
+        self.agent_input
+            .update(cx, |input, cx| input.focus(window, cx));
     }
 
     fn submit_agent_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -743,7 +748,31 @@ impl MuxApp {
             });
             return;
         }
-        let Some(agent) = self.agents.get(self.selected_agent) else {
+        let Some(agent) = self
+            .agents
+            .get(self.selected_agent)
+            .filter(|agent| agent.status != AgentSessionStatus::Closed)
+        else {
+            if self.pending_agent_prompt.is_some() {
+                window.push_notification(Notification::info("Agent is starting…"), cx);
+                return;
+            }
+            let Some(profile) = self.enabled_profiles().next().cloned() else {
+                window.push_notification(
+                    Notification::warning("Enable an ACP agent in Settings first"),
+                    cx,
+                );
+                return;
+            };
+            let prompt = AgentPrompt {
+                text: draft.to_owned(),
+                context: self.agent_prompt_context().unwrap_or_default(),
+            };
+            self.pending_agent_prompt = Some(prompt);
+            self.start_agent(profile, None);
+            self.agent_input.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+            });
             return;
         };
         let context = self.agent_prompt_context().unwrap_or_default();
@@ -772,15 +801,26 @@ impl MuxApp {
         match parts.next().unwrap_or_default() {
             "new" => {
                 let requested = parts.next();
-                if let Some(profile) = requested
-                    .and_then(|id| self.enabled_profiles().find(|profile| profile.id == id))
-                    .or_else(|| self.enabled_profiles().next())
-                    .cloned()
-                {
-                    let value = self.agent_cwd_input.read(cx).value().to_string();
-                    self.start_agent(profile, parse_cwd_override(&value));
+                let profile = requested.map_or_else(
+                    || self.enabled_profiles().next(),
+                    |id| {
+                        self.enabled_profiles()
+                            .find(|profile| profile.id.eq_ignore_ascii_case(id))
+                    },
+                );
+                if let Some(profile) = profile.cloned() {
+                    let cwd = parts.collect::<Vec<_>>().join(" ");
+                    self.start_agent(profile, parse_cwd_override(&cwd));
+                } else {
+                    window.push_notification(
+                        Notification::warning("Unknown or disabled ACP agent"),
+                        cx,
+                    );
                 }
             }
+            "next" => self.select_relative_agent(1),
+            "prev" | "previous" => self.select_relative_agent(-1),
+            "use" => self.select_agent(parts.next(), window, cx),
             "end" | "close" => {
                 if let Some(agent) = self.agents.get(self.selected_agent) {
                     self.backend.send(CommandMessage::CloseAgent(agent.id));
@@ -811,9 +851,14 @@ impl MuxApp {
                 self.set_agent_option(AgentConfigCategory::Model, parts.next(), window, cx);
             }
             "mode" => self.set_agent_mode(parts.next(), window, cx),
+            "login" => self.authenticate_agent(parts.next(), window, cx),
+            "allow" => self.resolve_agent_permission(true, parts.next(), window, cx),
+            "deny" | "reject" => {
+                self.resolve_agent_permission(false, parts.next(), window, cx);
+            }
             "help" => window.push_notification(
                 Notification::info(
-                    "/new [agent] · /end · /cancel · /context pane|none · /mode <id> · /model <id> · /effort <id>",
+                    "/new [agent] [cwd] · /next · /prev · /use <session> · /end · /cancel · /context pane|none · /mode <id> · /model <id> · /effort <id> · /login [method] · /allow [always] · /deny [always]",
                 )
                 .autohide(false),
                 cx,
@@ -821,6 +866,128 @@ impl MuxApp {
             _ => return false,
         }
         true
+    }
+
+    fn select_relative_agent(&mut self, delta: isize) {
+        if self.agents.is_empty() {
+            return;
+        }
+        self.selected_agent = if delta < 0 {
+            self.selected_agent
+                .checked_sub(1)
+                .unwrap_or(self.agents.len() - 1)
+        } else if delta > 0 && self.selected_agent + 1 == self.agents.len() {
+            0
+        } else if delta > 0 {
+            self.selected_agent + 1
+        } else {
+            self.selected_agent
+        };
+        self.agent_scroll.scroll_to_bottom();
+    }
+
+    fn select_agent(
+        &mut self,
+        requested: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(requested) = requested else {
+            let sessions = self
+                .agents
+                .iter()
+                .enumerate()
+                .map(|(index, agent)| format!("{}:{}", index + 1, agent.name))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            window.push_notification(Notification::info(format!("Sessions: {sessions}")), cx);
+            return;
+        };
+        let index = requested
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| index.checked_sub(1))
+            .filter(|index| *index < self.agents.len())
+            .or_else(|| {
+                self.agents.iter().position(|agent| {
+                    agent.name.eq_ignore_ascii_case(requested)
+                        || agent
+                            .agent_name
+                            .as_deref()
+                            .is_some_and(|name| name.eq_ignore_ascii_case(requested))
+                })
+            });
+        if let Some(index) = index {
+            self.selected_agent = index;
+            self.agent_scroll.scroll_to_bottom();
+        } else {
+            window.push_notification(Notification::warning("Unknown agent session"), cx);
+        }
+    }
+
+    fn authenticate_agent(
+        &self,
+        requested: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(agent) = self.agents.get(self.selected_agent) else {
+            return;
+        };
+        let method = requested
+            .and_then(|requested| {
+                agent.auth_methods.iter().find(|method| {
+                    method.id.eq_ignore_ascii_case(requested)
+                        || method.name.eq_ignore_ascii_case(requested)
+                })
+            })
+            .or_else(|| agent.auth_methods.first());
+        if let Some(method) = method {
+            self.backend.send(CommandMessage::AuthenticateAgent {
+                session_id: agent.id,
+                method_id: method.id.clone(),
+            });
+        } else {
+            window.push_notification(
+                Notification::warning("This agent is not asking for authentication"),
+                cx,
+            );
+        }
+    }
+
+    fn resolve_agent_permission(
+        &self,
+        allow: bool,
+        requested: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(agent) = self.agents.get(self.selected_agent) else {
+            return;
+        };
+        let Some(permission) = agent.pending_permission() else {
+            window.push_notification(Notification::warning("No permission is waiting"), cx);
+            return;
+        };
+        let always = requested.is_some_and(|value| value.eq_ignore_ascii_case("always"));
+        let kind = match (allow, always) {
+            (true, false) => mux_acp::PermissionKind::AllowOnce,
+            (true, true) => mux_acp::PermissionKind::AllowAlways,
+            (false, false) => mux_acp::PermissionKind::RejectOnce,
+            (false, true) => mux_acp::PermissionKind::RejectAlways,
+        };
+        let Some(option) = permission.options.iter().find(|option| option.kind == kind) else {
+            window.push_notification(
+                Notification::warning("The agent did not offer that permission choice"),
+                cx,
+            );
+            return;
+        };
+        self.backend.send(CommandMessage::ResolveAgentPermission {
+            session_id: agent.id,
+            request_id: permission.request_id.clone(),
+            option_id: Some(option.id.clone()),
+        });
     }
 
     fn set_agent_option(
@@ -909,6 +1076,12 @@ impl MuxApp {
         self.profiles
             .iter()
             .filter(|profile| self.settings.agent_enabled(&profile.id))
+    }
+
+    fn agent_scroll_is_near_bottom(&self) -> bool {
+        let offset = f32::from(self.agent_scroll.offset().y);
+        let maximum = f32::from(self.agent_scroll.max_offset().height);
+        maximum + offset <= 48.0
     }
 
     fn start_agent(&self, profile: AgentProfile, cwd_override: Option<PathBuf>) {
@@ -1301,7 +1474,10 @@ impl MuxApp {
     fn render_mode_bar(&self) -> impl IntoElement {
         let (label, help) = match self.mode {
             InputMode::Normal => ("NORMAL", ""),
-            InputMode::Pane => ("PANE", "d down · n right · arrows focus · x close · f zoom"),
+            InputMode::Pane => (
+                "PANE",
+                "d down · r right · arrows focus · a agent · x close · f zoom",
+            ),
             InputMode::Tab => (
                 "TAB",
                 "n new · x close · r rename · 1–9 select · arrows switch",
@@ -1609,7 +1785,7 @@ fn window_control_dot(
 }
 
 fn agent_session_picker(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl IntoElement {
-    let mut picker = h_flex().gap_1().flex_wrap();
+    let mut picker = h_flex().gap_1().pb_1().flex_wrap();
     for (index, agent) in this.agents.iter().enumerate() {
         let select_app = app.clone();
         picker = picker.child(
@@ -1622,6 +1798,7 @@ fn agent_session_picker(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl I
                 .on_click(move |_, window, cx| {
                     let _ = select_app.update(cx, |this, cx| {
                         this.selected_agent = index;
+                        this.agent_scroll.scroll_to_bottom();
                         cx.notify();
                     });
                     window.refresh();
@@ -1631,10 +1808,11 @@ fn agent_session_picker(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl I
     let new_app = app.clone();
     picker.child(
         Button::new("agent-new")
-            .label("＋ New")
+            .icon(IconName::Plus)
             .ghost()
             .small()
             .compact()
+            .tooltip("New agent session · /new")
             .on_click(move |_, window, cx| {
                 let _ = new_app.update(cx, |this, cx| {
                     this.selected_agent = this.agents.len();
@@ -1645,205 +1823,160 @@ fn agent_session_picker(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl I
     )
 }
 
-fn agent_launcher(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl IntoElement {
-    let mut launcher = v_flex()
+fn agent_sheet_title(this: &MuxApp) -> impl IntoElement {
+    let (name, status) =
+        this.agents
+            .get(this.selected_agent)
+            .map_or(("Agent".to_owned(), None), |agent| {
+                (
+                    agent
+                        .agent_name
+                        .clone()
+                        .unwrap_or_else(|| agent.name.clone()),
+                    Some(agent.status),
+                )
+            });
+    h_flex()
         .gap_2()
         .child(
             div()
-                .text_sm()
-                .text_color(rgb(MUTED_TEXT))
-                .child("Choose an ACP agent. It starts in the focused pane’s current directory."),
+                .size(px(6.0))
+                .rounded_full()
+                .bg(status.map_or(rgb(MUTED_TEXT), status_color)),
         )
-        .child(
-            v_flex()
-                .gap_1()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(MUTED_TEXT))
-                        .child("Working directory"),
-                )
-                .child(Input::new(&this.agent_cwd_input)),
-        );
-    for profile in this.enabled_profiles() {
-        let profile = profile.clone();
-        let start_app = app.clone();
-        let name = profile.name.clone();
-        let description = profile.description.clone();
-        launcher = launcher.child(
-            Button::new(SharedString::from(format!("launch-{}", profile.id)))
-                .ghost()
-                .w_full()
-                .child(
-                    v_flex()
-                        .w(px(370.0))
-                        .items_start()
-                        .gap_1()
-                        .child(div().text_sm().font_semibold().child(name))
-                        .child(
-                            div()
-                                .w_full()
-                                .text_xs()
-                                .text_color(rgb(MUTED_TEXT))
-                                .child(description),
-                        ),
-                )
-                .on_click(move |_, _, cx| {
-                    let profile = profile.clone();
-                    let _ = start_app.update(cx, |this, app_cx| {
-                        let value = this.agent_cwd_input.read(app_cx).value().to_string();
-                        this.start_agent(profile, parse_cwd_override(&value));
-                    });
-                }),
-        );
-    }
-    launcher
+        .child(name)
+        .when_some(status, |title, status| {
+            title.child(
+                div()
+                    .text_xs()
+                    .font_normal()
+                    .text_color(rgb(MUTED_TEXT))
+                    .child(agent_status_label(status)),
+            )
+        })
 }
 
-fn agent_timeline(agent: &AgentSessionSnapshot) -> impl IntoElement {
-    let mut timeline = v_flex()
+fn agent_empty_state(this: &MuxApp) -> impl IntoElement {
+    let profiles = this
+        .enabled_profiles()
+        .map(|profile| profile.id.as_str())
+        .collect::<Vec<_>>()
+        .join(" or ");
+    let profiles = if profiles.is_empty() {
+        "an enabled agent".to_owned()
+    } else {
+        profiles
+    };
+    v_flex()
+        .flex_1()
+        .items_center()
+        .justify_center()
         .gap_2()
-        .max_h(px(390.0))
-        .overflow_y_scrollbar()
-        .p_3()
-        .rounded_lg()
-        .bg(rgb(CHROME_RAISED))
+        .px_8()
+        .text_center()
         .child(
-            h_flex()
-                .justify_between()
-                .child(div().font_semibold().child(agent.name.clone()))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(status_color(agent.status))
-                        .child(format!("{:?}", agent.status)),
-                ),
+            Icon::new(IconName::Bot)
+                .size(px(24.0))
+                .text_color(rgb(MUTED_TEXT)),
         )
+        .child(div().font_semibold().child("Start from the prompt"))
+        .child(div().text_sm().text_color(rgb(MUTED_TEXT)).child(format!(
+            "Type a message to start {profiles}, or use /new <agent> [cwd]."
+        )))
         .child(
             div()
                 .text_xs()
                 .text_color(rgb(MUTED_TEXT))
-                .child(agent.cwd.display().to_string()),
+                .child("Working directory defaults to the focused terminal pane."),
+        )
+}
+
+fn agent_composer(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl IntoElement {
+    let prompt_app = app.clone();
+    v_flex()
+        .w_full()
+        .gap_2()
+        .child(
+            h_flex()
+                .w_full()
+                .items_end()
+                .gap_2()
+                .child(Input::new(&this.agent_input).flex_1())
+                .child(
+                    Button::new("agent-send")
+                        .icon(IconName::ArrowUp)
+                        .primary()
+                        .small()
+                        .tooltip("Send · Return")
+                        .on_click(move |_, window, cx| {
+                            let _ = prompt_app.update(cx, |this, cx| {
+                                this.submit_agent_prompt(window, cx);
+                            });
+                            window.refresh();
+                        }),
+                ),
+        )
+        .child(
+            h_flex()
+                .w_full()
+                .justify_between()
+                .gap_3()
+                .text_xs()
+                .text_color(rgb(MUTED_TEXT))
+                .child(if this.agent_context == AgentContextMode::Pane {
+                    "/help  ·  pane context"
+                } else {
+                    "/help  ·  no context"
+                })
+                .child("↵ send  ·  ⇧↵ newline"),
+        )
+}
+
+fn agent_timeline(agent: &AgentSessionSnapshot, scroll: &ScrollHandle) -> impl IntoElement {
+    let mut timeline = v_flex()
+        .id(SharedString::from(format!("agent-timeline-{}", agent.id)))
+        .flex_1()
+        .min_h_0()
+        .gap_1()
+        .track_scroll(scroll)
+        .overflow_y_scrollbar()
+        .pr_2()
+        .pb_2();
+    if agent.timeline.is_empty() {
+        timeline = timeline.child(
+            v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(rgb(MUTED_TEXT))
+                .child("Ready when you are."),
         );
+    }
     for item in &agent.timeline {
+        if matches!(item, AgentTimelineItem::Context { .. }) {
+            continue;
+        }
         let (label, text, color) = timeline_item(item);
         timeline = timeline.child(
             v_flex()
                 .gap_1()
+                .my_1()
+                .pl_3()
                 .py_1()
+                .border_l_2()
+                .border_color(color)
                 .child(
                     div()
-                        .text_xs()
+                        .text_size(px(10.0))
                         .font_semibold()
                         .text_color(color)
                         .child(label),
                 )
-                .child(div().text_sm().child(text)),
+                .child(div().text_sm().line_height(px(21.0)).child(text)),
         );
     }
     timeline
-}
-
-fn agent_configuration(
-    app: &gpui::WeakEntity<MuxApp>,
-    agent: &AgentSessionSnapshot,
-) -> impl IntoElement {
-    let mut controls = h_flex().gap_1().flex_wrap();
-    for option in &agent.config_options {
-        if matches!(
-            option.category,
-            AgentConfigCategory::Model | AgentConfigCategory::ThoughtLevel
-        ) {
-            let label = match &option.value {
-                AgentConfigValue::Select { current, .. } => format!("{} · {current}", option.name),
-                AgentConfigValue::Boolean(value) => {
-                    format!("{} · {}", option.name, if *value { "on" } else { "off" })
-                }
-            };
-            let update_app = app.clone();
-            let session_id = agent.id;
-            let config_id = option.id.clone();
-            let next_value = next_config_value(&option.value);
-            controls = controls.child(
-                Button::new(SharedString::from(format!("agent-option-{}", option.id)))
-                    .label(label)
-                    .ghost()
-                    .small()
-                    .compact()
-                    .tooltip("Click to cycle, or use /model and /effort")
-                    .on_click(move |_, _, cx| {
-                        if let Some(value) = next_value.clone() {
-                            let config_id = config_id.clone();
-                            let _ = update_app.update(cx, |this, _| {
-                                this.backend.send(CommandMessage::SetAgentConfig {
-                                    session_id,
-                                    config_id,
-                                    value,
-                                });
-                            });
-                        }
-                    }),
-            );
-        }
-    }
-    if !agent.modes.is_empty() {
-        let mode_app = app.clone();
-        let session_id = agent.id;
-        let current = agent.current_mode.as_deref();
-        let next_mode = agent
-            .modes
-            .iter()
-            .position(|mode| Some(mode.id.as_str()) == current)
-            .map_or(0, |index| (index + 1) % agent.modes.len());
-        let mode_id = agent.modes[next_mode].id.clone();
-        controls = controls.child(
-            Button::new("agent-mode")
-                .label(format!("Mode · {}", current.unwrap_or("default")))
-                .ghost()
-                .small()
-                .compact()
-                .tooltip("Click to cycle, or use /mode")
-                .on_click(move |_, _, cx| {
-                    let mode_id = mode_id.clone();
-                    let _ = mode_app.update(cx, |this, _| {
-                        this.backend.send(CommandMessage::SetAgentMode {
-                            session_id,
-                            mode_id,
-                        });
-                    });
-                }),
-        );
-    }
-    if agent.status == AgentSessionStatus::Working {
-        let cancel_app = app.clone();
-        let session_id = agent.id;
-        controls = controls.child(
-            Button::new("agent-cancel")
-                .label("Cancel")
-                .ghost()
-                .small()
-                .compact()
-                .on_click(move |_, _, cx| {
-                    let _ = cancel_app.update(cx, |this, _| {
-                        this.backend.send(CommandMessage::CancelAgent(session_id));
-                    });
-                }),
-        );
-    }
-    let close_app = app.clone();
-    let session_id = agent.id;
-    controls.child(
-        Button::new("agent-end")
-            .label("End")
-            .danger()
-            .small()
-            .compact()
-            .on_click(move |_, _, cx| {
-                let _ = close_app.update(cx, |this, _| {
-                    this.backend.send(CommandMessage::CloseAgent(session_id));
-                });
-            }),
-    )
 }
 
 fn agent_permission_controls(
@@ -1961,6 +2094,19 @@ fn status_color(status: AgentSessionStatus) -> gpui::Rgba {
     }
 }
 
+const fn agent_status_label(status: AgentSessionStatus) -> &'static str {
+    match status {
+        AgentSessionStatus::Starting => "starting",
+        AgentSessionStatus::WaitingForAuthentication => "sign-in required",
+        AgentSessionStatus::Authenticating => "signing in",
+        AgentSessionStatus::Idle => "idle",
+        AgentSessionStatus::Working => "working",
+        AgentSessionStatus::WaitingForPermission => "permission required",
+        AgentSessionStatus::Failed => "failed",
+        AgentSessionStatus::Closed => "ended",
+    }
+}
+
 fn terminal_frame_text(frame: &RenderFrame) -> String {
     let columns = usize::from(frame.cols);
     let mut text = String::new();
@@ -2006,22 +2152,6 @@ fn describe_agent_option(option: &mux_acp::AgentConfigOption) -> String {
             option.name,
             if *current { "on" } else { "off" }
         ),
-    }
-}
-
-fn next_config_value(value: &AgentConfigValue) -> Option<AgentConfigValueSelection> {
-    match value {
-        AgentConfigValue::Select { current, choices } => {
-            if choices.is_empty() {
-                return None;
-            }
-            let next = choices
-                .iter()
-                .position(|choice| choice.id == *current)
-                .map_or(0, |index| (index + 1) % choices.len());
-            Some(AgentConfigValueSelection::Choice(choices[next].id.clone()))
-        }
-        AgentConfigValue::Boolean(current) => Some(AgentConfigValueSelection::Boolean(!current)),
     }
 }
 
@@ -2291,6 +2421,11 @@ fn main() -> Result<()> {
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
+            cx.bind_keys([KeyBinding::new(
+                "shift-enter",
+                Enter { secondary: true },
+                Some("Input"),
+            )]);
             configure_theme(cx);
             if let Err(error) = cx.text_system().add_fonts(vec![
                 Cow::Borrowed(
