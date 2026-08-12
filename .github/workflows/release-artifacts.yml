@@ -39,10 +39,21 @@ jobs:
       - name: Install verified Zig toolchain
         run: echo "MUX_ZIG=$(scripts/install-zig-macos.sh '${{ matrix.zig_arch }}')" >> "$GITHUB_ENV"
       - name: Build distributable app
+        id: package
         env:
           MUX_ARCHITECTURE: ${{ matrix.artifact_arch }}
           MUX_BUILD_NUMBER: ${{ github.run_number }}
-        run: scripts/package-macos.sh
+        run: |
+          package_paths="$RUNNER_TEMP/mux-package-paths"
+          scripts/package-macos.sh > "$package_paths"
+          archive=$(sed -n '1p' "$package_paths")
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+      - name: Verify distributable app
+        run: >-
+          scripts/verify-macos-package.sh
+          '${{ steps.package.outputs.archive }}'
+          '${{ matrix.artifact_arch }}'
+          "$(cat version.txt)"
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v7
         with:
