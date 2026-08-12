@@ -105,6 +105,18 @@ pub struct AgentLauncherView<'a> {
 }
 
 #[derive(Clone, Copy)]
+pub struct SettingsAgentView<'a> {
+    pub profile: &'a AgentProfile,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct SettingsView<'a> {
+    pub agents: &'a [SettingsAgentView<'a>],
+    pub selected: usize,
+}
+
+#[derive(Clone, Copy)]
 pub struct TextPromptView<'a> {
     pub label: &'a str,
     pub draft: &'a str,
@@ -116,6 +128,7 @@ pub struct UiState<'a> {
     pub message: Option<&'a str>,
     pub session_switcher: Option<SessionSwitcherView<'a>>,
     pub text_prompt: Option<TextPromptView<'a>>,
+    pub settings: Option<SettingsView<'a>>,
     pub agent_surface: Option<AgentSurfaceView<'a>>,
     pub ime_preedit: Option<&'a str>,
     pub hovered_hyperlink: Option<(PaneId, &'a str)>,
@@ -617,17 +630,229 @@ impl Renderer {
             self.add_text_prompt(prompt);
         }
 
+        if let Some(settings) = ui.settings {
+            self.add_settings(settings);
+        }
+
         if let Some(agent) = ui.agent_surface {
             self.add_agent_surface(agent);
         }
 
-        self.update_ime(
-            geometry,
-            frames,
-            ui.agent_surface,
-            ui.text_prompt,
-            ui.ime_preedit,
+        if ui.settings.is_none() {
+            self.update_ime(
+                geometry,
+                frames,
+                ui.agent_surface,
+                ui.text_prompt,
+                ui.ime_preedit,
+            );
+        }
+    }
+
+    fn add_settings(&mut self, settings: SettingsView<'_>) {
+        let scale = self.scale_factor;
+        let window = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: self.config.width as f32,
+            height: self.config.height as f32,
+        };
+        push_rect(
+            &mut self.overlay_rect_vertices,
+            window,
+            OVERLAY_SCRIM,
+            self.config.width,
+            self.config.height,
         );
+
+        let panel_width = (580.0 * scale).min(window.width - 32.0 * scale);
+        let row_height = 62.0 * scale;
+        let panel_height = 126.0 * scale + row_height * settings.agents.len().max(1) as f32;
+        let panel = Rect {
+            x: ((window.width - panel_width) / 2.0).round(),
+            y: ((window.height - panel_height) / 2.0).round(),
+            width: panel_width,
+            height: panel_height,
+        };
+        push_rect(
+            &mut self.overlay_rect_vertices,
+            panel,
+            OVERLAY_BACKGROUND,
+            self.config.width,
+            self.config.height,
+        );
+        push_rect(
+            &mut self.overlay_rect_vertices,
+            Rect {
+                x: panel.x,
+                y: panel.y,
+                width: 3.0 * scale,
+                height: panel.height,
+            },
+            AGENT_ACCENT,
+            self.config.width,
+            self.config.height,
+        );
+        self.add_settings_header(panel);
+        self.add_settings_agents(panel, settings);
+        self.add_settings_help(panel);
+    }
+
+    fn add_settings_header(&mut self, panel: Rect) {
+        let scale = self.scale_factor;
+        self.overlay_text.push(make_text(
+            &mut self.font_system,
+            "Settings",
+            Rect {
+                x: panel.x + 20.0 * scale,
+                y: panel.y + 13.0 * scale,
+                width: panel.width - 40.0 * scale,
+                height: 26.0 * scale,
+            },
+            15.0 * scale,
+            Color::rgb(233, 237, 246),
+            Family::SansSerif,
+            Weight::SEMIBOLD,
+        ));
+        self.overlay_text.push(make_text(
+            &mut self.font_system,
+            "Agent integrations",
+            Rect {
+                x: panel.x + 20.0 * scale,
+                y: panel.y + 46.0 * scale,
+                width: panel.width - 40.0 * scale,
+                height: 22.0 * scale,
+            },
+            11.5 * scale,
+            Color::rgb(156, 169, 191),
+            Family::SansSerif,
+            Weight::MEDIUM,
+        ));
+    }
+
+    fn add_settings_agents(&mut self, panel: Rect, settings: SettingsView<'_>) {
+        let scale = self.scale_factor;
+        let list_top = panel.y + 82.0 * scale;
+        if settings.agents.is_empty() {
+            self.overlay_text.push(make_text(
+                &mut self.font_system,
+                "No ACP integrations are installed in this build.",
+                Rect {
+                    x: panel.x + 24.0 * scale,
+                    y: list_top + 14.0 * scale,
+                    width: panel.width - 48.0 * scale,
+                    height: 22.0 * scale,
+                },
+                11.5 * scale,
+                Color::rgb(155, 165, 183),
+                Family::SansSerif,
+                Weight::NORMAL,
+            ));
+        }
+        for (index, agent) in settings.agents.iter().enumerate() {
+            let row = Rect {
+                x: panel.x + 12.0 * scale,
+                y: list_top + index as f32 * 62.0 * scale,
+                width: panel.width - 24.0 * scale,
+                height: 54.0 * scale,
+            };
+            self.add_settings_agent_row(row, *agent, index == settings.selected);
+        }
+    }
+
+    fn add_settings_agent_row(&mut self, row: Rect, agent: SettingsAgentView<'_>, selected: bool) {
+        let scale = self.scale_factor;
+        if selected {
+            push_rect(
+                &mut self.overlay_rect_vertices,
+                row,
+                OVERLAY_SELECTED,
+                self.config.width,
+                self.config.height,
+            );
+        }
+        self.overlay_text.push(make_text(
+            &mut self.font_system,
+            &agent.profile.name,
+            Rect {
+                x: row.x + 12.0 * scale,
+                y: row.y + 6.0 * scale,
+                width: row.width - 104.0 * scale,
+                height: 21.0 * scale,
+            },
+            12.0 * scale,
+            Color::rgb(228, 233, 242),
+            Family::SansSerif,
+            Weight::MEDIUM,
+        ));
+        self.overlay_text.push(make_text(
+            &mut self.font_system,
+            &agent.profile.description,
+            Rect {
+                x: row.x + 12.0 * scale,
+                y: row.y + 29.0 * scale,
+                width: row.width - 104.0 * scale,
+                height: 18.0 * scale,
+            },
+            10.2 * scale,
+            Color::rgb(135, 147, 168),
+            Family::SansSerif,
+            Weight::NORMAL,
+        ));
+
+        let toggle = Rect {
+            x: row.x + row.width - 66.0 * scale,
+            y: row.y + 14.0 * scale,
+            width: 48.0 * scale,
+            height: 26.0 * scale,
+        };
+        push_rect(
+            &mut self.overlay_rect_vertices,
+            toggle,
+            if agent.enabled {
+                [0.10, 0.34, 0.44, 1.0]
+            } else {
+                [0.12, 0.13, 0.16, 1.0]
+            },
+            self.config.width,
+            self.config.height,
+        );
+        self.overlay_text.push(make_text(
+            &mut self.font_system,
+            if agent.enabled { "On" } else { "Off" },
+            Rect {
+                x: toggle.x,
+                y: toggle.y + 3.0 * scale,
+                width: toggle.width,
+                height: toggle.height - 6.0 * scale,
+            },
+            10.5 * scale,
+            if agent.enabled {
+                Color::rgb(210, 242, 247)
+            } else {
+                Color::rgb(148, 156, 170)
+            },
+            Family::SansSerif,
+            Weight::SEMIBOLD,
+        ));
+    }
+
+    fn add_settings_help(&mut self, panel: Rect) {
+        let scale = self.scale_factor;
+        self.overlay_text.push(make_text(
+            &mut self.font_system,
+            "↑↓ navigate  ·  Space toggle  ·  ⌘, close  ·  running sessions are unaffected",
+            Rect {
+                x: panel.x + 20.0 * scale,
+                y: panel.y + panel.height - 31.0 * scale,
+                width: panel.width - 40.0 * scale,
+                height: 20.0 * scale,
+            },
+            10.0 * scale,
+            Color::rgb(121, 133, 153),
+            Family::SansSerif,
+            Weight::NORMAL,
+        ));
     }
 
     fn update_ime(
