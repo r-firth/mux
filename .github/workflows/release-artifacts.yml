@@ -1,0 +1,51 @@
+name: Release artifacts
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            zig_arch: arm64
+            artifact_arch: arm64
+            name: Apple Silicon
+          - runner: macos-15-intel
+            zig_arch: x86_64
+            artifact_arch: x86_64
+            name: Intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88.0
+      - name: Install verified Zig toolchain
+        run: echo "MUX_ZIG=$(scripts/install-zig-macos.sh '${{ matrix.zig_arch }}')" >> "$GITHUB_ENV"
+      - name: Build distributable app
+        env:
+          MUX_ARCHITECTURE: ${{ matrix.artifact_arch }}
+          MUX_BUILD_NUMBER: ${{ github.run_number }}
+        run: scripts/package-macos.sh
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: Mux-macos-${{ matrix.artifact_arch }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+      - name: Attach files to GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload '${{ github.event.release.tag_name }}' dist/*.zip dist/*.sha256 --clobber

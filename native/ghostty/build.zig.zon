@@ -1,0 +1,17 @@
+.{
+    .name = .mux_ghostty_spike,
+    .version = "0.1.0",
+    .fingerprint = 0x1eaa57854c575e6e,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .ghostty = .{
+            .url = "https://github.com/ghostty-org/ghostty/archive/b2fa2931b6599f7e32a7c547b3f5520ac3333881.tar.gz",
+            .hash = "ghostty-1.3.2-dev-5UdBC5rPPwVAzKBFnMHDiyjSrKcDg6K9JqU9LwgT8HCd",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

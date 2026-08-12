@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+profile=${MUX_BUILD_PROFILE:-release}
+zig=${MUX_ZIG:-zig}
+codesign_identity=${MUX_CODESIGN_IDENTITY:--}
+build_number=${MUX_BUILD_NUMBER:-1}
+
+case "$profile" in
+  debug) cargo_profile_args="" ;;
+  release) cargo_profile_args="--release" ;;
+  *) echo "unsupported MUX_BUILD_PROFILE: $profile" >&2; exit 2 ;;
+esac
+
+cd "$project_dir"
+MUX_ZIG="$zig" MACOSX_DEPLOYMENT_TARGET=13.0 \
+  cargo build -p mux --features product $cargo_profile_args
+
+app_dir="$project_dir/target/Mux.app"
+contents_dir="$app_dir/Contents"
+macos_dir="$contents_dir/MacOS"
+frameworks_dir="$contents_dir/Frameworks"
+mkdir -p "$macos_dir" "$frameworks_dir"
+cp "$project_dir/packaging/macos/Info.plist" "$contents_dir/Info.plist"
+cp "$project_dir/target/$profile/mux" "$macos_dir/mux"
+
+package_id=$(cargo pkgid -p mux)
+version=${package_id##*#}
+version=${version##*@}
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" \
+  "$contents_dir/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" \
+  "$contents_dir/Info.plist"
+
+ghostty_library=$(find "$project_dir/target/$profile/build" \
+  -path '*/out/ghostty/lib/libghostty-vt.dylib' -type f -print | head -n 1)
+if [ -z "$ghostty_library" ]; then
+  echo "vendored libghostty-vt was not produced" >&2
+  exit 1
+fi
+cp "$ghostty_library" "$frameworks_dir/libghostty-vt.dylib"
+install_name_tool -add_rpath '@executable_path/../Frameworks' "$macos_dir/mux" 2>/dev/null || true
+codesign --force --deep --options runtime --sign "$codesign_identity" "$app_dir"
+
+echo "$app_dir"

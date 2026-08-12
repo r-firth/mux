@@ -1,0 +1,15 @@
+/target/
+/dist/
+/.idea/
+/.vscode/
+.DS_Store
+*.swp
+*.swo
+
+# Runtime state created by local development commands.
+/.mux-state/
+
+# Native dependency outputs and caches.
+/native/ghostty/.zig-cache/
+/native/ghostty/zig-out/
+/native/ghostty/zig-pkg/
