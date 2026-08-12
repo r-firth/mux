@@ -24,16 +24,30 @@ pub struct Client {
     next_output_sequence: HashMap<PaneId, u64>,
     desynced_session: Option<SessionId>,
     daemon_pid: u32,
+    protocol_version: u16,
 }
 
 impl Client {
     pub async fn connect(socket_path: &Path, client_name: &str) -> Result<Self, ClientError> {
+        match Self::connect_with_protocol(socket_path, client_name, PROTOCOL_VERSION).await {
+            Err(ClientError::ProtocolMismatch { server: 1, .. }) => {
+                Self::connect_with_protocol(socket_path, client_name, 1).await
+            }
+            result => result,
+        }
+    }
+
+    async fn connect_with_protocol(
+        socket_path: &Path,
+        client_name: &str,
+        protocol_version: u16,
+    ) -> Result<Self, ClientError> {
         let stream = UnixStream::connect(socket_path).await?;
         let (mut reader, mut writer) = stream.into_split();
         write_frame(
             &mut writer,
             &ClientMessage::Hello(ClientHello {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version,
                 client_name: client_name.to_owned(),
             }),
         )
@@ -42,9 +56,9 @@ impl Client {
         let ServerMessage::Hello(hello) = hello else {
             return Err(ClientError::ExpectedHello);
         };
-        if hello.protocol_version != PROTOCOL_VERSION {
+        if hello.protocol_version != protocol_version {
             return Err(ClientError::ProtocolMismatch {
-                client: PROTOCOL_VERSION,
+                client: protocol_version,
                 server: hello.protocol_version,
             });
         }
@@ -57,12 +71,27 @@ impl Client {
             next_output_sequence: HashMap::new(),
             desynced_session: None,
             daemon_pid: hello.daemon_pid,
+            protocol_version,
         })
     }
 
     #[must_use]
     pub const fn daemon_pid(&self) -> u32 {
         self.daemon_pid
+    }
+
+    /// The IPC epoch negotiated with the workspace daemon.
+    #[must_use]
+    pub const fn protocol_version(&self) -> u16 {
+        self.protocol_version
+    }
+
+    /// Protocol v1 terminal and workspace messages are wire-compatible with
+    /// v2, but its ACP snapshots are not. Keep agent traffic off legacy
+    /// connections instead of risking a postcard decode failure.
+    #[must_use]
+    pub const fn supports_agents(&self) -> bool {
+        self.protocol_version >= 2
     }
 
     pub async fn health(&mut self) -> Result<(), ClientError> {
@@ -185,6 +214,7 @@ impl Client {
     }
 
     pub async fn list_agent_sessions(&mut self) -> Result<Vec<AgentSessionSnapshot>, ClientError> {
+        self.require_agents()?;
         match self.request(Request::ListAgentSessions).await? {
             Response::AgentSessions(sessions) => Ok(sessions),
             response => Err(ClientError::UnexpectedResponse(Box::new(response))),
@@ -196,6 +226,7 @@ impl Client {
         spec: AgentSpec,
         cwd: PathBuf,
     ) -> Result<AgentSessionSnapshot, ClientError> {
+        self.require_agents()?;
         match self.request(Request::StartAgent { spec, cwd }).await? {
             Response::AgentStarted(session) => Ok(session),
             response => Err(ClientError::UnexpectedResponse(Box::new(response))),
@@ -207,6 +238,7 @@ impl Client {
         spec: AgentSpec,
         pane_id: PaneId,
     ) -> Result<AgentSessionSnapshot, ClientError> {
+        self.require_agents()?;
         match self
             .request(Request::StartAgentForPane { spec, pane_id })
             .await?
@@ -230,6 +262,7 @@ impl Client {
         session_id: AgentSessionId,
         prompt: AgentPrompt,
     ) -> Result<(), ClientError> {
+        self.require_agents()?;
         expect_acknowledgement(
             self.request(Request::PromptAgent { session_id, prompt })
                 .await?,
@@ -242,6 +275,7 @@ impl Client {
         session_id: AgentSessionId,
         method_id: String,
     ) -> Result<(), ClientError> {
+        self.require_agents()?;
         expect_acknowledgement(
             self.request(Request::AuthenticateAgent {
                 session_id,
@@ -257,6 +291,7 @@ impl Client {
         session_id: AgentSessionId,
         mode_id: String,
     ) -> Result<(), ClientError> {
+        self.require_agents()?;
         expect_acknowledgement(
             self.request(Request::SetAgentMode {
                 session_id,
@@ -273,6 +308,7 @@ impl Client {
         config_id: String,
         value: AgentConfigValueSelection,
     ) -> Result<(), ClientError> {
+        self.require_agents()?;
         expect_acknowledgement(
             self.request(Request::SetAgentConfig {
                 session_id,
@@ -290,6 +326,7 @@ impl Client {
         request_id: String,
         option_id: Option<String>,
     ) -> Result<(), ClientError> {
+        self.require_agents()?;
         expect_acknowledgement(
             self.request(Request::ResolveAgentPermission {
                 session_id,
@@ -302,6 +339,7 @@ impl Client {
     }
 
     pub async fn cancel_agent(&mut self, session_id: AgentSessionId) -> Result<(), ClientError> {
+        self.require_agents()?;
         expect_acknowledgement(
             self.request(Request::CancelAgent { session_id }).await?,
             &Response::Ack,
@@ -309,6 +347,7 @@ impl Client {
     }
 
     pub async fn close_agent(&mut self, session_id: AgentSessionId) -> Result<(), ClientError> {
+        self.require_agents()?;
         expect_acknowledgement(
             self.request(Request::CloseAgent { session_id }).await?,
             &Response::Ack,
@@ -420,6 +459,17 @@ impl Client {
             .ok_or(ClientError::ConnectionClosed)?
             .map_err(Into::into)
     }
+
+    fn require_agents(&self) -> Result<(), ClientError> {
+        if self.supports_agents() {
+            Ok(())
+        } else {
+            Err(ClientError::UnsupportedByDaemon {
+                feature: "ACP agents",
+                protocol: self.protocol_version,
+            })
+        }
+    }
 }
 
 #[must_use]
@@ -464,6 +514,11 @@ pub enum ClientError {
     ConnectionClosed,
     #[error("protocol mismatch: client={client}, server={server}")]
     ProtocolMismatch { client: u16, server: u16 },
+    #[error("{feature} require a newer workspace daemon (connected protocol: {protocol})")]
+    UnsupportedByDaemon {
+        feature: &'static str,
+        protocol: u16,
+    },
     #[error("daemon sent an unexpected response id: {0}")]
     UnexpectedResponseId(u64),
     #[error("daemon sent an unexpected response: {0:?}")]
@@ -486,18 +541,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incompatible_daemon_is_rejected_during_the_hello_exchange() {
+    async fn protocol_one_daemon_is_attached_in_terminal_compatibility_mode() {
+        let directory = tempfile::tempdir().expect("temporary state directory");
+        let socket = directory.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        let server = tokio::spawn(async move {
+            for expected_protocol in [PROTOCOL_VERSION, 1] {
+                let (mut stream, _) = listener.accept().await.expect("accept client");
+                let hello: ClientMessage =
+                    read_frame(&mut stream).await.expect("read client hello");
+                assert!(matches!(
+                    hello,
+                    ClientMessage::Hello(ClientHello { protocol_version, .. })
+                        if protocol_version == expected_protocol
+                ));
+                write_frame(
+                    &mut stream,
+                    &ServerMessage::Hello(ServerHello {
+                        protocol_version: 1,
+                        daemon_pid: 42,
+                    }),
+                )
+                .await
+                .expect("write server hello");
+            }
+        });
+
+        let mut client = Client::connect(&socket, "version-test")
+            .await
+            .expect("protocol one terminal compatibility connection");
+        assert_eq!(client.protocol_version(), 1);
+        assert!(!client.supports_agents());
+        assert!(matches!(
+            client.list_agent_sessions().await,
+            Err(ClientError::UnsupportedByDaemon {
+                feature: "ACP agents",
+                protocol: 1,
+            })
+        ));
+        server.await.expect("fake daemon task");
+    }
+
+    #[tokio::test]
+    async fn unknown_protocol_daemon_is_rejected_during_the_hello_exchange() {
         let directory = tempfile::tempdir().expect("temporary state directory");
         let socket = directory.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept client");
-            let hello: ClientMessage = read_frame(&mut stream).await.expect("read client hello");
-            assert!(matches!(hello, ClientMessage::Hello(_)));
+            let _: ClientMessage = read_frame(&mut stream).await.expect("read client hello");
             write_frame(
                 &mut stream,
                 &ServerMessage::Hello(ServerHello {
-                    protocol_version: PROTOCOL_VERSION - 1,
+                    protocol_version: 0,
                     daemon_pid: 42,
                 }),
             )
@@ -505,16 +601,12 @@ mod tests {
             .expect("write server hello");
         });
 
-        let error = match Client::connect(&socket, "version-test").await {
-            Ok(_) => panic!("old daemon must not be decoded by the new client"),
-            Err(error) => error,
-        };
         assert!(matches!(
-            error,
-            ClientError::ProtocolMismatch {
+            Client::connect(&socket, "version-test").await,
+            Err(ClientError::ProtocolMismatch {
                 client: PROTOCOL_VERSION,
-                server,
-            } if server == PROTOCOL_VERSION - 1
+                server: 0,
+            })
         ));
         server.await.expect("fake daemon task");
     }
