@@ -11,3 +11,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # This revision selects the project's Rust toolchain, not merely the
+      # action implementation. rust-toolchain.toml is the source of truth.
+      - dependency-name: dtolnay/rust-toolchain
