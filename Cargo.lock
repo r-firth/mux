@@ -3986,6 +3986,7 @@ dependencies = [
  "mux-workspace",
  "parking_lot",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "uuid",
@@ -4039,6 +4040,7 @@ dependencies = [
  "mux-workspace",
  "postcard",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
 ]

@@ -10,7 +10,7 @@ mod layout;
 mod settings;
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -25,21 +25,24 @@ use gpui::{
     WindowBackgroundAppearance, WindowBounds, WindowOptions, div, px, rgb, size,
 };
 use gpui_component::{
-    Icon, IconName, InteractiveElementExt as _, Selectable as _, Sizable as _, StyledExt as _,
-    Theme, ThemeMode, TitleBar, WindowExt as _,
+    ActiveTheme as _, Icon, IconName, InteractiveElementExt as _, Selectable as _, Sizable as _,
+    StyledExt as _, Theme, ThemeMode, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Enter, Input, InputEvent, InputState},
     notification::Notification,
     scroll::ScrollableElement as _,
+    spinner::Spinner,
     switch::Switch,
+    text::{TextView, TextViewStyle},
     v_flex,
 };
 use gpui_terminal::GridMetrics;
 use mux_acp::{
     AgentConfigCategory, AgentConfigValue, AgentConfigValueSelection, AgentContext,
-    AgentContextKind, AgentEvent, AgentProfile, AgentPrompt, AgentSessionSnapshot,
-    AgentSessionStatus, AgentTimelineItem, built_in_agent_profiles,
+    AgentContextKind, AgentEvent, AgentMessageRole, AgentProfile, AgentPrompt,
+    AgentSessionSnapshot, AgentSessionStatus, AgentTimelineItem, AgentTool, AgentToolKind,
+    ToolStatus, built_in_agent_profiles,
 };
 use mux_protocol::{ServerEvent, SessionAttachment, SessionSummary};
 use mux_terminal::{
@@ -113,6 +116,7 @@ struct MuxApp {
     _agent_input_subscription: gpui::Subscription,
     pending_agent_prompt: Option<AgentPrompt>,
     agent_scroll: ScrollHandle,
+    expanded_agent_items: HashSet<String>,
     agent_context: AgentContextMode,
     selected_pane: Option<PaneId>,
     selection_drag: Option<PaneId>,
@@ -164,7 +168,7 @@ impl MuxApp {
         let agent_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .auto_grow(1, 5)
-                .placeholder("Message an agent…")
+                .placeholder("Message an agent · /help for commands…")
         });
         let agent_input_subscription = cx.subscribe_in(
             &agent_input,
@@ -214,6 +218,7 @@ impl MuxApp {
             _agent_input_subscription: agent_input_subscription,
             pending_agent_prompt: None,
             agent_scroll: ScrollHandle::new(),
+            expanded_agent_items: HashSet::new(),
             agent_context: AgentContextMode::Pane,
             selected_pane: None,
             selection_drag: None,
@@ -711,34 +716,69 @@ impl MuxApp {
         self.backend.send(CommandMessage::ListAgents);
         self.agent_scroll.scroll_to_bottom();
         let sheet_width = (f32::from(window.viewport_size().width) * 0.46).clamp(410.0, 560.0);
+        // Give the nested timeline the space between gpui-component's title
+        // and footer so its local scroll handle—not the sheet's private outer
+        // scroller—owns overflow. The component rows are 36 px and 60 px.
+        let sheet_body_height =
+            (f32::from(window.viewport_size().height) - layout::TAB_BAR_HEIGHT - 36.0 - 60.0)
+                .max(0.0);
         let app = cx.weak_entity();
-        window.open_sheet(cx, move |sheet, _window, cx| {
+        window.open_sheet(cx, move |sheet, window, cx| {
             let Some(entity) = app.upgrade() else {
                 return sheet;
             };
-            let this = entity.read(cx);
+            let (picker, agent, scroll, expanded_items, empty_state, title, footer) = {
+                let this = entity.read(cx);
+                let picker = (this.agents.len() > 1)
+                    .then(|| agent_session_picker(&app, this).into_any_element());
+                let agent = this.agents.get(this.selected_agent).cloned();
+                let scroll = this.agent_scroll.clone();
+                let expanded_items = this.expanded_agent_items.clone();
+                let empty_state = agent
+                    .is_none()
+                    .then(|| agent_empty_state(this).into_any_element());
+                let title = agent_sheet_title(this).into_any_element();
+                let footer = agent_composer(&app, this).into_any_element();
+                (
+                    picker,
+                    agent,
+                    scroll,
+                    expanded_items,
+                    empty_state,
+                    title,
+                    footer,
+                )
+            };
+
             let mut content = v_flex().h_full().min_h_0().gap_2();
-            if this.agents.len() > 1 {
-                content = content.child(agent_session_picker(&app, this));
+            if let Some(picker) = picker {
+                content = content.child(picker);
             }
-            if let Some(agent) = this.agents.get(this.selected_agent) {
-                content = content.child(agent_timeline(agent, &this.agent_scroll));
+            if let Some(agent) = agent.as_ref() {
+                content = content.child(agent_timeline(
+                    &app,
+                    agent,
+                    &scroll,
+                    &expanded_items,
+                    window,
+                    cx,
+                ));
                 content = content.child(agent_auth_controls(&app, agent));
                 content = content.child(agent_permission_controls(&app, agent));
-            } else {
-                content = content.child(agent_empty_state(this));
+            } else if let Some(empty_state) = empty_state {
+                content = content.child(empty_state);
             }
-
             sheet
-                .title(agent_sheet_title(this))
+                .title(title)
                 .size(px(sheet_width))
                 .margin_top(px(layout::TAB_BAR_HEIGHT))
                 .overlay(false)
                 .overlay_closable(false)
-                .h_full()
+                .h(px(sheet_body_height))
+                .overflow_hidden()
                 .pt_1()
                 .pb_0()
-                .footer(agent_composer(&app, this))
+                .footer(footer)
                 .child(content)
         });
         self.agent_input
@@ -865,9 +905,15 @@ impl MuxApp {
             "deny" | "reject" => {
                 self.resolve_agent_permission(false, parts.next(), window, cx);
             }
+            "expand" | "details" => {
+                self.set_agent_detail_expansion(true, parts.next() == Some("all"));
+            }
+            "collapse" => {
+                self.set_agent_detail_expansion(false, parts.next() == Some("all"));
+            }
             "help" => window.push_notification(
                 Notification::info(
-                    "/new [agent] [cwd] · /next · /prev · /use <session> · /end · /cancel · /context pane|none · /mode <id> · /model <id> · /effort <id> · /login [method] · /allow [always] · /deny [always]",
+                    "/new [agent] [cwd] · /next · /prev · /use <session> · /end · /cancel · /expand [all] · /collapse [all] · /context pane|none · /mode <id> · /model <id> · /effort <id> · /login [method] · /allow [always] · /deny [always]",
                 )
                 .autohide(false),
                 cx,
@@ -875,6 +921,29 @@ impl MuxApp {
             _ => return false,
         }
         true
+    }
+
+    fn set_agent_detail_expansion(&mut self, expanded: bool, all: bool) {
+        let Some(agent) = self.agents.get(self.selected_agent) else {
+            return;
+        };
+        let mut keys = agent
+            .timeline
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| is_expandable_agent_item(item))
+            .map(|(index, item)| agent_item_key(agent, index, item))
+            .collect::<Vec<_>>();
+        if !all {
+            keys = keys.into_iter().rev().take(1).collect();
+        }
+        for key in keys {
+            if expanded {
+                self.expanded_agent_items.insert(key);
+            } else {
+                self.expanded_agent_items.remove(&key);
+            }
+        }
     }
 
     fn select_relative_agent(&mut self, delta: isize) {
@@ -1088,9 +1157,7 @@ impl MuxApp {
     }
 
     fn agent_scroll_is_near_bottom(&self) -> bool {
-        let offset = f32::from(self.agent_scroll.offset().y);
-        let maximum = f32::from(self.agent_scroll.max_offset().height);
-        maximum + offset <= 48.0
+        agent_scroll_is_near_bottom(&self.agent_scroll)
     }
 
     fn start_agent(&self, profile: AgentProfile, cwd_override: Option<PathBuf>) {
@@ -1913,55 +1980,57 @@ fn agent_empty_state(this: &MuxApp) -> impl IntoElement {
 
 fn agent_composer(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl IntoElement {
     let prompt_app = app.clone();
-    v_flex()
-        .w_full()
-        .gap_2()
-        .child(
-            h_flex()
-                .w_full()
-                .items_end()
-                .gap_2()
-                .child(Input::new(&this.agent_input).flex_1())
-                .child(
-                    Button::new("agent-send")
-                        .icon(IconName::ArrowUp)
-                        .primary()
-                        .small()
-                        .tooltip("Send · Return")
-                        .on_click(move |_, window, cx| {
-                            let _ = prompt_app.update(cx, |this, cx| {
-                                this.submit_agent_prompt(window, cx);
-                            });
-                            window.refresh();
-                        }),
-                ),
-        )
-        .child(
-            h_flex()
-                .w_full()
-                .justify_between()
-                .gap_3()
-                .text_xs()
-                .text_color(rgb(MUTED_TEXT))
-                .child(if this.agent_context == AgentContextMode::Pane {
-                    "/help  ·  pane context"
-                } else {
-                    "/help  ·  no context"
-                })
-                .child("↵ send  ·  ⇧↵ newline"),
-        )
+    v_flex().w_full().flex_none().gap_0().child(
+        h_flex()
+            .w_full()
+            .items_end()
+            .gap_2()
+            .child(Input::new(&this.agent_input).min_w_0().flex_1())
+            .child(
+                Button::new("agent-send")
+                    .icon(IconName::ArrowUp)
+                    .primary()
+                    .small()
+                    .tooltip("Send · Return")
+                    .on_click(move |_, window, cx| {
+                        let _ = prompt_app.update(cx, |this, cx| {
+                            this.submit_agent_prompt(window, cx);
+                        });
+                        window.refresh();
+                    }),
+            ),
+    )
 }
 
-fn agent_timeline(agent: &AgentSessionSnapshot, scroll: &ScrollHandle) -> impl IntoElement {
+fn agent_scroll_is_near_bottom(scroll: &ScrollHandle) -> bool {
+    let offset = f32::from(scroll.offset().y);
+    let maximum = f32::from(scroll.max_offset().height);
+    maximum + offset <= 48.0
+}
+
+fn agent_timeline(
+    app: &gpui::WeakEntity<MuxApp>,
+    agent: &AgentSessionSnapshot,
+    scroll: &ScrollHandle,
+    expanded_items: &HashSet<String>,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement {
+    // Keep following content whose intrinsic height changes after a streamed
+    // update (notably parsed Markdown), but respect an intentional scroll up.
+    if agent_scroll_is_near_bottom(scroll) {
+        scroll.scroll_to_bottom();
+    }
     let mut timeline = v_flex()
         .id(SharedString::from(format!("agent-timeline-{}", agent.id)))
         .flex_1()
         .min_h_0()
-        .gap_1()
+        .gap_2()
         .track_scroll(scroll)
-        .overflow_y_scrollbar()
-        .pr_2()
-        .pb_2();
+        .overflow_y_scroll()
+        .vertical_scrollbar(scroll)
+        .pr_3()
+        .pb_3();
     if agent.timeline.is_empty() {
         timeline = timeline.child(
             v_flex()
@@ -1973,30 +2042,467 @@ fn agent_timeline(agent: &AgentSessionSnapshot, scroll: &ScrollHandle) -> impl I
                 .child("Ready when you are."),
         );
     }
-    for item in &agent.timeline {
+    for (index, item) in agent.timeline.iter().enumerate() {
         if matches!(item, AgentTimelineItem::Context { .. }) {
             continue;
         }
-        let (label, text, color) = timeline_item(item);
-        timeline = timeline.child(
-            v_flex()
-                .gap_1()
-                .my_1()
-                .pl_3()
-                .py_1()
-                .border_l_2()
-                .border_color(color)
+        timeline = timeline.child(match item {
+            AgentTimelineItem::Message { role, text, .. } if *role != AgentMessageRole::Thought => {
+                agent_message_item(agent, index, *role, text, window, cx)
+            }
+            AgentTimelineItem::Message { text, .. } => thinking_item(
+                app,
+                agent,
+                index,
+                text,
+                expanded_items,
+                index + 1 == agent.timeline.len() && agent.status == AgentSessionStatus::Working,
+                window,
+                cx,
+            ),
+            AgentTimelineItem::Tool(tool) => {
+                agent_tool_item(app, agent, index, tool, expanded_items)
+            }
+            _ => agent_event_item(item),
+        });
+    }
+    timeline
+}
+
+fn agent_message_item(
+    agent: &AgentSessionSnapshot,
+    index: usize,
+    role: AgentMessageRole,
+    text: &str,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui::AnyElement {
+    let (label, accent) = match role {
+        AgentMessageRole::User => ("You", rgb(SIGNAL)),
+        AgentMessageRole::Agent => ("Agent", rgb(0x0078_d6a3)),
+        AgentMessageRole::Thought => unreachable!("thoughts have their own presentation"),
+    };
+    let mut message = v_flex()
+        .w_full()
+        .gap_1()
+        .px_2()
+        .py_1p5()
+        .rounded_lg()
+        .child(
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .child(div().size(px(5.0)).rounded_full().bg(accent))
                 .child(
                     div()
                         .text_size(px(10.0))
                         .font_semibold()
-                        .text_color(color)
+                        .text_color(accent)
                         .child(label),
-                )
-                .child(div().text_sm().line_height(px(21.0)).child(text)),
+                ),
+        );
+    if role == AgentMessageRole::User {
+        message = message.bg(rgb(CHROME_RAISED)).child(
+            div()
+                .text_sm()
+                .line_height(px(20.0))
+                .child(text.trim().to_owned()),
+        );
+    } else {
+        message = message.child(agent_markdown(
+            SharedString::from(format!("agent-message-{}-{index}", agent.id)),
+            SharedString::from(text.to_owned()),
+            window,
+            cx,
+        ));
+    }
+    message.into_any_element()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn thinking_item(
+    app: &gpui::WeakEntity<MuxApp>,
+    agent: &AgentSessionSnapshot,
+    index: usize,
+    text: &str,
+    expanded_items: &HashSet<String>,
+    running: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui::AnyElement {
+    let summary = thought_summary(text);
+    let detail = thought_detail(text, &summary);
+    let key = agent_item_key(agent, index, &agent.timeline[index]);
+    let expanded = detail.is_some() && expanded_items.contains(&key);
+    let mut header = h_flex()
+        .id(SharedString::from(format!("thought-{key}")))
+        .w_full()
+        .min_w_0()
+        .gap_2()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .text_color(rgb(MUTED_TEXT))
+        .child(if running {
+            Spinner::new()
+                .xsmall()
+                .color(rgb(MUTED_TEXT).into())
+                .into_any_element()
+        } else {
+            Icon::new(IconName::Asterisk)
+                .xsmall()
+                .text_color(rgb(MUTED_TEXT))
+                .into_any_element()
+        })
+        .child(div().text_xs().font_semibold().child("Thinking"))
+        .child(div().min_w_0().flex_1().truncate().text_sm().child(summary));
+    if detail.is_some() {
+        let toggle_app = app.clone();
+        let toggle_key = key.clone();
+        header = header
+            .hover(|style| style.bg(rgb(CHROME_RAISED)))
+            .on_click(move |_, window, cx| {
+                let toggle_key = toggle_key.clone();
+                let _ = toggle_app.update(cx, |this, cx| {
+                    if !this.expanded_agent_items.remove(&toggle_key) {
+                        this.expanded_agent_items.insert(toggle_key);
+                    }
+                    cx.notify();
+                });
+                window.refresh();
+            })
+            .child(
+                Icon::new(if expanded {
+                    IconName::ChevronUp
+                } else {
+                    IconName::ChevronDown
+                })
+                .xsmall()
+                .text_color(rgb(MUTED_TEXT)),
+            );
+    }
+    let mut item = v_flex().w_full().gap_1().child(header);
+    if expanded {
+        item = item.child(
+            div()
+                .ml_6()
+                .pl_3()
+                .border_l_1()
+                .border_color(rgb(BORDER))
+                .child(agent_markdown(
+                    SharedString::from(format!("agent-thought-{}-{index}", agent.id)),
+                    SharedString::from(detail.unwrap_or_default().to_owned()),
+                    window,
+                    cx,
+                )),
         );
     }
-    timeline
+    item.into_any_element()
+}
+
+fn agent_tool_item(
+    app: &gpui::WeakEntity<MuxApp>,
+    agent: &AgentSessionSnapshot,
+    index: usize,
+    tool: &AgentTool,
+    expanded_items: &HashSet<String>,
+) -> gpui::AnyElement {
+    let key = agent_item_key(agent, index, &agent.timeline[index]);
+    let expanded = expanded_items.contains(&key);
+    let toggle_app = app.clone();
+    let toggle_key = key.clone();
+    let header = h_flex()
+        .id(SharedString::from(format!("tool-{key}")))
+        .w_full()
+        .min_w_0()
+        .gap_2()
+        .px_2()
+        .py_1p5()
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(CHROME_RAISED))
+        .hover(|style| style.bg(rgb(0x0022_2732)))
+        .on_click(move |_, window, cx| {
+            let toggle_key = toggle_key.clone();
+            let _ = toggle_app.update(cx, |this, cx| {
+                if !this.expanded_agent_items.remove(&toggle_key) {
+                    this.expanded_agent_items.insert(toggle_key);
+                }
+                cx.notify();
+            });
+            window.refresh();
+        })
+        .child(
+            Icon::new(tool_kind_icon(tool.kind))
+                .small()
+                .text_color(tool_accent(tool.status)),
+        )
+        .child(
+            div()
+                .w(px(52.0))
+                .flex_none()
+                .text_size(px(9.0))
+                .font_semibold()
+                .text_color(rgb(MUTED_TEXT))
+                .child(tool_kind_label(tool.kind)),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .truncate()
+                .text_sm()
+                .child(tool.title.trim().to_owned()),
+        )
+        .child(tool_status_element(tool.status))
+        .child(
+            Icon::new(if expanded {
+                IconName::ChevronUp
+            } else {
+                IconName::ChevronDown
+            })
+            .xsmall()
+            .text_color(rgb(MUTED_TEXT)),
+        );
+
+    let mut item = v_flex().w_full().gap_1().child(header);
+    if expanded {
+        item = item.child(agent_tool_details(tool));
+    }
+    item.into_any_element()
+}
+
+fn agent_tool_details(tool: &AgentTool) -> gpui::AnyElement {
+    let mut details = v_flex()
+        .ml_4()
+        .mr_1()
+        .gap_2()
+        .p_3()
+        .rounded_b_lg()
+        .border_l_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(0x0014_171e));
+    let input =
+        tool.raw_input.as_ref().map(format_tool_value).or_else(|| {
+            (tool.kind == AgentToolKind::Execute).then(|| tool.title.trim().to_owned())
+        });
+    if let Some(input) = input.filter(|input| !input.is_empty()) {
+        details = details.child(tool_detail_section("Input", &input));
+    }
+    let output = tool.raw_output.as_ref().map(format_tool_value).or_else(|| {
+        tool.detail
+            .as_deref()
+            .filter(|detail| !detail.starts_with("Terminal "))
+            .map(ToOwned::to_owned)
+    });
+    if let Some(output) = output.filter(|output| !output.is_empty()) {
+        details = details.child(tool_detail_section("Output", &output));
+    } else {
+        details = details.child(
+            div()
+                .text_xs()
+                .text_color(rgb(MUTED_TEXT))
+                .child("This agent did not publish captured output over ACP."),
+        );
+    }
+    details.into_any_element()
+}
+
+fn tool_detail_section(label: &'static str, value: &str) -> gpui::AnyElement {
+    v_flex()
+        .w_full()
+        .gap_1()
+        .child(
+            div()
+                .text_size(px(9.0))
+                .font_semibold()
+                .text_color(rgb(MUTED_TEXT))
+                .child(label),
+        )
+        .child(
+            div()
+                .w_full()
+                .p_2()
+                .rounded_md()
+                .bg(rgb(SURFACE))
+                .font_family(EMBEDDED_TERMINAL_FONT)
+                .text_xs()
+                .line_height(px(17.0))
+                .child(truncate_tool_detail(value, 24_000)),
+        )
+        .into_any_element()
+}
+
+fn agent_event_item(item: &AgentTimelineItem) -> gpui::AnyElement {
+    let (label, text, color) = timeline_item(item);
+    v_flex()
+        .gap_1()
+        .px_2()
+        .py_1()
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_semibold()
+                .text_color(color)
+                .child(label),
+        )
+        .child(div().text_sm().line_height(px(20.0)).child(text))
+        .into_any_element()
+}
+
+fn agent_markdown(
+    id: impl Into<gpui::ElementId>,
+    markdown: impl Into<SharedString>,
+    window: &mut Window,
+    cx: &mut App,
+) -> TextView {
+    let mut style = TextViewStyle::default()
+        .paragraph_gap(gpui::rems(0.45))
+        .heading_font_size(|level, base| if level <= 2 { base } else { base * 0.92 })
+        .code_block(
+            gpui::StyleRefinement::default()
+                .bg(rgb(SURFACE))
+                .p_2()
+                .rounded_md()
+                .font_family(EMBEDDED_TERMINAL_FONT)
+                .text_xs(),
+        );
+    style.highlight_theme = cx.theme().highlight_theme.clone();
+    style.is_dark = true;
+    TextView::markdown(id, markdown, window, cx)
+        .style(style)
+        .selectable(true)
+        .text_sm()
+        .line_height(px(20.0))
+}
+
+fn agent_item_key(agent: &AgentSessionSnapshot, index: usize, item: &AgentTimelineItem) -> String {
+    match item {
+        AgentTimelineItem::Tool(tool) => format!("{}:tool:{}", agent.id, tool.id),
+        AgentTimelineItem::Message {
+            role: AgentMessageRole::Thought,
+            message_id,
+            ..
+        } => format!(
+            "{}:thought:{}",
+            agent.id,
+            message_id.clone().unwrap_or_else(|| index.to_string())
+        ),
+        _ => format!("{}:item:{index}", agent.id),
+    }
+}
+
+fn is_expandable_agent_item(item: &AgentTimelineItem) -> bool {
+    match item {
+        AgentTimelineItem::Tool(_) => true,
+        AgentTimelineItem::Message {
+            role: AgentMessageRole::Thought,
+            text,
+            ..
+        } => thought_detail(text, &thought_summary(text)).is_some(),
+        _ => false,
+    }
+}
+
+fn thought_summary(text: &str) -> String {
+    let line = text
+        .trim()
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("Working")
+        .trim();
+    line.strip_prefix("**")
+        .and_then(|line| line.strip_suffix("**"))
+        .unwrap_or(line)
+        .trim()
+        .to_owned()
+}
+
+fn thought_detail<'a>(text: &'a str, summary: &str) -> Option<&'a str> {
+    let text = text.trim();
+    let single_emphasized_line = text
+        .strip_prefix("**")
+        .and_then(|text| text.strip_suffix("**"))
+        .is_some_and(|text| text.trim() == summary);
+    (!single_emphasized_line && text != summary && !text.is_empty()).then_some(text)
+}
+
+fn format_tool_value(value: &serde_json::Value) -> String {
+    value.as_str().map_or_else(
+        || serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
+        ToOwned::to_owned,
+    )
+}
+
+fn truncate_tool_detail(value: &str, limit: usize) -> String {
+    if value.len() <= limit {
+        return value.to_owned();
+    }
+    let boundary = (0..=limit)
+        .rev()
+        .find(|index| value.is_char_boundary(*index))
+        .unwrap_or_default();
+    format!("{}\n… output truncated in this view", &value[..boundary])
+}
+
+fn tool_kind_label(kind: AgentToolKind) -> &'static str {
+    match kind {
+        AgentToolKind::Read => "READ",
+        AgentToolKind::Edit => "EDIT",
+        AgentToolKind::Delete => "DELETE",
+        AgentToolKind::Move => "MOVE",
+        AgentToolKind::Search => "SEARCH",
+        AgentToolKind::Execute => "EXECUTE",
+        AgentToolKind::Think => "THINK",
+        AgentToolKind::Fetch => "FETCH",
+        AgentToolKind::SwitchMode => "MODE",
+        AgentToolKind::Other => "ACTION",
+    }
+}
+
+fn tool_kind_icon(kind: AgentToolKind) -> IconName {
+    match kind {
+        AgentToolKind::Read => IconName::File,
+        AgentToolKind::Edit | AgentToolKind::SwitchMode => IconName::Replace,
+        AgentToolKind::Delete => IconName::Delete,
+        AgentToolKind::Move => IconName::ArrowRight,
+        AgentToolKind::Search => IconName::Search,
+        AgentToolKind::Execute => IconName::SquareTerminal,
+        AgentToolKind::Think => IconName::Asterisk,
+        AgentToolKind::Fetch => IconName::Globe,
+        AgentToolKind::Other => IconName::Ellipsis,
+    }
+}
+
+fn tool_status_element(status: ToolStatus) -> gpui::AnyElement {
+    match status {
+        ToolStatus::Pending => Icon::new(IconName::Dash)
+            .xsmall()
+            .text_color(rgb(MUTED_TEXT))
+            .into_any_element(),
+        ToolStatus::Running => Spinner::new()
+            .xsmall()
+            .color(tool_accent(status).into())
+            .into_any_element(),
+        ToolStatus::Completed => Icon::new(IconName::CircleCheck)
+            .xsmall()
+            .text_color(tool_accent(status))
+            .into_any_element(),
+        ToolStatus::Failed => Icon::new(IconName::CircleX)
+            .xsmall()
+            .text_color(tool_accent(status))
+            .into_any_element(),
+    }
+}
+
+fn tool_accent(status: ToolStatus) -> gpui::Rgba {
+    match status {
+        ToolStatus::Pending => rgb(MUTED_TEXT),
+        ToolStatus::Running => rgb(SIGNAL),
+        ToolStatus::Completed => rgb(0x0078_d6a3),
+        ToolStatus::Failed => rgb(0x00ef_7d7d),
+    }
 }
 
 fn agent_permission_controls(
