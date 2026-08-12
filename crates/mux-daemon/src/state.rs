@@ -209,6 +209,69 @@ impl DaemonState {
         Ok(summary)
     }
 
+    pub fn create_session_for_pane(
+        &self,
+        name: String,
+        pane_id: PaneId,
+    ) -> Result<SessionSummary, RemoteError> {
+        let source = self
+            .sessions
+            .read()
+            .values()
+            .find(|session| session.panes.read().contains_key(&pane_id))
+            .cloned()
+            .ok_or_else(|| {
+                RemoteError::new(ErrorCode::NotFound, format!("pane not found: {pane_id}"))
+            })?;
+        let cwd = source
+            .cwd_for_pane(pane_id)
+            .unwrap_or_else(|| source.spawn.cwd.clone());
+        self.create_session(CreateSession {
+            name,
+            cwd,
+            command: source.spawn.command.clone(),
+            initial_panes: 1,
+            initial_size: source.spawn.size,
+        })
+    }
+
+    pub fn rename_session(&self, session_id: SessionId, name: &str) -> Result<(), RemoteError> {
+        let name = validated_name("session", name).map_err(internal_error)?;
+        let sessions = self.sessions.read();
+        if sessions.values().any(|session| {
+            let model = session.model.read();
+            model.id != session_id && model.name == name
+        }) {
+            return Err(RemoteError::new(
+                ErrorCode::Conflict,
+                format!("session already exists: {name}"),
+            ));
+        }
+        let session = sessions.get(&session_id).cloned().ok_or_else(|| {
+            RemoteError::new(
+                ErrorCode::NotFound,
+                format!("session not found: {session_id}"),
+            )
+        })?;
+        drop(sessions);
+        session.model.write().name = name;
+        let _ = session
+            .events
+            .send(ServerEvent::WorkspaceChanged { session_id });
+        self.persist_metadata().map_err(internal_error)
+    }
+
+    pub fn kill_session(&self, session_id: SessionId) -> Result<(), RemoteError> {
+        let session = self.sessions.write().remove(&session_id).ok_or_else(|| {
+            RemoteError::new(
+                ErrorCode::NotFound,
+                format!("session not found: {session_id}"),
+            )
+        })?;
+        session.kill();
+        self.persist_metadata().map_err(internal_error)
+    }
+
     pub fn prepare_attach(
         &self,
         selector: &SessionSelector,
@@ -240,6 +303,13 @@ impl DaemonState {
         session_id: SessionId,
         command: WorkspaceCommand,
     ) -> Result<SessionAttachment, RemoteError> {
+        if let WorkspaceCommand::RenameSession(name) = &command {
+            self.rename_session(session_id, name)?;
+            return self
+                .resolve(&SessionSelector::Id(session_id))?
+                .attachment()
+                .map_err(internal_error);
+        }
         let session = self.resolve(&SessionSelector::Id(session_id))?;
         let attachment = session
             .apply_command(command, self.replay_bytes_per_pane)
@@ -469,8 +539,16 @@ impl SessionRuntime {
             }
         }
     }
+
+    fn kill(&self) {
+        let panes = std::mem::take(&mut *self.panes.write());
+        for pane in panes.into_values() {
+            let _ = pane.kill();
+        }
+    }
 }
 
+#[derive(Clone)]
 struct SpawnTemplate {
     cwd: PathBuf,
     command: SpawnCommand,
@@ -609,6 +687,66 @@ mod tests {
         for pane in runtime.panes.read().values() {
             let _ = pane.kill();
         }
+    }
+
+    #[test]
+    fn session_lifecycle_is_owned_and_validated_by_the_daemon() {
+        let state_directory = tempfile::tempdir().expect("state directory");
+        let working_directory = tempfile::tempdir().expect("working directory");
+        let state = DaemonState::new(state_directory.path().to_path_buf(), 64 * 1024);
+        let first = state
+            .create_session(CreateSession {
+                name: "first".to_owned(),
+                cwd: working_directory.path().to_path_buf(),
+                command: SpawnCommand {
+                    program: PathBuf::from("/bin/sh"),
+                    args: Vec::new(),
+                    environment: Vec::new(),
+                },
+                initial_panes: 1,
+                initial_size: TerminalSize::default(),
+            })
+            .expect("create first session");
+        let first_runtime = state
+            .resolve(&SessionSelector::Id(first.id))
+            .expect("first runtime");
+        let source_pane = first_runtime
+            .model
+            .read()
+            .active_tab()
+            .expect("active tab")
+            .focused_pane;
+
+        let second = state
+            .create_session_for_pane("second".to_owned(), source_pane)
+            .expect("create inherited session");
+        let second_runtime = state
+            .resolve(&SessionSelector::Id(second.id))
+            .expect("second runtime");
+        let second_pane = second_runtime
+            .model
+            .read()
+            .active_tab()
+            .expect("active tab")
+            .focused_pane;
+        let second_process = second_runtime
+            .panes
+            .read()
+            .get(&second_pane)
+            .expect("second pane")
+            .clone();
+        wait_for_cwd(&second_process, working_directory.path());
+
+        state
+            .rename_session(second.id, "renamed")
+            .expect("rename session");
+        assert_eq!(second_runtime.model.read().name, "renamed");
+        assert!(state.rename_session(second.id, "first").is_err());
+
+        state.kill_session(second.id).expect("kill second session");
+        assert_eq!(state.list_sessions(), vec![first.clone()]);
+        state.kill_session(first.id).expect("kill first session");
+        assert!(state.list_sessions().is_empty());
     }
 
     fn wait_for_cwd(pane: &PaneRuntime, expected: &std::path::Path) {

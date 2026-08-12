@@ -257,6 +257,15 @@ where
         } => state
             .set_agent_config(session_id, config_id, value)
             .map(|()| Response::Ack),
+        Request::CreateSessionForPane { name, pane_id } => state
+            .create_session_for_pane(name, pane_id)
+            .map(Response::SessionCreated),
+        Request::RenameSession { session_id, name } => state
+            .rename_session(session_id, &name)
+            .map(|()| Response::Ack),
+        Request::KillSession { session_id } => {
+            state.kill_session(session_id).map(|()| Response::Ack)
+        }
     };
 
     write_frame(

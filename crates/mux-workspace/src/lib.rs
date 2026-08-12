@@ -669,6 +669,14 @@ impl Keymap {
             },
             Action::OpenAgentSurface,
         );
+        keymap.bind(
+            InputMode::Normal,
+            KeyChord {
+                key: Key::Character('s'),
+                modifiers: Modifiers::SUPER.union(Modifiers::SHIFT),
+            },
+            Action::OpenSessionSwitcher,
+        );
         keymap
     }
 
@@ -959,6 +967,16 @@ mod tests {
         assert_eq!(
             keymap.resolve(InputMode::Normal, KeyChord::control('o')),
             None
+        );
+        assert_eq!(
+            keymap.resolve(
+                InputMode::Normal,
+                KeyChord {
+                    key: Key::Character('s'),
+                    modifiers: Modifiers::SUPER.union(Modifiers::SHIFT),
+                },
+            ),
+            Some(&Action::OpenSessionSwitcher),
         );
         assert_eq!(
             keymap.resolve(InputMode::Normal, KeyChord::plain(Key::Character(':'))),

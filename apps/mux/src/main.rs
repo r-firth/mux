@@ -58,9 +58,17 @@ enum UserEvent {
 struct SessionSwitcher {
     entries: Vec<SessionSummary>,
     selected: usize,
+    pending_kill: Option<mux_workspace::SessionId>,
+}
+
+#[derive(Clone, Copy)]
+enum TextPromptKind {
+    RenameTab,
+    RenameSession(mux_workspace::SessionId),
 }
 
 struct TextPrompt {
+    kind: TextPromptKind,
     draft: String,
 }
 
@@ -392,14 +400,22 @@ impl Application {
             UiState {
                 mode: self.mode,
                 message: self.message.as_deref(),
-                session_switcher: self.session_switcher.as_ref().map(|switcher| {
-                    SessionSwitcherView {
-                        entries: &switcher.entries,
-                        selected: switcher.selected,
-                    }
-                }),
+                session_switcher: if self.text_prompt.is_none() {
+                    self.session_switcher
+                        .as_ref()
+                        .map(|switcher| SessionSwitcherView {
+                            entries: &switcher.entries,
+                            selected: switcher.selected,
+                            pending_kill: switcher.pending_kill,
+                        })
+                } else {
+                    None
+                },
                 text_prompt: self.text_prompt.as_ref().map(|prompt| TextPromptView {
-                    label: "Rename tab",
+                    label: match prompt.kind {
+                        TextPromptKind::RenameTab => "Rename tab",
+                        TextPromptKind::RenameSession(_) => "Rename session",
+                    },
                     draft: &prompt.draft,
                 }),
                 agent_surface: self.agent_surface.as_ref().map(|surface| AgentSurfaceView {
@@ -528,15 +544,28 @@ impl Application {
                 self.ime_preedit.clear();
             }
             Key::Named(NamedKey::Enter) => {
-                let title = self
+                let prompt = self
                     .text_prompt
                     .take()
-                    .map(|prompt| prompt.draft.trim().to_owned())
-                    .unwrap_or_default();
+                    .expect("text prompt is open while handling its key");
+                let value = prompt.draft.trim().to_owned();
                 self.ime_preedit.clear();
                 self.mode = InputMode::Normal;
-                if !title.is_empty() {
-                    self.send_workspace(WorkspaceCommand::RenameTab(title));
+                if !value.is_empty() {
+                    match prompt.kind {
+                        TextPromptKind::RenameTab => {
+                            self.send_workspace(WorkspaceCommand::RenameTab(value));
+                        }
+                        TextPromptKind::RenameSession(session_id) => {
+                            if let Some(backend) = &self.backend {
+                                backend.send(CommandMessage::RenameSession {
+                                    session_id,
+                                    name: value,
+                                });
+                            }
+                            self.session_switcher = None;
+                        }
+                    }
                     return;
                 }
             }
@@ -568,6 +597,9 @@ impl Application {
     fn handle_session_switcher_key(&mut self, event: &KeyEvent) {
         let key = event.key_without_modifiers();
         let mut attach = None;
+        let mut create = false;
+        let mut rename = None;
+        let mut kill = None;
         let mut close = false;
         if let Some(switcher) = &mut self.session_switcher {
             let len = switcher.entries.len();
@@ -576,21 +608,25 @@ impl Application {
                 Key::Named(NamedKey::ArrowUp) => {
                     if len > 0 {
                         switcher.selected = (switcher.selected + len - 1) % len;
+                        switcher.pending_kill = None;
                     }
                 }
                 Key::Character(ref value) if value.eq_ignore_ascii_case("k") => {
                     if len > 0 {
                         switcher.selected = (switcher.selected + len - 1) % len;
+                        switcher.pending_kill = None;
                     }
                 }
                 Key::Named(NamedKey::ArrowDown) => {
                     if len > 0 {
                         switcher.selected = (switcher.selected + 1) % len;
+                        switcher.pending_kill = None;
                     }
                 }
                 Key::Character(ref value) if value.eq_ignore_ascii_case("j") => {
                     if len > 0 {
                         switcher.selected = (switcher.selected + 1) % len;
+                        switcher.pending_kill = None;
                     }
                 }
                 Key::Named(NamedKey::Enter) => {
@@ -598,6 +634,19 @@ impl Application {
                         .entries
                         .get(switcher.selected)
                         .map(|session| session.id);
+                }
+                Key::Character(ref value) if value.eq_ignore_ascii_case("n") => create = true,
+                Key::Character(ref value) if value.eq_ignore_ascii_case("r") => {
+                    rename = switcher.entries.get(switcher.selected).cloned();
+                }
+                Key::Character(ref value) if value.eq_ignore_ascii_case("x") => {
+                    if let Some(session) = switcher.entries.get(switcher.selected) {
+                        if switcher.pending_kill == Some(session.id) {
+                            kill = Some(session.id);
+                        } else {
+                            switcher.pending_kill = Some(session.id);
+                        }
+                    }
                 }
                 Key::Character(ref value) => {
                     attach = value
@@ -615,10 +664,44 @@ impl Application {
                 backend.send(CommandMessage::AttachSession(session_id));
             }
             self.session_switcher = None;
+        } else if create {
+            let name = self.next_session_name();
+            if let (Some(backend), Some(pane_id)) = (&self.backend, self.focused_pane()) {
+                backend.send(CommandMessage::CreateSessionForPane { name, pane_id });
+                self.session_switcher = None;
+            }
+        } else if let Some(session) = rename {
+            self.text_prompt = Some(TextPrompt {
+                kind: TextPromptKind::RenameSession(session.id),
+                draft: session.name,
+            });
+        } else if let Some(session_id) = kill {
+            if let Some(backend) = &self.backend {
+                backend.send(CommandMessage::KillSession(session_id));
+            }
+            self.session_switcher = None;
         } else if close {
             self.session_switcher = None;
         }
         let _ = self.refresh_view();
+    }
+
+    fn next_session_name(&self) -> String {
+        let names = self
+            .session_switcher
+            .as_ref()
+            .map(|switcher| {
+                switcher
+                    .entries
+                    .iter()
+                    .map(|session| session.name.as_str())
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        (1..=names.len() + 1)
+            .map(|number| format!("session {number}"))
+            .find(|name| !names.contains(name.as_str()))
+            .expect("N sessions cannot fill N + 1 numbered names")
     }
 
     fn handle_agent_surface_key(&mut self, event: &KeyEvent) {
@@ -1757,6 +1840,7 @@ impl Application {
                 self.session_switcher = Some(SessionSwitcher {
                     entries: Vec::new(),
                     selected: 0,
+                    pending_kill: None,
                 });
                 if let Some(backend) = &self.backend {
                     backend.send(CommandMessage::ListSessions);
@@ -1771,6 +1855,7 @@ impl Application {
             Action::OpenAgentSurface => self.toggle_agent_surface(),
             Action::RenameTab => {
                 self.text_prompt = Some(TextPrompt {
+                    kind: TextPromptKind::RenameTab,
                     draft: String::new(),
                 });
                 let _ = self.refresh_view();
@@ -2015,7 +2100,11 @@ impl ApplicationHandler<UserEvent> for Application {
                     .as_ref()
                     .and_then(|active| entries.iter().position(|entry| entry.id == active.id))
                     .unwrap_or(0);
-                self.session_switcher = Some(SessionSwitcher { entries, selected });
+                self.session_switcher = Some(SessionSwitcher {
+                    entries,
+                    selected,
+                    pending_kill: None,
+                });
                 self.refresh_view()
             }
             UserEvent::Server(event) => self.apply_server_event(event),
