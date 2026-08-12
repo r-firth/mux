@@ -424,7 +424,15 @@ impl Client {
 
 #[must_use]
 pub fn default_state_dir() -> Option<PathBuf> {
-    ProjectDirs::from("io", "mux", "Mux").map(|dirs| dirs.data_local_dir().to_path_buf())
+    state_dir_for("Mux")
+}
+
+/// Resolve a per-user state directory for a named Mux application profile.
+/// Distinct preview/dev bundles can use an isolated daemon without colliding
+/// with the installed product's persistent workspace.
+#[must_use]
+pub fn state_dir_for(application: &str) -> Option<PathBuf> {
+    ProjectDirs::from("io", "mux", application).map(|dirs| dirs.data_local_dir().to_path_buf())
 }
 
 #[must_use]
@@ -467,6 +475,15 @@ mod tests {
     use super::*;
     use mux_protocol::{ClientMessage, ServerHello, ServerMessage, read_frame, write_frame};
     use tokio::net::UnixListener;
+
+    #[test]
+    fn named_application_profiles_have_isolated_state_directories() {
+        let product = default_state_dir().expect("product state directory");
+        let preview = state_dir_for("MuxPreview").expect("preview state directory");
+
+        assert_ne!(preview, product);
+        assert!(preview.to_string_lossy().contains("MuxPreview"));
+    }
 
     #[tokio::test]
     async fn incompatible_daemon_is_rejected_during_the_hello_exchange() {

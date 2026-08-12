@@ -433,13 +433,18 @@ impl Application {
     }
 
     fn sync_view(&mut self, changed_panes: &HashSet<PaneId>) -> Result<()> {
-        let (Some(renderer), Some(session)) = (&self.renderer, &self.session) else {
+        let Some(renderer) = &self.renderer else {
             return Ok(());
         };
         let scale = renderer.window_scale_factor();
         let width = renderer.width() as f32 / scale;
         let height = renderer.height() as f32 / scale;
-        self.geometry = layout::calculate(session, width, height, self.mode != InputMode::Normal);
+        self.geometry = self
+            .session
+            .as_ref()
+            .map_or_else(WorkspaceGeometry::default, |session| {
+                layout::calculate(session, width, height, self.mode != InputMode::Normal)
+            });
         let sizes = self
             .geometry
             .panes
@@ -469,9 +474,7 @@ impl Application {
             .map(|(pane_id, replica)| (*pane_id, &replica.frame))
             .collect::<HashMap<_, _>>();
         let renderer = self.renderer.as_mut().expect("renderer checked above");
-        let session = self.session.as_ref().expect("session checked above");
         renderer.sync(
-            session,
             &self.geometry,
             &frames,
             &effective_changes,
@@ -3268,6 +3271,14 @@ fn parse_state_dir() -> Option<PathBuf> {
     std::env::var_os("MUX_STATE_DIR").map(PathBuf::from)
 }
 
+fn application_state_dir() -> Option<PathBuf> {
+    parse_state_dir()
+        .or_else(|| {
+            option_env!("MUX_DEFAULT_STATE_APPLICATION").and_then(mux_client::state_dir_for)
+        })
+        .or_else(mux_client::default_state_dir)
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -3277,9 +3288,8 @@ fn main() -> Result<()> {
         .init();
 
     if std::env::args_os().any(|argument| argument == "--daemon") {
-        let state_dir = parse_state_dir()
-            .or_else(mux_client::default_state_dir)
-            .ok_or_else(|| anyhow!("no application data directory"))?;
+        let state_dir =
+            application_state_dir().ok_or_else(|| anyhow!("no application data directory"))?;
         info!(state_dir = %state_dir.display(), "starting persistent workspace daemon");
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -3290,7 +3300,7 @@ fn main() -> Result<()> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let mut application = Application {
         event_proxy: Some(event_loop.create_proxy()),
-        state_dir: parse_state_dir(),
+        state_dir: application_state_dir(),
         ..Application::default()
     };
     event_loop.run_app(&mut application)?;

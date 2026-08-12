@@ -26,7 +26,7 @@ use mux_terminal::{
     TerminalPoint, TerminalSelectionGeometry, TerminalSurfacePosition,
 };
 use mux_terminal_ghostty::GhosttyFont;
-use mux_workspace::{InputMode, PaneId, Session};
+use mux_workspace::{InputMode, PaneId};
 use tracing::info;
 use unicode_width::UnicodeWidthStr;
 use wgpu::{
@@ -440,7 +440,6 @@ impl Renderer {
     #[allow(clippy::too_many_lines)]
     pub fn sync(
         &mut self,
-        session: &Session,
         geometry: &WorkspaceGeometry,
         frames: &HashMap<PaneId, &RenderFrame>,
         changed_panes: &HashSet<PaneId>,
@@ -602,7 +601,9 @@ impl Renderer {
             ));
         }
 
-        if let Some(message) = ui.message
+        if geometry.panes.is_empty() {
+            self.add_workspace_status(ui.message);
+        } else if let Some(message) = ui.message
             && ui.agent_surface.is_none()
         {
             self.add_toast(message);
@@ -627,8 +628,6 @@ impl Renderer {
             ui.text_prompt,
             ui.ime_preedit,
         );
-
-        let _ = session;
     }
 
     fn update_ime(
@@ -790,6 +789,66 @@ impl Renderer {
             Color::rgb(224, 230, 241),
             Family::SansSerif,
             Weight::MEDIUM,
+        ));
+    }
+
+    fn add_workspace_status(&mut self, message: Option<&str>) {
+        let scale = self.scale_factor;
+        let width = (560.0 * scale).min(self.config.width as f32 - 48.0 * scale);
+        let height = 132.0 * scale;
+        let rect = Rect {
+            x: (self.config.width as f32 - width) * 0.5,
+            y: ((self.config.height as f32 - height) * 0.42).max((TAB_BAR_HEIGHT + 24.0) * scale),
+            width,
+            height,
+        };
+        push_rect(
+            &mut self.overlay_rect_vertices,
+            rect,
+            [0.075, 0.082, 0.098, 0.98],
+            self.config.width,
+            self.config.height,
+        );
+        push_border(
+            &mut self.overlay_rect_vertices,
+            rect,
+            scale.max(1.0),
+            [0.19, 0.22, 0.28, 1.0],
+            self.config.width,
+            self.config.height,
+        );
+        self.overlay_text.push(make_text(
+            &mut self.font_system,
+            if message.is_some() {
+                "Workspace unavailable"
+            } else {
+                "Starting Mux"
+            },
+            Rect {
+                x: rect.x + 20.0 * scale,
+                y: rect.y + 17.0 * scale,
+                width: rect.width - 40.0 * scale,
+                height: 24.0 * scale,
+            },
+            15.0 * scale,
+            Color::rgb(235, 239, 247),
+            Family::SansSerif,
+            Weight::SEMIBOLD,
+        ));
+        self.overlay_text.push(make_wrapped_text(
+            &mut self.font_system,
+            message.unwrap_or("Connecting to the persistent workspace daemon…"),
+            Rect {
+                x: rect.x + 20.0 * scale,
+                y: rect.y + 52.0 * scale,
+                width: rect.width - 40.0 * scale,
+                height: rect.height - 66.0 * scale,
+            },
+            12.0 * scale,
+            18.0 * scale,
+            Color::rgb(172, 183, 202),
+            Family::SansSerif,
+            Weight::NORMAL,
         ));
     }
 

@@ -8,6 +8,10 @@ codesign_identity=${MUX_CODESIGN_IDENTITY:--}
 build_number=${MUX_BUILD_NUMBER:-1}
 bundle_identifier=${MUX_BUNDLE_IDENTIFIER:-io.mux.Mux}
 bundle_name=${MUX_BUNDLE_NAME:-Mux}
+default_state_application=${MUX_DEFAULT_STATE_APPLICATION:-}
+if [ -z "$default_state_application" ] && [ "$bundle_identifier" != "io.mux.Mux" ]; then
+  default_state_application=${bundle_identifier##*.}
+fi
 
 case "$profile" in
   debug) cargo_profile_args="" ;;
@@ -16,8 +20,14 @@ case "$profile" in
 esac
 
 cd "$project_dir"
-MUX_ZIG="$zig" MACOSX_DEPLOYMENT_TARGET=13.0 \
-  cargo build -p mux --features product $cargo_profile_args
+if [ -n "$default_state_application" ]; then
+  MUX_DEFAULT_STATE_APPLICATION="$default_state_application" \
+    MUX_ZIG="$zig" MACOSX_DEPLOYMENT_TARGET=13.0 \
+    cargo build -p mux --features product $cargo_profile_args
+else
+  MUX_ZIG="$zig" MACOSX_DEPLOYMENT_TARGET=13.0 \
+    cargo build -p mux --features product $cargo_profile_args
+fi
 
 app_dir=${MUX_APP_PATH:-$project_dir/target/Mux.app}
 contents_dir="$app_dir/Contents"
