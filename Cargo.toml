@@ -39,6 +39,8 @@ thiserror = "2.0.14"
 tokio = { version = "1.47.1", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
+unicode-segmentation = "1.13.3"
+unicode-width = "0.2.2"
 uuid = { version = "1.18.0", features = ["serde", "v4"] }
 wgpu = "25.0.2"
 winit = "0.30.12"
