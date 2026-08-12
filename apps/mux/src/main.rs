@@ -9,7 +9,7 @@ mod render;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use backend::{BackendHandle, CommandMessage};
@@ -23,7 +23,8 @@ use mux_protocol::{ServerEvent, SessionAttachment, SessionSummary};
 use mux_terminal::{
     CellWidth, RenderFrame, Rgb, TerminalEngine, TerminalInteraction, TerminalKey,
     TerminalKeyAction, TerminalKeyEvent, TerminalModifiers, TerminalMouseAction,
-    TerminalMouseButton, TerminalMouseEvent, TerminalPoint, TerminalRenderer, TerminalSelection,
+    TerminalMouseButton, TerminalMouseEvent, TerminalRenderer, TerminalSelection,
+    TerminalSelectionAutoscroll, TerminalSelectionGestureEvent, TerminalSelectionGestureStatus,
     TerminalSize, TerminalViewportScroll,
 };
 use mux_terminal_ghostty::{GhosttyEngine, GhosttyTheme};
@@ -39,7 +40,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{CursorIcon, Window, WindowId};
@@ -118,10 +119,7 @@ struct PaneReplica {
 #[derive(Clone, Copy)]
 struct SelectionDrag {
     pane_id: PaneId,
-    anchor: TerminalPoint,
-    focus: TerminalPoint,
-    rectangular: bool,
-    moved: bool,
+    autoscroll: TerminalSelectionAutoscroll,
 }
 
 struct Application {
@@ -143,8 +141,10 @@ struct Application {
     hovered_hyperlink: Option<(PaneId, String)>,
     hyperlink_click_active: bool,
     selection_drag: Option<SelectionDrag>,
+    selection_gesture_pane: Option<PaneId>,
+    next_selection_scroll: Option<Instant>,
+    selection_clock_origin: Instant,
     selected_pane: Option<PaneId>,
-    active_selection: Option<(PaneId, TerminalSelection)>,
     clipboard: Option<arboard::Clipboard>,
     message: Option<String>,
     event_proxy: Option<EventLoopProxy<UserEvent>>,
@@ -182,8 +182,10 @@ impl Default for Application {
             hovered_hyperlink: None,
             hyperlink_click_active: false,
             selection_drag: None,
+            selection_gesture_pane: None,
+            next_selection_scroll: None,
+            selection_clock_origin: Instant::now(),
             selected_pane: None,
-            active_selection: None,
             clipboard: arboard::Clipboard::new().ok(),
             message: None,
             event_proxy: None,
@@ -224,23 +226,18 @@ impl Application {
             for chunk in &pane.terminal.replay {
                 engine.apply_output(chunk.sequence, &chunk.bytes)?;
             }
-            if let Some((selected_pane, selection)) = self.active_selection
-                && selected_pane == pane.pane_id
-            {
-                engine.set_selection(Some(selection))?;
-            }
             let frame = engine.render_frame()?;
             panes.insert(pane.pane_id, PaneReplica { engine, frame });
         }
         self.session = Some(attachment.session);
         self.panes = panes;
-        self.active_selection = self
-            .active_selection
-            .filter(|(pane_id, _)| self.panes.contains_key(pane_id));
-        self.selected_pane = self.active_selection.map(|(pane_id, _)| pane_id);
-        self.selection_drag = self
-            .selection_drag
-            .filter(|drag| self.panes.contains_key(&drag.pane_id));
+        // Selections are GUI-local. Reattaching reconstructs emulator replicas,
+        // so any transient pointer stream must end rather than being projected
+        // onto potentially changed history or geometry.
+        self.selected_pane = None;
+        self.selection_drag = None;
+        self.selection_gesture_pane = None;
+        self.next_selection_scroll = None;
         self.hovered_hyperlink = None;
         self.hyperlink_click_active = false;
         if let Some(renderer) = &self.renderer {
@@ -1206,8 +1203,8 @@ impl Application {
             AgentContextMode::None => Ok(Vec::new()),
             AgentContextMode::Selection => {
                 let pane_id = self
-                    .active_selection
-                    .map_or_else(|| self.focused_pane_id(), |(pane_id, _)| Some(pane_id))
+                    .selected_pane
+                    .or_else(|| self.focused_pane_id())
                     .ok_or_else(|| anyhow!("No pane is available for context"))?;
                 let pane = self
                     .panes
@@ -1334,6 +1331,9 @@ impl Application {
                     return;
                 }
                 if !bytes.is_empty() {
+                    if terminal_event.action != TerminalKeyAction::Release {
+                        self.prepare_terminal_input();
+                    }
                     self.write_focused(bytes);
                 }
             }
@@ -1408,7 +1408,9 @@ impl Application {
         *accumulator += rows;
         let whole_rows = accumulator.trunc() as i64;
         *accumulator -= whole_rows as f32;
-        if whole_rows != 0 && !self.report_mouse_wheel(pane_id, whole_rows) {
+        if whole_rows != 0
+            && (self.modifiers.shift_key() || !self.report_mouse_wheel(pane_id, whole_rows))
+        {
             self.scroll_pane(pane_id, TerminalViewportScroll::Delta(whole_rows));
         }
     }
@@ -1430,6 +1432,9 @@ impl Application {
                 && let Some((_, uri)) = self.hyperlink_at_cursor()
             {
                 self.hyperlink_click_active = true;
+                if let Err(error) = self.cancel_selection_gesture() {
+                    self.message = Some(error.to_string());
+                }
                 if let Err(error) = open_hyperlink(&uri) {
                     self.message = Some(format!("open hyperlink: {error:#}"));
                     let _ = self.refresh_view();
@@ -1451,20 +1456,25 @@ impl Application {
         } else {
             self.pane_at_cursor().map(|pane| pane.pane_id)
         };
-        let reported = pane_id.is_some_and(|pane_id| {
-            self.report_mouse_event(
-                pane_id,
-                match state {
-                    ElementState::Pressed => TerminalMouseAction::Press,
-                    ElementState::Released => TerminalMouseAction::Release,
-                },
-                terminal_mouse_button(button),
-            )
-        });
+        let selecting = self.selection_drag.is_some()
+            || (button == MouseButton::Left && self.modifiers.shift_key());
+        let reported = !selecting
+            && pane_id.is_some_and(|pane_id| {
+                self.report_mouse_event(
+                    pane_id,
+                    match state {
+                        ElementState::Pressed => TerminalMouseAction::Press,
+                        ElementState::Released => TerminalMouseAction::Release,
+                    },
+                    terminal_mouse_button(button),
+                )
+            });
         if reported {
             if state == ElementState::Pressed {
                 self.mouse_reporting_pane = pane_id;
-                self.selection_drag = None;
+                if let Err(error) = self.cancel_selection_gesture() {
+                    self.message = Some(error.to_string());
+                }
                 if let Err(error) = self.clear_selected_pane() {
                     self.message = Some(error.to_string());
                 }
@@ -1619,9 +1629,11 @@ impl Application {
             .pressed_mouse_buttons
             .iter()
             .find_map(|button| terminal_mouse_button(*button));
-        if pane_id.is_some_and(|pane_id| {
-            self.report_mouse_event(pane_id, TerminalMouseAction::Motion, button)
-        }) {
+        if self.selection_drag.is_none()
+            && pane_id.is_some_and(|pane_id| {
+                self.report_mouse_event(pane_id, TerminalMouseAction::Motion, button)
+            })
+        {
             return;
         }
         self.mouse_dragged();
@@ -1650,7 +1662,9 @@ impl Application {
         if bytes.is_empty() {
             false
         } else {
-            self.selection_drag = None;
+            if let Err(error) = self.cancel_selection_gesture() {
+                self.message = Some(error.to_string());
+            }
             if let Err(error) = self.clear_selected_pane() {
                 self.message = Some(error.to_string());
             }
@@ -1883,6 +1897,7 @@ impl Application {
         match result {
             Ok(bytes) => {
                 self.message = None;
+                self.prepare_terminal_input();
                 self.write_focused(bytes);
                 let _ = self.refresh_view();
             }
@@ -1931,7 +1946,10 @@ impl Application {
                     self.send_workspace(WorkspaceCommand::SelectTab(tab.id));
                 }
             }
-            Action::WriteTerminal(bytes) => self.write_focused(bytes),
+            Action::WriteTerminal(bytes) => {
+                self.prepare_terminal_input();
+                self.write_focused(bytes);
+            }
             Action::OpenSessionSwitcher => {
                 self.mode = InputMode::Normal;
                 self.clear_hyperlink_hover();
@@ -1969,6 +1987,23 @@ impl Application {
         }
     }
 
+    fn prepare_terminal_input(&mut self) {
+        if let Err(error) = self.cancel_selection_gesture() {
+            self.message = Some(error.to_string());
+        }
+        if let Err(error) = self.clear_selected_pane() {
+            self.message = Some(error.to_string());
+        }
+        if let Some(pane_id) = self.focused_pane()
+            && self
+                .panes
+                .get(&pane_id)
+                .is_some_and(|pane| pane.frame.scroll.is_scrolled())
+        {
+            self.scroll_pane(pane_id, TerminalViewportScroll::Bottom);
+        }
+    }
+
     fn write_pane(&self, pane_id: PaneId, bytes: Vec<u8>) {
         if let Some(backend) = &self.backend {
             backend.send(CommandMessage::Write { pane_id, bytes });
@@ -2003,18 +2038,55 @@ impl Application {
             .ok_or_else(|| anyhow!("selection pane is unavailable"))?;
         pane.engine.set_selection(selection)?;
         pane.frame = pane.engine.render_frame()?;
-        if let Some(selection) = selection {
-            self.active_selection = Some((pane_id, selection));
+        if selection.is_some() {
             self.selected_pane = Some(pane_id);
-        } else if self
-            .active_selection
-            .is_some_and(|(selected_pane, _)| selected_pane == pane_id)
-        {
-            self.active_selection = None;
+        } else if self.selected_pane == Some(pane_id) {
             self.selected_pane = None;
         }
         self.sync_view(&HashSet::from([pane_id]))?;
         self.request_redraw();
+        Ok(())
+    }
+
+    fn apply_selection_gesture(
+        &mut self,
+        pane_id: PaneId,
+        event: TerminalSelectionGestureEvent,
+    ) -> Result<TerminalSelectionGestureStatus> {
+        let status = {
+            let pane = self
+                .panes
+                .get_mut(&pane_id)
+                .ok_or_else(|| anyhow!("selection pane is unavailable"))?;
+            let status = pane.engine.selection_gesture(event)?;
+            pane.frame = pane.engine.render_frame()?;
+            status
+        };
+        self.selected_pane = status.has_selection.then_some(pane_id);
+        if let Some(drag) = &mut self.selection_drag
+            && drag.pane_id == pane_id
+        {
+            drag.autoscroll = status.autoscroll;
+            self.next_selection_scroll = match status.autoscroll {
+                TerminalSelectionAutoscroll::None => None,
+                TerminalSelectionAutoscroll::Up | TerminalSelectionAutoscroll::Down => self
+                    .next_selection_scroll
+                    .or_else(|| Some(Instant::now() + Duration::from_millis(15))),
+            };
+        }
+        self.sync_view(&HashSet::from([pane_id]))?;
+        self.request_redraw();
+        Ok(status)
+    }
+
+    fn cancel_selection_gesture(&mut self) -> Result<()> {
+        self.selection_drag = None;
+        self.next_selection_scroll = None;
+        if let Some(pane_id) = self.selection_gesture_pane.take()
+            && let Some(pane) = self.panes.get_mut(&pane_id)
+        {
+            pane.engine.reset_selection_gesture()?;
+        }
         Ok(())
     }
 
@@ -2034,16 +2106,23 @@ impl Application {
         let scale = renderer.window_scale_factor();
         let x = self.cursor_position.0 / scale;
         let y = self.cursor_position.1 / scale;
-        if let Some(tab) = self
+        if let Some(tab_id) = self
             .geometry
             .tabs
             .iter()
             .find(|tab| tab.rect.contains(x, y))
+            .map(|tab| tab.tab_id)
         {
-            self.send_workspace(WorkspaceCommand::SelectTab(tab.tab_id));
+            if let Err(error) = self.cancel_selection_gesture() {
+                self.message = Some(error.to_string());
+            }
+            self.send_workspace(WorkspaceCommand::SelectTab(tab_id));
             return;
         }
         if cfg!(target_os = "macos") && y < layout::TAB_BAR_HEIGHT {
+            if let Err(error) = self.cancel_selection_gesture() {
+                self.message = Some(error.to_string());
+            }
             if let Some(renderer) = &self.renderer
                 && let Err(error) = renderer.drag_window()
             {
@@ -2058,48 +2137,65 @@ impl Application {
             .find(|pane| pane.rect.contains(x, y))
             .copied();
         let Some(pane) = pane else {
+            if let Err(error) = self.cancel_selection_gesture() {
+                self.message = Some(error.to_string());
+            }
             return;
         };
         if !pane.focused {
             self.send_workspace(WorkspaceCommand::SetFocusedPane(pane.pane_id));
         }
-        let point =
-            renderer.terminal_point_at(pane, self.cursor_position.0, self.cursor_position.1);
-        let Some(point) = point else {
+        let pointer = renderer.terminal_selection_pointer(
+            pane,
+            self.cursor_position.0,
+            self.cursor_position.1,
+        );
+        let Some(point) = pointer.point else {
+            if let Err(error) = self.cancel_selection_gesture() {
+                self.message = Some(error.to_string());
+            }
             if let Err(error) = self.clear_selected_pane() {
                 self.message = Some(error.to_string());
             }
             return;
         };
+        if self.selection_gesture_pane != Some(pane.pane_id)
+            && let Err(error) = self.cancel_selection_gesture()
+        {
+            self.message = Some(error.to_string());
+            return;
+        }
         if self.selected_pane != Some(pane.pane_id)
             && let Err(error) = self.clear_selected_pane()
         {
             self.message = Some(error.to_string());
             return;
         }
-        let drag = SelectionDrag {
+        self.selection_gesture_pane = Some(pane.pane_id);
+        self.selection_drag = Some(SelectionDrag {
             pane_id: pane.pane_id,
-            anchor: point,
-            focus: point,
-            rectangular: self.modifiers.alt_key(),
-            moved: false,
-        };
-        self.selection_drag = Some(drag);
-        self.selected_pane = Some(pane.pane_id);
-        if let Err(error) = self.set_pane_selection(
+            autoscroll: TerminalSelectionAutoscroll::None,
+        });
+        let time_ns = Instant::now()
+            .duration_since(self.selection_clock_origin)
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64;
+        if let Err(error) = self.apply_selection_gesture(
             pane.pane_id,
-            Some(TerminalSelection {
-                anchor: point,
-                focus: point,
-                rectangular: drag.rectangular,
-            }),
+            TerminalSelectionGestureEvent::Press {
+                point,
+                position: pointer.position,
+                time_ns,
+                repeat_distance: f64::from(pointer.geometry.cell_width),
+                repeat_interval_ns: 500_000_000,
+            },
         ) {
             self.message = Some(error.to_string());
         }
     }
 
     fn mouse_dragged(&mut self) {
-        let Some(mut drag) = self.selection_drag else {
+        let Some(drag) = self.selection_drag else {
             return;
         };
         let Some(renderer) = &self.renderer else {
@@ -2114,40 +2210,96 @@ impl Application {
         else {
             return;
         };
-        let Some(point) =
-            renderer.terminal_point_at(pane, self.cursor_position.0, self.cursor_position.1)
-        else {
-            return;
-        };
-        if point == drag.focus {
-            return;
-        }
-        drag.focus = point;
-        drag.moved = true;
-        self.selection_drag = Some(drag);
-        if let Err(error) = self.set_pane_selection(
+        let pointer = renderer.terminal_selection_pointer(
+            pane,
+            self.cursor_position.0,
+            self.cursor_position.1,
+        );
+        if let Err(error) = self.apply_selection_gesture(
             drag.pane_id,
-            Some(TerminalSelection {
-                anchor: drag.anchor,
-                focus: drag.focus,
-                rectangular: drag.rectangular,
-            }),
+            TerminalSelectionGestureEvent::Drag {
+                point: pointer.clamped_point,
+                position: pointer.position,
+                rectangular: self.modifiers.alt_key(),
+                geometry: pointer.geometry,
+            },
         ) {
             self.message = Some(error.to_string());
         }
     }
 
-    fn mouse_released(&mut self) {
-        self.mouse_dragged();
-        let Some(drag) = self.selection_drag.take() else {
+    fn selection_autoscroll_tick(&mut self) {
+        let Some(drag) = self.selection_drag else {
+            self.next_selection_scroll = None;
             return;
         };
-        if !drag.moved {
-            self.selected_pane = None;
-            if let Err(error) = self.set_pane_selection(drag.pane_id, None) {
-                self.message = Some(error.to_string());
-            }
+        if drag.autoscroll == TerminalSelectionAutoscroll::None {
+            self.next_selection_scroll = None;
+            return;
         }
+        let Some(renderer) = &self.renderer else {
+            self.next_selection_scroll = None;
+            return;
+        };
+        let Some(pane) = self
+            .geometry
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == drag.pane_id)
+            .copied()
+        else {
+            self.next_selection_scroll = None;
+            return;
+        };
+        let pointer = renderer.terminal_selection_pointer(
+            pane,
+            self.cursor_position.0,
+            self.cursor_position.1,
+        );
+        self.next_selection_scroll = None;
+        if let Err(error) = self.apply_selection_gesture(
+            drag.pane_id,
+            TerminalSelectionGestureEvent::AutoscrollTick {
+                viewport: pointer.clamped_point,
+                position: pointer.position,
+                rectangular: self.modifiers.alt_key(),
+                geometry: pointer.geometry,
+            },
+        ) {
+            self.message = Some(error.to_string());
+            self.next_selection_scroll = None;
+        }
+    }
+
+    fn mouse_released(&mut self) {
+        self.mouse_dragged();
+        let Some(drag) = self.selection_drag else {
+            return;
+        };
+        let point = self.renderer.as_ref().and_then(|renderer| {
+            self.geometry
+                .panes
+                .iter()
+                .find(|pane| pane.pane_id == drag.pane_id)
+                .copied()
+                .and_then(|pane| {
+                    renderer
+                        .terminal_selection_pointer(
+                            pane,
+                            self.cursor_position.0,
+                            self.cursor_position.1,
+                        )
+                        .point
+                })
+        });
+        if let Err(error) = self.apply_selection_gesture(
+            drag.pane_id,
+            TerminalSelectionGestureEvent::Release { point },
+        ) {
+            self.message = Some(error.to_string());
+        }
+        self.selection_drag = None;
+        self.next_selection_scroll = None;
     }
 }
 
@@ -2222,6 +2374,19 @@ impl ApplicationHandler<UserEvent> for Application {
         }
     }
 
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self
+            .next_selection_scroll
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.selection_autoscroll_tick();
+        }
+        event_loop.set_control_flow(
+            self.next_selection_scroll
+                .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
+        );
+    }
+
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -2273,6 +2438,13 @@ impl ApplicationHandler<UserEvent> for Application {
                 }
             }
             WindowEvent::Ime(Ime::Preedit(text, _)) => {
+                if !text.is_empty()
+                    && self.text_prompt.is_none()
+                    && self.agent_surface.is_none()
+                    && self.mode == InputMode::Normal
+                {
+                    self.prepare_terminal_input();
+                }
                 self.ime_preedit = text;
                 let _ = self.refresh_view();
             }
@@ -2292,6 +2464,7 @@ impl ApplicationHandler<UserEvent> for Application {
             }
             WindowEvent::Ime(Ime::Commit(text)) if self.mode == InputMode::Normal => {
                 self.ime_preedit.clear();
+                self.prepare_terminal_input();
                 self.write_focused(text.into_bytes());
                 let _ = self.refresh_view();
             }

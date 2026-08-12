@@ -36,10 +36,12 @@ checkpoints, resize, reattachment, selection/copy/paste, mode-aware keyboard and
 mouse encoding, scrollback, and sustained output all have automated or
 native-window coverage. OSC 8 URIs are carried through the adapter per cell and
 activated only by a deliberate modifier-click, with no regex reconstruction in
-the GUI. The primary remaining terminal risks are richer selection gestures and
-autoscroll, search, cursor/blink timing, accessibility, and broader compatibility
-testing. Native IME is enabled, preedit is rendered, and candidate windows
-follow the active terminal caret or agent composer input area.
+the GUI. Ghostty's gesture engine now owns cell/word/line selection, repeat-click
+thresholds, direction-aware and rectangular dragging, and viewport autoscroll;
+the GUI only translates native pane geometry and runs its timer. The primary
+remaining terminal risks are search, cursor/blink timing, accessibility, and
+broader compatibility testing. Native IME is enabled, preedit is rendered, and
+candidate windows follow the active terminal caret or agent composer input area.
 
 The C render adapter retains and grows its row, cell, and grapheme buffers
 instead of allocating a full viewport on every frame. The Rust render boundary
