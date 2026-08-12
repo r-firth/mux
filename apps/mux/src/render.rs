@@ -579,7 +579,7 @@ impl Renderer {
             );
             let label = match ui.mode {
                 InputMode::Pane => {
-                    "PANE   h j k l focus · d down · r right · n new · f zoom · x close"
+                    "PANE   h j k l focus · d down · r right · n new · ^n resize · f zoom · x close"
                 }
                 InputMode::Tab => "TAB    h j k l switch · 1–9 select · n new · r rename · x close",
                 InputMode::Session => "SESSION   w sessions · d detach · Esc return",

@@ -717,6 +717,14 @@ impl Keymap {
     }
 
     fn bind_zellij_pane_mode(&mut self) {
+        // Keep Ctrl+n available to terminal applications in Normal mode, but
+        // preserve the familiar Zellij resize prefix once the user has
+        // explicitly entered Mux's Pane mode with Ctrl+p.
+        self.bind(
+            InputMode::Pane,
+            KeyChord::control('n'),
+            Action::EnterMode(InputMode::Resize),
+        );
         for (key, arrow, direction) in [
             ('h', Key::ArrowLeft, Direction::Left),
             ('j', Key::ArrowDown, Direction::Down),
@@ -963,6 +971,10 @@ mod tests {
         assert_eq!(
             keymap.resolve(InputMode::Normal, KeyChord::control('n')),
             None
+        );
+        assert_eq!(
+            keymap.resolve(InputMode::Pane, KeyChord::control('n')),
+            Some(&Action::EnterMode(InputMode::Resize))
         );
         assert_eq!(
             keymap.resolve(InputMode::Normal, KeyChord::control('o')),

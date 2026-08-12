@@ -30,8 +30,16 @@ mode to normal terminal input. All other Normal-mode keys, including
 | `n` | Create a pane and return to Normal |
 | `d` | Split downward and return to Normal |
 | `r` | Split to the right and return to Normal |
+| `Ctrl+n` | Enter Resize mode (Normal-mode `Ctrl+n` still reaches the terminal) |
 | `f` | Toggle focused-pane zoom and return to Normal |
 | `x` | Close the focused pane and return to Normal |
+
+## Resize mode
+
+Enter with `Ctrl+p`, then `Ctrl+n`. Use `h/j/k/l` or the arrow keys to move
+the nearest boundary in that direction. Enter or Escape returns to Normal.
+This nested prefix preserves Zellij's resize muscle memory without stealing
+Normal-mode `Ctrl+n` from Vim and other terminal applications.
 
 ## Tab mode
 
@@ -46,10 +54,9 @@ mode to normal terminal input. All other Normal-mode keys, including
 
 The session switcher attaches with Enter or a number key. `n` creates and
 attaches a session in the focused pane's live working directory, `r` renames,
-and `x` asks for a second press before killing the selected session. Resize and
-Zellij's `Ctrl+o` session prefix intentionally have no Normal-mode binding yet.
-This keeps foreground Control-key input untouched except for `Ctrl+p` and
-`Ctrl+t`.
+and `x` asks for a second press before killing the selected session. Zellij's
+`Ctrl+o` session prefix intentionally has no Normal-mode binding yet. This keeps
+foreground Control-key input untouched except for `Ctrl+p` and `Ctrl+t`.
 
 The agent surface is an application-level overlay rather than a terminal mode.
 While open, Escape or `Shift+Command+A` closes it, `Ctrl+c` cancels the active
