@@ -64,8 +64,9 @@ rectangle uploads. Ghostty also owns selection formatting, bracketed paste,
 mode-aware keyboard and mouse encoding, and the scrollback viewport; the GUI
 adds native clipboard handling, a contextual history indicator, and visible IME
 preedit with the platform candidate surface anchored to the active input area.
-Accessibility, hyperlink interaction, search, and broader platform behavior
-remain base-terminal work.
+OSC 8 targets also come from Ghostty cell state rather than terminal-text
+guessing; the GUI adds modifier-gated hover and URI activation. Accessibility,
+search, and broader platform behavior remain base-terminal work.
 
 No rendering dependency is pulled into the daemon, and no GUI type crosses the
 wire. This keeps an AppKit-specific shell or a future renderer experiment from

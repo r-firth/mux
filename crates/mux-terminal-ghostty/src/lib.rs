@@ -249,6 +249,8 @@ mod linked {
     struct CRenderCell {
         text_offset: u32,
         text_len: u32,
+        hyperlink_offset: u32,
+        hyperlink_len: u32,
         foreground: CRgb,
         background: CRgb,
         underline_color: CRgb,
@@ -257,7 +259,6 @@ mod linked {
         width: u8,
         semantic: u8,
         selected: u8,
-        hyperlink: u8,
     }
 
     #[derive(Clone, Copy)]
@@ -1177,6 +1178,26 @@ mod linked {
             })?)
             .map_err(|error| TerminalError::Engine(format!("render text was not UTF-8: {error}")))?
             .to_owned();
+        let hyperlink = if cell.hyperlink_len == 0 {
+            None
+        } else {
+            let start = usize::try_from(cell.hyperlink_offset)
+                .map_err(|_| TerminalError::Engine("invalid hyperlink offset".to_owned()))?;
+            let length = usize::try_from(cell.hyperlink_len)
+                .map_err(|_| TerminalError::Engine("invalid hyperlink length".to_owned()))?;
+            let end = start.checked_add(length).ok_or_else(|| {
+                TerminalError::Engine("render hyperlink range overflowed".to_owned())
+            })?;
+            Some(
+                std::str::from_utf8(text.get(start..end).ok_or_else(|| {
+                    TerminalError::Engine("render hyperlink range was invalid".to_owned())
+                })?)
+                .map_err(|error| {
+                    TerminalError::Engine(format!("render hyperlink was not UTF-8: {error}"))
+                })?
+                .to_owned(),
+            )
+        };
 
         Ok(RenderCell {
             grapheme,
@@ -1208,7 +1229,7 @@ mod linked {
                 other => return Err(invalid_render_value("semantic content", other)),
             },
             selected: cell.selected != 0,
-            hyperlink: cell.hyperlink != 0,
+            hyperlink,
         })
     }
 
@@ -1441,6 +1462,31 @@ mod linked {
 
             engine.set_selection(None).expect("clear selection");
             assert_eq!(engine.selected_text().expect("no copy text"), None);
+        }
+
+        #[test]
+        fn render_cells_expose_their_osc_8_target() {
+            let mut engine = GhosttyEngine::new(TerminalSize {
+                cols: 20,
+                rows: 2,
+                ..TerminalSize::default()
+            })
+            .expect("new terminal");
+            engine
+                .apply_output(
+                    1,
+                    b"plain \x1b]8;;https://example.com/docs\x1b\\link\x1b]8;;\x1b\\",
+                )
+                .expect("hyperlink output");
+
+            let frame = engine.render_frame().expect("render frame");
+            assert!(frame.cells[..6].iter().all(|cell| cell.hyperlink.is_none()));
+            assert!(
+                frame.cells[6..10]
+                    .iter()
+                    .all(|cell| { cell.hyperlink.as_deref() == Some("https://example.com/docs") })
+            );
+            assert!(frame.cells[10].hyperlink.is_none());
         }
 
         #[test]

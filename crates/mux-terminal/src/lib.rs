@@ -84,7 +84,8 @@ pub struct RenderCell {
     pub width: CellWidth,
     pub semantic: SemanticContent,
     pub selected: bool,
-    pub hyperlink: bool,
+    /// OSC 8 target associated with this cell, when present.
+    pub hyperlink: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
