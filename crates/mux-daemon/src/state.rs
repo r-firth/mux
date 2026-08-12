@@ -94,6 +94,16 @@ impl DaemonState {
             .map_err(|error| agent_error(&error))
     }
 
+    pub fn authenticate_agent(
+        &self,
+        session_id: AgentSessionId,
+        method_id: String,
+    ) -> Result<(), RemoteError> {
+        self.agents
+            .authenticate(session_id, method_id)
+            .map_err(|error| agent_error(&error))
+    }
+
     pub fn set_agent_mode(
         &self,
         session_id: AgentSessionId,
@@ -590,7 +600,8 @@ fn agent_error(error: &mux_acp::AgentError) -> RemoteError {
     let code = match error {
         mux_acp::AgentError::InvalidSpec(_)
         | mux_acp::AgentError::InvalidWorkingDirectory(_)
-        | mux_acp::AgentError::EmptyPrompt => ErrorCode::InvalidRequest,
+        | mux_acp::AgentError::EmptyPrompt
+        | mux_acp::AgentError::NotAwaitingAuthentication(_) => ErrorCode::InvalidRequest,
         mux_acp::AgentError::SessionNotFound(_) => ErrorCode::NotFound,
         mux_acp::AgentError::SessionClosed(_) => ErrorCode::Conflict,
         mux_acp::AgentError::Protocol(_) => ErrorCode::Internal,

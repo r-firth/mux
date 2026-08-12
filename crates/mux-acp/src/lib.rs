@@ -11,13 +11,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AvailableCommand, BooleanConfigOptionCapabilities, CancelNotification, ClientCapabilities,
-    ClientSessionCapabilities, ContentBlock, ContentChunk, Implementation, InitializeRequest,
-    NewSessionRequest, PermissionOptionKind, PromptRequest, PromptResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigOptionsCapabilities, SessionConfigSelectOptions, SessionModeState,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    AuthMethod, AuthenticateRequest, AvailableCommand, BooleanConfigOptionCapabilities,
+    CancelNotification, ClientCapabilities, ClientSessionCapabilities, ContentBlock, ContentChunk,
+    Implementation, InitializeRequest, NewSessionRequest, NewSessionResponse, PermissionOptionKind,
+    PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigOptionsCapabilities, SessionConfigSelectOptions,
+    SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, ToolCall,
     ToolCallContent, ToolCallStatus,
 };
@@ -173,6 +173,8 @@ impl PreparedAgent {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum AgentSessionStatus {
     Starting,
+    WaitingForAuthentication,
+    Authenticating,
     Idle,
     Working,
     WaitingForPermission,
@@ -336,6 +338,13 @@ pub struct AgentSlashCommand {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentAuthMethod {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum AgentTimelineItem {
     Message {
         role: AgentMessageRole,
@@ -367,6 +376,7 @@ pub struct AgentSessionSnapshot {
     pub modes: Vec<AgentSessionMode>,
     pub config_options: Vec<AgentConfigOption>,
     pub available_commands: Vec<AgentSlashCommand>,
+    pub auth_methods: Vec<AgentAuthMethod>,
 }
 
 impl AgentSessionSnapshot {
@@ -397,6 +407,21 @@ pub enum AgentEvent {
         current_mode: Option<String>,
         modes: Vec<AgentSessionMode>,
         config_options: Vec<AgentConfigOption>,
+        auth_methods: Vec<AgentAuthMethod>,
+    },
+    AuthenticationRequired {
+        session_id: AgentSessionId,
+        agent_name: Option<String>,
+        agent_version: Option<String>,
+        methods: Vec<AgentAuthMethod>,
+    },
+    AuthenticationStarted {
+        session_id: AgentSessionId,
+        method_id: String,
+    },
+    AuthenticationFailed {
+        session_id: AgentSessionId,
+        message: String,
     },
     UserMessage {
         session_id: AgentSessionId,
@@ -465,6 +490,9 @@ impl AgentEvent {
     pub const fn session_id(&self) -> AgentSessionId {
         match self {
             Self::Ready { session_id, .. }
+            | Self::AuthenticationRequired { session_id, .. }
+            | Self::AuthenticationStarted { session_id, .. }
+            | Self::AuthenticationFailed { session_id, .. }
             | Self::UserMessage { session_id, .. }
             | Self::ContextAttached { session_id, .. }
             | Self::ContentDelta { session_id, .. }
@@ -500,6 +528,7 @@ struct ManagedAgent {
 
 enum AgentCommand {
     Prompt(AgentPrompt),
+    Authenticate(String),
     SetMode(String),
     SetConfig {
         config_id: String,
@@ -587,6 +616,7 @@ impl AgentManager {
             modes: Vec::new(),
             config_options: Vec::new(),
             available_commands: Vec::new(),
+            auth_methods: Vec::new(),
         };
         let snapshot_state = Arc::new(RwLock::new(snapshot.clone()));
         let (commands, command_rx) = mpsc::unbounded_channel();
@@ -622,6 +652,24 @@ impl AgentManager {
             return Err(AgentError::EmptyPrompt);
         }
         self.send(session_id, AgentCommand::Prompt(prompt))
+    }
+
+    pub fn authenticate(
+        &self,
+        session_id: AgentSessionId,
+        method_id: String,
+    ) -> Result<(), AgentError> {
+        let sessions = self.inner.sessions.read();
+        let agent = sessions
+            .get(&session_id)
+            .ok_or(AgentError::SessionNotFound(session_id))?;
+        if agent.snapshot.read().status != AgentSessionStatus::WaitingForAuthentication {
+            return Err(AgentError::NotAwaitingAuthentication(session_id));
+        }
+        agent
+            .commands
+            .send(AgentCommand::Authenticate(method_id))
+            .map_err(|_| AgentError::SessionClosed(session_id))
     }
 
     pub fn set_mode(&self, session_id: AgentSessionId, mode_id: String) -> Result<(), AgentError> {
@@ -779,10 +827,29 @@ async fn run_agent(
                     initialized.protocol_version
                 )));
             }
-            let remote = connection
-                .send_request(NewSessionRequest::new(cwd))
-                .block_task()
-                .await?;
+            let agent_name = initialized
+                .agent_info
+                .as_ref()
+                .and_then(|info| info.title.clone())
+                .or_else(|| Some(configured_name.clone()));
+            let agent_version = initialized
+                .agent_info
+                .as_ref()
+                .map(|info| info.version.clone());
+            let auth_methods = normalize_auth_methods(&initialized.auth_methods);
+            let Some(remote) = open_authenticated_session(
+                &connection,
+                cwd,
+                &mut commands,
+                &sink,
+                agent_name.clone(),
+                agent_version.clone(),
+                &auth_methods,
+            )
+            .await?
+            else {
+                return Ok(());
+            };
             let modes = remote.modes.as_ref().map(normalize_modes).unwrap_or_default();
             let current_mode = remote
                 .modes
@@ -796,20 +863,12 @@ async fn run_agent(
             let remote_session_id = remote.session_id;
             sink.emit(AgentEvent::Ready {
                 session_id,
-                agent_name: Some(
-                    initialized
-                        .agent_info
-                        .as_ref()
-                        .and_then(|info| info.title.clone())
-                        .unwrap_or_else(|| configured_name.clone()),
-                ),
-                agent_version: initialized
-                    .agent_info
-                    .as_ref()
-                    .map(|info| info.version.clone()),
+                agent_name,
+                agent_version,
                 current_mode,
                 modes,
                 config_options,
+                auth_methods,
             });
 
             loop {
@@ -817,6 +876,14 @@ async fn run_agent(
                     command = commands.recv() => {
                         let Some(command) = command else { break };
                         match command {
+                            AgentCommand::Authenticate(method_id) => {
+                                sink.emit(AgentEvent::AuthenticationFailed {
+                                    session_id,
+                                    message: format!(
+                                        "Authentication request `{method_id}` arrived after the agent session was ready"
+                                    ),
+                                });
+                            }
                             AgentCommand::Prompt(prompt) => {
                                 if busy.swap(true, Ordering::AcqRel) {
                                     sink.emit(AgentEvent::Failed {
@@ -981,6 +1048,133 @@ async fn run_agent(
         .await
         .map_err(|error| AgentError::Protocol(error.to_string()))?;
     Ok(())
+}
+
+fn normalize_auth_methods(methods: &[AuthMethod]) -> Vec<AgentAuthMethod> {
+    methods
+        .iter()
+        .map(|method| AgentAuthMethod {
+            id: method.id().to_string(),
+            name: method.name().to_owned(),
+            description: method.description().map(str::to_owned),
+        })
+        .collect()
+}
+
+async fn open_authenticated_session(
+    connection: &ConnectionTo<Agent>,
+    cwd: PathBuf,
+    commands: &mut mpsc::UnboundedReceiver<AgentCommand>,
+    sink: &EventSink,
+    agent_name: Option<String>,
+    agent_version: Option<String>,
+    auth_methods: &[AgentAuthMethod],
+) -> agent_client_protocol::Result<Option<NewSessionResponse>> {
+    loop {
+        match request_new_session(connection, cwd.clone()).await {
+            Ok(session) => return Ok(Some(session)),
+            Err(error) if error.code == agent_client_protocol::ErrorCode::AuthRequired => {
+                if auth_methods.is_empty() {
+                    return Err(error);
+                }
+                sink.emit(AgentEvent::AuthenticationRequired {
+                    session_id: sink.session_id,
+                    agent_name: agent_name.clone(),
+                    agent_version: agent_version.clone(),
+                    methods: auth_methods.to_vec(),
+                });
+            }
+            Err(error) => return Err(error),
+        }
+
+        loop {
+            tokio::select! {
+                command = commands.recv() => {
+                    match command {
+                        Some(AgentCommand::Authenticate(method_id)) => {
+                            if !auth_methods.iter().any(|method| method.id == method_id) {
+                                sink.emit(AgentEvent::AuthenticationFailed {
+                                    session_id: sink.session_id,
+                                    message: format!("Unknown authentication method: {method_id}"),
+                                });
+                                continue;
+                            }
+                            sink.emit(AgentEvent::AuthenticationStarted {
+                                session_id: sink.session_id,
+                                method_id: method_id.clone(),
+                            });
+                            match request_authentication(
+                                connection,
+                                method_id,
+                                commands,
+                                sink,
+                            )
+                            .await
+                            {
+                                Ok(Some(())) => break,
+                                Ok(None) => return Ok(None),
+                                Err(error) => sink.emit(AgentEvent::AuthenticationFailed {
+                                    session_id: sink.session_id,
+                                    message: error.to_string(),
+                                }),
+                            }
+                        }
+                        Some(AgentCommand::Close) | None => {
+                            sink.emit(AgentEvent::Closed {
+                                session_id: sink.session_id,
+                            });
+                            return Ok(None);
+                        }
+                        Some(_) => {}
+                    }
+                }
+                () = connection.incoming_closed() => {
+                    return Err(agent_client_protocol::Error::internal_error()
+                        .data("ACP agent transport closed during authentication"));
+                }
+            }
+        }
+    }
+}
+
+async fn request_new_session(
+    connection: &ConnectionTo<Agent>,
+    cwd: PathBuf,
+) -> agent_client_protocol::Result<NewSessionResponse> {
+    connection
+        .send_request(NewSessionRequest::new(cwd))
+        .block_task()
+        .await
+}
+
+async fn request_authentication(
+    connection: &ConnectionTo<Agent>,
+    method_id: String,
+    commands: &mut mpsc::UnboundedReceiver<AgentCommand>,
+    sink: &EventSink,
+) -> agent_client_protocol::Result<Option<()>> {
+    let request = connection
+        .send_request(AuthenticateRequest::new(method_id))
+        .block_task();
+    tokio::pin!(request);
+    loop {
+        tokio::select! {
+            result = &mut request => return result.map(|_| Some(())),
+            command = commands.recv() => match command {
+                Some(AgentCommand::Close) | None => {
+                    sink.emit(AgentEvent::Closed {
+                        session_id: sink.session_id,
+                    });
+                    return Ok(None);
+                }
+                Some(_) => {}
+            },
+            () = connection.incoming_closed() => {
+                return Err(agent_client_protocol::Error::internal_error()
+                    .data("ACP agent transport closed during authentication"));
+            }
+        }
+    }
 }
 
 fn cancel_permissions(waiters: &PermissionWaiters) -> Vec<String> {
@@ -1269,7 +1463,7 @@ fn normalize_permission_option(
     }
 }
 
-fn apply_event(snapshot: &mut AgentSessionSnapshot, event: &AgentEvent) {
+fn apply_connection_event(snapshot: &mut AgentSessionSnapshot, event: &AgentEvent) {
     match event {
         AgentEvent::Ready {
             agent_name,
@@ -1277,6 +1471,7 @@ fn apply_event(snapshot: &mut AgentSessionSnapshot, event: &AgentEvent) {
             current_mode,
             modes,
             config_options,
+            auth_methods,
             ..
         } => {
             snapshot.status = AgentSessionStatus::Idle;
@@ -1285,7 +1480,43 @@ fn apply_event(snapshot: &mut AgentSessionSnapshot, event: &AgentEvent) {
             snapshot.current_mode.clone_from(current_mode);
             snapshot.modes.clone_from(modes);
             snapshot.config_options.clone_from(config_options);
+            snapshot.auth_methods.clone_from(auth_methods);
         }
+        AgentEvent::AuthenticationRequired {
+            agent_name,
+            agent_version,
+            methods,
+            ..
+        } => {
+            snapshot.status = AgentSessionStatus::WaitingForAuthentication;
+            snapshot.agent_name.clone_from(agent_name);
+            snapshot.agent_version.clone_from(agent_version);
+            snapshot.auth_methods.clone_from(methods);
+        }
+        AgentEvent::AuthenticationStarted { .. } => {
+            snapshot.status = AgentSessionStatus::Authenticating;
+        }
+        AgentEvent::AuthenticationFailed { message, .. } => {
+            if matches!(
+                snapshot.status,
+                AgentSessionStatus::WaitingForAuthentication | AgentSessionStatus::Authenticating
+            ) {
+                snapshot.status = AgentSessionStatus::WaitingForAuthentication;
+            }
+            snapshot
+                .timeline
+                .push(AgentTimelineItem::Error(message.clone()));
+        }
+        _ => unreachable!("only connection lifecycle events are routed here"),
+    }
+}
+
+fn apply_event(snapshot: &mut AgentSessionSnapshot, event: &AgentEvent) {
+    match event {
+        AgentEvent::Ready { .. }
+        | AgentEvent::AuthenticationRequired { .. }
+        | AgentEvent::AuthenticationStarted { .. }
+        | AgentEvent::AuthenticationFailed { .. } => apply_connection_event(snapshot, event),
         AgentEvent::UserMessage { text, .. } => {
             snapshot.status = AgentSessionStatus::Working;
             snapshot.timeline.push(AgentTimelineItem::Message {
@@ -1411,6 +1642,8 @@ pub enum AgentError {
     SessionNotFound(AgentSessionId),
     #[error("agent session is closed: {0}")]
     SessionClosed(AgentSessionId),
+    #[error("agent session is not waiting for authentication: {0}")]
+    NotAwaitingAuthentication(AgentSessionId),
     #[error("agent prompt cannot be empty")]
     EmptyPrompt,
     #[error("ACP connection failed: {0}")]
@@ -1420,6 +1653,64 @@ pub enum AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    use agent_client_protocol::schema::v1::{
+        AuthMethodAgent, AuthenticateResponse, NewSessionResponse,
+    };
+    use agent_client_protocol::{ConnectTo, ErrorCode};
+
+    struct AuthenticationAgent {
+        authenticated: Arc<AtomicBool>,
+        authentication_requests: Arc<AtomicUsize>,
+        session_requests: Arc<AtomicUsize>,
+        hang_authentication: bool,
+        authentication_started: Option<Arc<tokio::sync::Notify>>,
+    }
+
+    impl ConnectTo<agent_client_protocol::Client> for AuthenticationAgent {
+        async fn connect_to(
+            self,
+            client: impl ConnectTo<Agent>,
+        ) -> agent_client_protocol::Result<()> {
+            let session_authenticated = Arc::clone(&self.authenticated);
+            let session_requests = Arc::clone(&self.session_requests);
+            let authentication_authenticated = Arc::clone(&self.authenticated);
+            let authentication_requests = Arc::clone(&self.authentication_requests);
+            let hang_authentication = self.hang_authentication;
+            let authentication_started = self.authentication_started;
+            Agent
+                .builder()
+                .on_receive_request(
+                    async move |_: NewSessionRequest, responder, _connection| {
+                        session_requests.fetch_add(1, Ordering::SeqCst);
+                        if session_authenticated.load(Ordering::SeqCst) {
+                            responder.respond(NewSessionResponse::new("authenticated-session"))
+                        } else {
+                            responder.respond_with_error(ErrorCode::AuthRequired.into())
+                        }
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async move |request: AuthenticateRequest, responder, _connection| {
+                        assert_eq!(request.method_id.to_string(), "browser");
+                        authentication_requests.fetch_add(1, Ordering::SeqCst);
+                        if let Some(authentication_started) = &authentication_started {
+                            authentication_started.notify_one();
+                        }
+                        if hang_authentication {
+                            std::future::pending::<()>().await;
+                        }
+                        authentication_authenticated.store(true, Ordering::SeqCst);
+                        responder.respond(AuthenticateResponse::new())
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .connect_to(client)
+                .await
+        }
+    }
 
     #[test]
     fn codex_uses_the_current_maintained_acp_adapter() {
@@ -1448,6 +1739,7 @@ mod tests {
             modes: Vec::new(),
             config_options: Vec::new(),
             available_commands: Vec::new(),
+            auth_methods: Vec::new(),
         };
         append_message(
             &mut snapshot,
@@ -1488,6 +1780,7 @@ mod tests {
             modes: Vec::new(),
             config_options: Vec::new(),
             available_commands: Vec::new(),
+            auth_methods: Vec::new(),
         };
         apply_event(
             &mut snapshot,
@@ -1529,6 +1822,7 @@ mod tests {
                 name: "old".to_owned(),
                 description: "stale".to_owned(),
             }],
+            auth_methods: Vec::new(),
         };
         let commands = vec![AgentSlashCommand {
             name: "review".to_owned(),
@@ -1542,5 +1836,221 @@ mod tests {
             },
         );
         assert_eq!(snapshot.available_commands, commands);
+    }
+
+    #[test]
+    fn authentication_state_and_methods_are_durable_in_the_snapshot() {
+        let id = AgentSessionId::new();
+        let method = AgentAuthMethod {
+            id: "browser".to_owned(),
+            name: "Sign in with browser".to_owned(),
+            description: Some("Continue in your browser".to_owned()),
+        };
+        let mut snapshot = AgentSessionSnapshot {
+            id,
+            name: "test".to_owned(),
+            cwd: PathBuf::from("/"),
+            status: AgentSessionStatus::Starting,
+            agent_name: None,
+            agent_version: None,
+            timeline: Vec::new(),
+            context_used: None,
+            context_size: None,
+            current_mode: None,
+            modes: Vec::new(),
+            config_options: Vec::new(),
+            available_commands: Vec::new(),
+            auth_methods: Vec::new(),
+        };
+
+        apply_event(
+            &mut snapshot,
+            &AgentEvent::AuthenticationRequired {
+                session_id: id,
+                agent_name: Some("Codex".to_owned()),
+                agent_version: Some("1.2.0".to_owned()),
+                methods: vec![method.clone()],
+            },
+        );
+        assert_eq!(
+            snapshot.status,
+            AgentSessionStatus::WaitingForAuthentication
+        );
+        assert_eq!(snapshot.auth_methods, [method]);
+
+        apply_event(
+            &mut snapshot,
+            &AgentEvent::AuthenticationStarted {
+                session_id: id,
+                method_id: "browser".to_owned(),
+            },
+        );
+        assert_eq!(snapshot.status, AgentSessionStatus::Authenticating);
+
+        apply_event(
+            &mut snapshot,
+            &AgentEvent::AuthenticationFailed {
+                session_id: id,
+                message: "cancelled".to_owned(),
+            },
+        );
+        assert_eq!(
+            snapshot.status,
+            AgentSessionStatus::WaitingForAuthentication
+        );
+        assert!(matches!(
+            snapshot.timeline.last(),
+            Some(AgentTimelineItem::Error(message)) if message == "cancelled"
+        ));
+    }
+
+    #[tokio::test]
+    async fn auth_required_runs_the_advertised_method_and_retries_session_creation() {
+        let id = AgentSessionId::new();
+        let method = AuthMethod::Agent(AuthMethodAgent::new("browser", "Sign in with browser"));
+        let methods = normalize_auth_methods(&[method]);
+        let snapshot = Arc::new(RwLock::new(AgentSessionSnapshot {
+            id,
+            name: "test".to_owned(),
+            cwd: std::env::temp_dir(),
+            status: AgentSessionStatus::Starting,
+            agent_name: None,
+            agent_version: None,
+            timeline: Vec::new(),
+            context_used: None,
+            context_size: None,
+            current_mode: None,
+            modes: Vec::new(),
+            config_options: Vec::new(),
+            available_commands: Vec::new(),
+            auth_methods: Vec::new(),
+        }));
+        let (events, _) = broadcast::channel(16);
+        let sink = EventSink {
+            session_id: id,
+            snapshot: Arc::clone(&snapshot),
+            events,
+        };
+        let (command_tx, mut commands) = mpsc::unbounded_channel();
+        command_tx
+            .send(AgentCommand::Authenticate("browser".to_owned()))
+            .expect("queue authentication");
+
+        let authenticated = Arc::new(AtomicBool::new(false));
+        let authentication_requests = Arc::new(AtomicUsize::new(0));
+        let session_requests = Arc::new(AtomicUsize::new(0));
+        let agent = AuthenticationAgent {
+            authenticated: Arc::clone(&authenticated),
+            authentication_requests: Arc::clone(&authentication_requests),
+            session_requests: Arc::clone(&session_requests),
+            hang_authentication: false,
+            authentication_started: None,
+        };
+
+        agent_client_protocol::Client
+            .builder()
+            .connect_with(agent, async move |connection| {
+                let session = open_authenticated_session(
+                    &connection,
+                    std::env::temp_dir(),
+                    &mut commands,
+                    &sink,
+                    Some("Test agent".to_owned()),
+                    Some("1.0.0".to_owned()),
+                    &methods,
+                )
+                .await?
+                .expect("session should be created after authentication");
+                assert_eq!(session.session_id.to_string(), "authenticated-session");
+                Ok(())
+            })
+            .await
+            .expect("mock ACP connection");
+
+        assert!(authenticated.load(Ordering::SeqCst));
+        assert_eq!(authentication_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(session_requests.load(Ordering::SeqCst), 2);
+        let snapshot = snapshot.read();
+        assert_eq!(snapshot.status, AgentSessionStatus::Authenticating);
+        assert_eq!(snapshot.agent_name.as_deref(), Some("Test agent"));
+        assert_eq!(snapshot.auth_methods[0].id, "browser");
+    }
+
+    #[tokio::test]
+    async fn a_session_can_close_while_agent_owned_authentication_is_pending() {
+        let id = AgentSessionId::new();
+        let methods = normalize_auth_methods(&[AuthMethod::Agent(AuthMethodAgent::new(
+            "browser",
+            "Sign in with browser",
+        ))]);
+        let snapshot = Arc::new(RwLock::new(AgentSessionSnapshot {
+            id,
+            name: "test".to_owned(),
+            cwd: std::env::temp_dir(),
+            status: AgentSessionStatus::Starting,
+            agent_name: None,
+            agent_version: None,
+            timeline: Vec::new(),
+            context_used: None,
+            context_size: None,
+            current_mode: None,
+            modes: Vec::new(),
+            config_options: Vec::new(),
+            available_commands: Vec::new(),
+            auth_methods: Vec::new(),
+        }));
+        let (events, _) = broadcast::channel(16);
+        let sink = EventSink {
+            session_id: id,
+            snapshot: Arc::clone(&snapshot),
+            events,
+        };
+        let (command_tx, mut commands) = mpsc::unbounded_channel();
+        command_tx
+            .send(AgentCommand::Authenticate("browser".to_owned()))
+            .expect("queue authentication");
+
+        let authenticated = Arc::new(AtomicBool::new(false));
+        let authentication_requests = Arc::new(AtomicUsize::new(0));
+        let session_requests = Arc::new(AtomicUsize::new(0));
+        let authentication_started = Arc::new(tokio::sync::Notify::new());
+        let close_started = Arc::clone(&authentication_started);
+        tokio::spawn(async move {
+            close_started.notified().await;
+            command_tx
+                .send(AgentCommand::Close)
+                .expect("queue close during authentication");
+        });
+        let agent = AuthenticationAgent {
+            authenticated: Arc::clone(&authenticated),
+            authentication_requests: Arc::clone(&authentication_requests),
+            session_requests: Arc::clone(&session_requests),
+            hang_authentication: true,
+            authentication_started: Some(authentication_started),
+        };
+
+        agent_client_protocol::Client
+            .builder()
+            .connect_with(agent, async move |connection| {
+                let session = open_authenticated_session(
+                    &connection,
+                    std::env::temp_dir(),
+                    &mut commands,
+                    &sink,
+                    Some("Test agent".to_owned()),
+                    Some("1.0.0".to_owned()),
+                    &methods,
+                )
+                .await?;
+                assert!(session.is_none());
+                Ok(())
+            })
+            .await
+            .expect("mock ACP connection");
+
+        assert!(!authenticated.load(Ordering::SeqCst));
+        assert_eq!(authentication_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(session_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(snapshot.read().status, AgentSessionStatus::Closed);
     }
 }

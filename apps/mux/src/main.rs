@@ -93,6 +93,7 @@ const MUX_AGENT_COMMANDS: &[(&str, &str)] = &[
         "context",
         "Attach no context, selected text, or the focused pane",
     ),
+    ("login", "Authenticate with an agent-advertised ACP method"),
     ("model", "Inspect or select an agent-advertised model"),
     ("effort", "Inspect or select reasoning effort"),
     ("mode", "Inspect or select the agent mode"),
@@ -377,6 +378,7 @@ impl Application {
             event,
             AgentEvent::ConfigUpdated { .. }
                 | AgentEvent::ModeUpdated { .. }
+                | AgentEvent::AuthenticationStarted { .. }
                 | AgentEvent::Closed { .. }
         ) {
             self.message = None;
@@ -388,6 +390,15 @@ impl Application {
                 .find(|agent| agent.id == event.session_id())
                 .map_or("Agent", |agent| agent.name.as_str());
             match event {
+                AgentEvent::AuthenticationRequired { .. } => {
+                    self.message = Some(format!("{agent_name} needs sign in  ·  ⇧⌘A, then /login"));
+                }
+                AgentEvent::AuthenticationStarted { .. } => {
+                    self.message = Some(format!("Signing in to {agent_name}…"));
+                }
+                AgentEvent::AuthenticationFailed { message, .. } => {
+                    self.message = Some(format!("{agent_name} sign in failed: {message}"));
+                }
                 AgentEvent::PermissionRequested { .. } => {
                     self.message = Some(format!("{agent_name} needs permission  ·  ⇧⌘A to review"));
                 }
@@ -1109,7 +1120,10 @@ impl Application {
         if draft.is_empty()
             || matches!(
                 agent.status,
-                AgentSessionStatus::Starting | AgentSessionStatus::Closed
+                AgentSessionStatus::Starting
+                    | AgentSessionStatus::WaitingForAuthentication
+                    | AgentSessionStatus::Authenticating
+                    | AgentSessionStatus::Closed
             )
         {
             return;
@@ -1226,6 +1240,10 @@ impl Application {
                 }
                 true
             }
+            "login" | "auth" => {
+                self.authenticate_active_agent(arguments.first().copied());
+                true
+            }
             "end" | "close" => {
                 let Some((selected, session_id)) = self.active_agent_selection() else {
                     self.message = Some("No active agent session to end".to_owned());
@@ -1282,7 +1300,8 @@ impl Application {
             }
             "help" => {
                 self.message = Some(
-                    "/new · /agents · /cwd · /context · /model · /effort · /mode · /end".to_owned(),
+                    "/new · /agents · /cwd · /context · /login · /model · /effort · /mode · /end"
+                        .to_owned(),
                 );
                 true
             }
@@ -1297,6 +1316,70 @@ impl Application {
         }
         let agent = self.agents.get(surface.selected)?;
         Some((surface.selected, agent.id))
+    }
+
+    fn authenticate_active_agent(&mut self, requested: Option<&str>) {
+        let Some((selected, session_id)) = self.active_agent_selection() else {
+            self.message = Some("Start or select an agent session first".to_owned());
+            return;
+        };
+        let agent = &self.agents[selected];
+        if agent.status == AgentSessionStatus::Authenticating {
+            self.message = Some("Agent sign in is already in progress".to_owned());
+            return;
+        }
+        if agent.status != AgentSessionStatus::WaitingForAuthentication {
+            self.message = Some("This agent session does not currently require sign in".to_owned());
+            return;
+        }
+        if agent.auth_methods.is_empty() {
+            self.message =
+                Some("The agent requested sign in without advertising a method".to_owned());
+            return;
+        }
+
+        let method = if let Some(requested) = requested {
+            let requested = requested.to_ascii_lowercase();
+            agent.auth_methods.iter().find(|method| {
+                method.id.eq_ignore_ascii_case(&requested)
+                    || method.name.eq_ignore_ascii_case(&requested)
+                    || method.name.to_ascii_lowercase().contains(&requested)
+            })
+        } else if agent.auth_methods.len() == 1 {
+            agent.auth_methods.first()
+        } else {
+            self.message = Some(format!(
+                "Choose a sign-in method · {}",
+                agent
+                    .auth_methods
+                    .iter()
+                    .map(|method| format!("/login {}", method.id))
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            ));
+            return;
+        };
+        let Some(method) = method else {
+            self.message = Some(format!(
+                "Unknown sign-in method · {}",
+                agent
+                    .auth_methods
+                    .iter()
+                    .map(|method| method.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            ));
+            return;
+        };
+        let method_id = method.id.clone();
+        let method_name = method.name.clone();
+        if let Some(backend) = &self.backend {
+            backend.send(CommandMessage::AuthenticateAgent {
+                session_id,
+                method_id,
+            });
+        }
+        self.message = Some(format!("Starting {method_name}…"));
     }
 
     fn configure_agent_mode(&mut self, requested: Option<&str>) {

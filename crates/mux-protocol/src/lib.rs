@@ -15,7 +15,10 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-pub const PROTOCOL_VERSION: u16 = 1;
+// Bump this whenever a serialized IPC type changes incompatibly. The daemon
+// outlives the GUI, so an explicit epoch is what prevents a newly installed
+// client from interpreting an older daemon's postcard bytes as another type.
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const MAX_FRAME_LENGTH: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -112,6 +115,10 @@ pub enum Request {
     },
     KillSession {
         session_id: SessionId,
+    },
+    AuthenticateAgent {
+        session_id: AgentSessionId,
+        method_id: String,
     },
 }
 

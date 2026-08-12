@@ -14,5 +14,8 @@ mux-workspace = { path = "../mux-workspace" }
 thiserror.workspace = true
 tokio.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true

@@ -1768,6 +1768,7 @@ dependencies = [
  "mux-protocol",
  "mux-terminal",
  "mux-workspace",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
 ]
