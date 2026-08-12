@@ -62,8 +62,9 @@ through a small adapter. The renderer caches shaped terminal rows, respects
 Ghostty damage, places wide glyphs on exact grid columns, and batches GPU
 rectangle uploads. Ghostty also owns selection formatting, bracketed paste,
 mode-aware keyboard and mouse encoding, and the scrollback viewport; the GUI
-adds native clipboard handling and a contextual history indicator. IME preedit,
-accessibility, hyperlink interaction, search, and broader platform behavior
+adds native clipboard handling, a contextual history indicator, and visible IME
+preedit with the platform candidate surface anchored to the active input area.
+Accessibility, hyperlink interaction, search, and broader platform behavior
 remain base-terminal work.
 
 No rendering dependency is pulled into the daemon, and no GUI type crosses the
