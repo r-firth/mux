@@ -95,7 +95,10 @@ stable methods advertised by `initialize`, surfaces an authentication-required
 state, runs the selected agent-owned method through `/login`, and retries
 `session/new`. It deliberately does not enable ACP's unstable terminal or
 environment-variable auth transports. Adapter installation/update UX remains
-the largest cross-agent lifecycle risk.
+the largest cross-agent lifecycle risk. Mux now preflights the external runtime
+before creating a durable session, explains the Node.js requirement for its
+built-in pinned adapters, and leaves a failed launcher immediately retryable;
+fully managed adapter installation remains future work.
 
 ## PTY and IPC
 

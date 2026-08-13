@@ -600,6 +600,7 @@ fn agent_error(error: &mux_acp::AgentError) -> RemoteError {
     let code = match error {
         mux_acp::AgentError::InvalidSpec(_)
         | mux_acp::AgentError::InvalidWorkingDirectory(_)
+        | mux_acp::AgentError::RuntimeUnavailable(_)
         | mux_acp::AgentError::EmptyPrompt
         | mux_acp::AgentError::NotAwaitingAuthentication(_) => ErrorCode::InvalidRequest,
         mux_acp::AgentError::SessionNotFound(_) => ErrorCode::NotFound,
