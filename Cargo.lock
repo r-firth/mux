@@ -1740,6 +1740,8 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "unicode-segmentation",
+ "unicode-width",
  "wgpu",
  "winit",
 ]

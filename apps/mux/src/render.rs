@@ -26,6 +26,7 @@ use mux_terminal::{
     TerminalPoint,
 };
 use mux_workspace::{InputMode, PaneId, Session};
+use unicode_width::UnicodeWidthStr;
 use wgpu::{
     BlendState, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites,
     CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, FragmentState, Instance,
@@ -91,10 +92,17 @@ pub struct AgentLauncherView<'a> {
 }
 
 #[derive(Clone, Copy)]
+pub struct TextPromptView<'a> {
+    pub label: &'a str,
+    pub draft: &'a str,
+}
+
+#[derive(Clone, Copy)]
 pub struct UiState<'a> {
     pub mode: InputMode,
     pub message: Option<&'a str>,
     pub session_switcher: Option<SessionSwitcherView<'a>>,
+    pub text_prompt: Option<TextPromptView<'a>>,
     pub agent_surface: Option<AgentSurfaceView<'a>>,
     pub ime_preedit: Option<&'a str>,
 }
@@ -449,7 +457,7 @@ impl Renderer {
                 InputMode::Pane => {
                     "PANE   h j k l focus · d down · r right · n new · f zoom · x close"
                 }
-                InputMode::Tab => "TAB    h j k l switch · 1–9 select · n new · x close",
+                InputMode::Tab => "TAB    h j k l switch · 1–9 select · n new · r rename · x close",
                 InputMode::Session => "SESSION   w sessions · d detach · Esc return",
                 InputMode::Resize => "RESIZE   h j k l / arrows grow · Esc return",
                 InputMode::Normal => "",
@@ -480,11 +488,21 @@ impl Renderer {
             self.add_session_switcher(switcher);
         }
 
+        if let Some(prompt) = ui.text_prompt {
+            self.add_text_prompt(prompt);
+        }
+
         if let Some(agent) = ui.agent_surface {
             self.add_agent_surface(agent);
         }
 
-        self.update_ime(geometry, frames, ui.agent_surface, ui.ime_preedit);
+        self.update_ime(
+            geometry,
+            frames,
+            ui.agent_surface,
+            ui.text_prompt,
+            ui.ime_preedit,
+        );
 
         let _ = session;
     }
@@ -494,12 +512,17 @@ impl Renderer {
         geometry: &WorkspaceGeometry,
         frames: &HashMap<PaneId, &RenderFrame>,
         agent_surface: Option<AgentSurfaceView<'_>>,
+        text_prompt: Option<TextPromptView<'_>>,
         preedit: Option<&str>,
     ) {
-        let cursor = agent_surface.map_or_else(
-            || self.focused_terminal_cursor_rect(geometry, frames),
-            |surface| Some(self.agent_composer_cursor_rect(surface)),
-        );
+        let cursor = if let Some(prompt) = text_prompt {
+            Some(self.text_prompt_cursor_rect(prompt))
+        } else {
+            agent_surface.map_or_else(
+                || self.focused_terminal_cursor_rect(geometry, frames),
+                |surface| Some(self.agent_composer_cursor_rect(surface)),
+            )
+        };
         let Some(cursor) = cursor else {
             return;
         };
@@ -1345,7 +1368,7 @@ impl Renderer {
             height: self.config.height as f32,
         };
         push_rect(
-            &mut self.rect_vertices,
+            &mut self.overlay_rect_vertices,
             window,
             OVERLAY_SCRIM,
             self.config.width,
@@ -1362,13 +1385,13 @@ impl Renderer {
             height: panel_height,
         };
         push_rect(
-            &mut self.rect_vertices,
+            &mut self.overlay_rect_vertices,
             panel,
             OVERLAY_BACKGROUND,
             self.config.width,
             self.config.height,
         );
-        self.chrome_text.push(make_text(
+        self.overlay_text.push(make_text(
             &mut self.font_system,
             "Sessions",
             Rect {
@@ -1383,7 +1406,7 @@ impl Renderer {
             Weight::SEMIBOLD,
         ));
         if switcher.entries.is_empty() {
-            self.chrome_text.push(make_text(
+            self.overlay_text.push(make_text(
                 &mut self.font_system,
                 "Loading sessions…",
                 Rect {
@@ -1408,7 +1431,7 @@ impl Renderer {
             };
             if index == switcher.selected {
                 push_rect(
-                    &mut self.rect_vertices,
+                    &mut self.overlay_rect_vertices,
                     row,
                     OVERLAY_SELECTED,
                     self.config.width,
@@ -1422,7 +1445,7 @@ impl Renderer {
     fn add_session_switcher_row(&mut self, index: usize, entry: &SessionSummary, row: Rect) {
         let scale = self.scale_factor;
         let label = format!("{}  {}", index + 1, entry.name);
-        self.chrome_text.push(make_text(
+        self.overlay_text.push(make_text(
             &mut self.font_system,
             &label,
             Rect {
@@ -1437,7 +1460,7 @@ impl Renderer {
             Weight::MEDIUM,
         ));
         let pane_count = format!("{} panes", entry.pane_count);
-        self.chrome_text.push(make_text(
+        self.overlay_text.push(make_text(
             &mut self.font_system,
             &pane_count,
             Rect {
@@ -1451,6 +1474,154 @@ impl Renderer {
             Family::SansSerif,
             Weight::NORMAL,
         ));
+    }
+
+    fn add_text_prompt(&mut self, prompt: TextPromptView<'_>) {
+        let scale = self.scale_factor;
+        let window = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: self.config.width as f32,
+            height: self.config.height as f32,
+        };
+        push_rect(
+            &mut self.overlay_rect_vertices,
+            window,
+            OVERLAY_SCRIM,
+            self.config.width,
+            self.config.height,
+        );
+        let panel = self.text_prompt_panel();
+        push_rect(
+            &mut self.overlay_rect_vertices,
+            panel,
+            OVERLAY_BACKGROUND,
+            self.config.width,
+            self.config.height,
+        );
+        push_border(
+            &mut self.overlay_rect_vertices,
+            panel,
+            scale.max(1.0),
+            [0.18, 0.22, 0.29, 1.0],
+            self.config.width,
+            self.config.height,
+        );
+        self.overlay_text.push(make_text(
+            &mut self.font_system,
+            prompt.label,
+            Rect {
+                x: panel.x + 16.0 * scale,
+                y: panel.y + 11.0 * scale,
+                width: panel.width - 32.0 * scale,
+                height: 22.0 * scale,
+            },
+            13.0 * scale,
+            Color::rgb(225, 230, 240),
+            Family::SansSerif,
+            Weight::SEMIBOLD,
+        ));
+        let input = self.text_prompt_input_rect();
+        push_rect(
+            &mut self.overlay_rect_vertices,
+            input,
+            [0.025, 0.030, 0.040, 1.0],
+            self.config.width,
+            self.config.height,
+        );
+        push_border(
+            &mut self.overlay_rect_vertices,
+            input,
+            scale.max(1.0),
+            [0.22, 0.34, 0.50, 1.0],
+            self.config.width,
+            self.config.height,
+        );
+        let (value, color) = if prompt.draft.is_empty() {
+            ("Type a name…", Color::rgb(116, 126, 144))
+        } else {
+            (prompt.draft, Color::rgb(226, 231, 240))
+        };
+        self.overlay_text.push(make_text(
+            &mut self.font_system,
+            value,
+            Rect {
+                x: input.x + 10.0 * scale,
+                y: input.y + 6.0 * scale,
+                width: input.width - 20.0 * scale,
+                height: input.height - 8.0 * scale,
+            },
+            13.0 * scale,
+            color,
+            Family::Name(TERMINAL_FONT_FAMILY),
+            Weight::NORMAL,
+        ));
+        let cursor = self.text_prompt_cursor_rect(prompt);
+        push_rect(
+            &mut self.overlay_rect_vertices,
+            cursor,
+            AGENT_ACCENT,
+            self.config.width,
+            self.config.height,
+        );
+        self.add_text_prompt_help(panel);
+    }
+
+    fn add_text_prompt_help(&mut self, panel: Rect) {
+        let scale = self.scale_factor;
+        self.overlay_text.push(make_text(
+            &mut self.font_system,
+            "Enter rename  ·  Esc cancel",
+            Rect {
+                x: panel.x + 16.0 * scale,
+                y: panel.y + panel.height - 25.0 * scale,
+                width: panel.width - 32.0 * scale,
+                height: 18.0 * scale,
+            },
+            10.5 * scale,
+            Color::rgb(133, 144, 164),
+            Family::SansSerif,
+            Weight::NORMAL,
+        ));
+    }
+
+    fn text_prompt_panel(&self) -> Rect {
+        let scale = self.scale_factor;
+        let width = (430.0 * scale).min(self.config.width as f32 - 32.0 * scale);
+        let height = 118.0 * scale;
+        Rect {
+            x: ((self.config.width as f32 - width) / 2.0).round(),
+            y: ((self.config.height as f32 - height) * 0.34)
+                .max(16.0 * scale)
+                .round(),
+            width,
+            height,
+        }
+    }
+
+    fn text_prompt_input_rect(&self) -> Rect {
+        let scale = self.scale_factor;
+        let panel = self.text_prompt_panel();
+        Rect {
+            x: panel.x + 16.0 * scale,
+            y: panel.y + 39.0 * scale,
+            width: panel.width - 32.0 * scale,
+            height: 36.0 * scale,
+        }
+    }
+
+    fn text_prompt_cursor_rect(&self, prompt: TextPromptView<'_>) -> Rect {
+        let scale = self.scale_factor;
+        let input = self.text_prompt_input_rect();
+        let offset = prompt.draft.width() as f32 * 7.8 * scale;
+        Rect {
+            x: (input.x + 9.0 * scale + offset)
+                .min(input.x + input.width - 11.0 * scale)
+                .round(),
+            y: input.y + 8.0 * scale,
+            width: scale.max(1.0),
+            height: 19.0 * scale,
+        }
     }
 
     #[allow(clippy::too_many_lines)]

@@ -31,8 +31,11 @@ use mux_workspace::{
     Action, InputMode, Key as MuxKey, KeyChord, Keymap, Modifiers, PaneId, Session,
     WorkspaceCommand,
 };
-use render::{AgentLauncherView, AgentSurfaceView, Renderer, SessionSwitcherView, UiState};
+use render::{
+    AgentLauncherView, AgentSurfaceView, Renderer, SessionSwitcherView, TextPromptView, UiState,
+};
 use tracing::{error, info};
+use unicode_segmentation::UnicodeSegmentation;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -55,6 +58,10 @@ enum UserEvent {
 struct SessionSwitcher {
     entries: Vec<SessionSummary>,
     selected: usize,
+}
+
+struct TextPrompt {
+    draft: String,
 }
 
 struct AgentSurface {
@@ -133,6 +140,7 @@ struct Application {
     event_proxy: Option<EventLoopProxy<UserEvent>>,
     state_dir: Option<PathBuf>,
     session_switcher: Option<SessionSwitcher>,
+    text_prompt: Option<TextPrompt>,
     agents: Vec<AgentSessionSnapshot>,
     agent_profiles: Vec<AgentProfile>,
     agent_surface: Option<AgentSurface>,
@@ -169,6 +177,7 @@ impl Default for Application {
             event_proxy: None,
             state_dir: None,
             session_switcher: None,
+            text_prompt: None,
             agents: Vec::new(),
             agent_profiles: built_in_agent_profiles(),
             agent_surface: None,
@@ -389,6 +398,10 @@ impl Application {
                         selected: switcher.selected,
                     }
                 }),
+                text_prompt: self.text_prompt.as_ref().map(|prompt| TextPromptView {
+                    label: "Rename tab",
+                    draft: &prompt.draft,
+                }),
                 agent_surface: self.agent_surface.as_ref().map(|surface| AgentSurfaceView {
                     entries: &self.agents,
                     selected: surface.selected,
@@ -442,6 +455,14 @@ impl Application {
             return;
         }
 
+        if self.text_prompt.is_some() {
+            if event.state == ElementState::Pressed {
+                self.suppress_key_release(event);
+                self.handle_text_prompt_key(event);
+            }
+            return;
+        }
+
         if self.session_switcher.is_some() {
             if event.state == ElementState::Pressed {
                 self.suppress_key_release(event);
@@ -488,6 +509,60 @@ impl Application {
             let _ = self.refresh_view();
         }
         self.write_terminal_key(event);
+    }
+
+    fn handle_text_prompt_key(&mut self, event: &KeyEvent) {
+        let key = event.key_without_modifiers();
+        if self.modifiers.control_key()
+            && matches!(key, Key::Character(ref value) if value.eq_ignore_ascii_case("c"))
+        {
+            self.text_prompt = None;
+            self.ime_preedit.clear();
+            self.mode = InputMode::Normal;
+            let _ = self.refresh_view();
+            return;
+        }
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                self.text_prompt = None;
+                self.ime_preedit.clear();
+            }
+            Key::Named(NamedKey::Enter) => {
+                let title = self
+                    .text_prompt
+                    .take()
+                    .map(|prompt| prompt.draft.trim().to_owned())
+                    .unwrap_or_default();
+                self.ime_preedit.clear();
+                self.mode = InputMode::Normal;
+                if !title.is_empty() {
+                    self.send_workspace(WorkspaceCommand::RenameTab(title));
+                    return;
+                }
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if let Some(prompt) = &mut self.text_prompt {
+                    pop_grapheme(&mut prompt.draft);
+                }
+            }
+            Key::Character(ref value)
+                if self.modifiers.control_key() && value.eq_ignore_ascii_case("u") =>
+            {
+                if let Some(prompt) = &mut self.text_prompt {
+                    prompt.draft.clear();
+                }
+            }
+            _ if !self.modifiers.control_key() && !self.modifiers.super_key() => {
+                if let Some(text) = event.text.as_deref().filter(|text| {
+                    !text.is_empty() && text.chars().all(|character| !character.is_control())
+                }) && let Some(prompt) = &mut self.text_prompt
+                {
+                    prompt.draft.push_str(text);
+                }
+            }
+            _ => {}
+        }
+        let _ = self.refresh_view();
     }
 
     fn handle_session_switcher_key(&mut self, event: &KeyEvent) {
@@ -585,7 +660,7 @@ impl Application {
             Key::Named(NamedKey::Enter) => self.submit_agent_surface(),
             Key::Named(NamedKey::Backspace) => {
                 if let Some(surface) = &mut self.agent_surface {
-                    surface.draft.pop();
+                    pop_grapheme(&mut surface.draft);
                 }
                 let _ = self.refresh_view();
             }
@@ -1694,7 +1769,13 @@ impl Application {
                 }
             }
             Action::OpenAgentSurface => self.toggle_agent_surface(),
-            Action::RenameTab | Action::OpenCommandPalette => {}
+            Action::RenameTab => {
+                self.text_prompt = Some(TextPrompt {
+                    draft: String::new(),
+                });
+                let _ = self.refresh_view();
+            }
+            Action::OpenCommandPalette => {}
         }
     }
 
@@ -2002,6 +2083,13 @@ impl ApplicationHandler<UserEvent> for Application {
                 self.ime_preedit = text;
                 let _ = self.refresh_view();
             }
+            WindowEvent::Ime(Ime::Commit(text)) if self.text_prompt.is_some() => {
+                self.ime_preedit.clear();
+                if let Some(prompt) = &mut self.text_prompt {
+                    prompt.draft.push_str(&text);
+                }
+                let _ = self.refresh_view();
+            }
             WindowEvent::Ime(Ime::Commit(text)) if self.agent_surface.is_some() => {
                 self.ime_preedit.clear();
                 if let Some(surface) = &mut self.agent_surface {
@@ -2043,6 +2131,12 @@ fn expand_home_path(value: &str) -> PathBuf {
         return directories.home_dir().join(relative);
     }
     PathBuf::from(value)
+}
+
+fn pop_grapheme(value: &mut String) {
+    if let Some((start, _)) = value.grapheme_indices(true).next_back() {
+        value.truncate(start);
+    }
 }
 
 fn describe_agent_option(option: &mux_acp::AgentConfigOption) -> String {
@@ -2415,5 +2509,14 @@ mod input_tests {
     #[test]
     fn physical_tab_is_always_identified_for_libghostty() {
         assert_eq!(physical_terminal_key(KeyCode::Tab), Some(TerminalKey::Tab));
+    }
+
+    #[test]
+    fn composer_backspace_removes_one_user_perceived_character() {
+        let mut value = "agent e\u{301}🚀".to_owned();
+        pop_grapheme(&mut value);
+        assert_eq!(value, "agent e\u{301}");
+        pop_grapheme(&mut value);
+        assert_eq!(value, "agent ");
     }
 }

@@ -791,6 +791,11 @@ impl Keymap {
     fn bind_zellij_tab_mode(&mut self) {
         self.bind(
             InputMode::Tab,
+            KeyChord::plain(Key::Character('r')),
+            Action::RenameTab,
+        );
+        self.bind(
+            InputMode::Tab,
             KeyChord::plain(Key::Character('n')),
             Action::Sequence(vec![Action::NewTab, Action::EnterMode(InputMode::Normal)]),
         );
@@ -942,6 +947,10 @@ mod tests {
         assert_eq!(
             keymap.resolve(InputMode::Pane, KeyChord::plain(Key::Enter)),
             Some(&Action::EnterMode(InputMode::Normal)),
+        );
+        assert_eq!(
+            keymap.resolve(InputMode::Tab, KeyChord::plain(Key::Character('r'))),
+            Some(&Action::RenameTab),
         );
         assert_eq!(
             keymap.resolve(InputMode::Normal, KeyChord::control('n')),
