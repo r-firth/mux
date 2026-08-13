@@ -1,70 +1,68 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
-  "release-type": "rust",
+  "release-type": "simple",
   "include-component-in-tag": false,
-  "group-pull-request-title-pattern": "chore: release Mux ${version}",
+  "pull-request-title-pattern": "chore: release Mux ${version}",
   "packages": {
     ".": {
-      "release-type": "simple",
-      "component": "mux-product"
-    },
-    "apps/mux": {
-      "component": "mux-app",
-      "skip-changelog": true
-    },
-    "apps/muxctl": {
-      "component": "muxctl",
-      "skip-changelog": true
-    },
-    "crates/mux-acp": {
-      "component": "mux-acp",
-      "skip-changelog": true
-    },
-    "crates/mux-client": {
-      "component": "mux-client",
-      "skip-changelog": true
-    },
-    "crates/mux-daemon": {
-      "component": "mux-daemon",
-      "skip-changelog": true
-    },
-    "crates/mux-protocol": {
-      "component": "mux-protocol",
-      "skip-changelog": true
-    },
-    "crates/mux-terminal": {
-      "component": "mux-terminal",
-      "skip-changelog": true
-    },
-    "crates/mux-terminal-ghostty": {
-      "component": "mux-terminal-ghostty",
-      "skip-changelog": true
-    },
-    "crates/mux-workspace": {
-      "component": "mux-workspace",
-      "skip-changelog": true
-    }
-  },
-  "plugins": [
-    {
-      "type": "cargo-workspace",
-      "merge": false
-    },
-    {
-      "type": "linked-versions",
-      "groupName": "Mux",
-      "components": [
-        "mux-product",
-        "mux-app",
-        "muxctl",
-        "mux-acp",
-        "mux-client",
-        "mux-daemon",
-        "mux-protocol",
-        "mux-terminal",
-        "mux-terminal-ghostty",
-        "mux-workspace"
+      "component": "mux",
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "apps/mux/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "apps/muxctl/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "crates/mux-acp/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "crates/mux-client/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "crates/mux-daemon/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "crates/mux-protocol/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "crates/mux-terminal/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "crates/mux-terminal-ghostty/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "crates/mux-workspace/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name == 'mux' || @.name == 'muxctl' || @.name == 'mux-acp' || @.name == 'mux-client' || @.name == 'mux-daemon' || @.name == 'mux-protocol' || @.name == 'mux-terminal' || @.name == 'mux-terminal-ghostty' || @.name == 'mux-workspace')].version"
+        }
       ]
     }
-  ]
+  }
 }
