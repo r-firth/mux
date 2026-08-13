@@ -6,6 +6,8 @@ profile=${MUX_BUILD_PROFILE:-release}
 zig=${MUX_ZIG:-zig}
 codesign_identity=${MUX_CODESIGN_IDENTITY:--}
 build_number=${MUX_BUILD_NUMBER:-1}
+bundle_identifier=${MUX_BUNDLE_IDENTIFIER:-io.mux.Mux}
+bundle_name=${MUX_BUNDLE_NAME:-Mux}
 
 case "$profile" in
   debug) cargo_profile_args="" ;;
@@ -17,7 +19,7 @@ cd "$project_dir"
 MUX_ZIG="$zig" MACOSX_DEPLOYMENT_TARGET=13.0 \
   cargo build -p mux --features product $cargo_profile_args
 
-app_dir="$project_dir/target/Mux.app"
+app_dir=${MUX_APP_PATH:-$project_dir/target/Mux.app}
 contents_dir="$app_dir/Contents"
 macos_dir="$contents_dir/MacOS"
 frameworks_dir="$contents_dir/Frameworks"
@@ -31,6 +33,12 @@ version=${version##*@}
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" \
   "$contents_dir/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" \
+  "$contents_dir/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $bundle_identifier" \
+  "$contents_dir/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleName $bundle_name" \
+  "$contents_dir/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $bundle_name" \
   "$contents_dir/Info.plist"
 
 ghostty_library=$(find "$project_dir/target/$profile/build" \
