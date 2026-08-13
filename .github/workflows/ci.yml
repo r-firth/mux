@@ -48,6 +48,9 @@ jobs:
         run: cargo clippy --workspace --all-targets --features mux/product -- -D warnings
       - name: Build app bundle
         env:
+          # The product test already compiled the full debug app and Ghostty.
+          # Release archives still use the optimized profile in the release job.
+          MUX_BUILD_PROFILE: debug
           MUX_BUILD_NUMBER: ${{ github.run_number }}
         run: scripts/package-macos.sh
       - name: Upload app bundle
