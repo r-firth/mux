@@ -1,13 +1,18 @@
 name: Release management
 
 on:
-  push:
-    branches: [main]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
 
 permissions: {}
 
 jobs:
   release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
     name: Publish approved release
     runs-on: ubuntu-latest
     permissions:
@@ -15,21 +20,19 @@ jobs:
       contents: write
       pull-requests: read
     steps:
-      - &checkout
-        name: Checkout complete history
+      - name: Checkout complete history
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
-      - &rust
-        name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@1.88.0
+          ref: ${{ github.event.workflow_run.head_sha }}
       - name: Publish GitHub release
         id: publish
         run: scripts/publish-github-release.sh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MUX_RELEASE_COMMIT: ${{ github.event.workflow_run.head_sha }}
       - name: Build release artifacts
         if: steps.publish.outputs.artifacts_needed == 'true'
         run: gh workflow run release-artifacts.yml --ref main -f tag='${{ steps.publish.outputs.tag }}'
@@ -37,20 +40,24 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   release-pr:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
     name: Prepare release PR
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      issues: write
       pull-requests: write
     concurrency:
-      group: release-plz-${{ github.ref }}
+      group: release-please-main
       cancel-in-progress: false
     steps:
-      - *checkout
-      - *rust
       - name: Create or update release PR
-        uses: release-plz/action@v0.5
+        uses: googleapis/release-please-action@v4
         with:
-          command: release-pr
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          release-type: rust
+          skip-github-release: true
+          include-component-in-tag: false
+          token: ${{ secrets.GITHUB_TOKEN }}
