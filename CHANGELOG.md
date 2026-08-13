@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0](https://github.com/r-firth/mux/compare/v0.4.0...v0.5.0) (2026-08-13)
+
+### Features
+
+* add a cohesive Mux app icon, project logo, and concise demo-led README
+* add subtle, reduced-motion-aware transitions for pane focus, modes, and agent activity
+
+### Bug Fixes
+
+* preserve native macOS window behavior for Rectangle and other window managers
+* keep hidden terminals and static agent indicators from continuously redrawing the app
+
+### Performance Improvements
+
+* send terminal input without a daemon acknowledgement round trip
+* remove fixed output latency and batch daemon events into coherent render updates
+* cache shaped terminal runs and preserve high-resolution trackpad scroll motion
+* publish render frames only for visible terminal panes
+
 ## [0.4.0](https://github.com/r-firth/mux/compare/v0.3.0...v0.4.0) (2026-08-13)
 
 ### Features
