@@ -1394,7 +1394,7 @@ mod linked {
             })
             .expect("new terminal");
             engine
-                .apply_output(1, b"\x1b[6n\x1b[c\x1b[>c")
+                .apply_output(1, b"\x1b[6n\x1b[c\x1b[>c\x1b[>q")
                 .expect("terminal queries");
             let responses = engine.take_pty_responses().expect("PTY responses");
             assert!(
@@ -1404,6 +1404,11 @@ mod linked {
             );
             assert!(responses.windows(3).any(|window| window == b"\x1b[?"));
             assert!(responses.windows(3).any(|window| window == b"\x1b[>"));
+            assert!(
+                responses
+                    .windows(env!("CARGO_PKG_VERSION").len())
+                    .any(|window| window == env!("CARGO_PKG_VERSION").as_bytes())
+            );
             assert!(engine.take_pty_responses().expect("drained").is_empty());
         }
 

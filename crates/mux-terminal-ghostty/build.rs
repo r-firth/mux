@@ -31,10 +31,15 @@ fn main() {
         include_dir.display()
     );
 
+    let version = format!(
+        "\"{}\"",
+        env::var("CARGO_PKG_VERSION").expect("Cargo package version")
+    );
     cc::Build::new()
         .file("native/ghostty_shim.c")
         .include(&include_dir)
         .define("GHOSTTY_STATIC", None)
+        .define("MUX_VERSION", version.as_str())
         .warnings(true)
         .extra_warnings(true)
         .compile("mux-ghostty-shim");
