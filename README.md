@@ -23,6 +23,9 @@ sessions through the same stable Agent Client Protocol used by Zed.
   Unicode, CJK, emoji, bold, italic, faint, and terminal decorations.
 - Ghostty owns mode-aware key, paste, selection, scrollback, and mouse-protocol
   semantics; the GUI supplies native keyboard, clipboard, pointer, and wheel input.
+- OSC 8 hyperlinks come directly from Ghostty cell state. Hold Command to reveal
+  a link with native pointer feedback and Command-click it without interfering
+  with ordinary terminal mouse input.
 - Ghostty-compatible background, foreground, cursor, and palette values are
   loaded from the current user theme; terminal RGB is rendered in the correct
   sRGB colour space.

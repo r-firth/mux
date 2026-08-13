@@ -42,7 +42,7 @@ use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, W
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
-use winit::window::{Window, WindowId};
+use winit::window::{CursorIcon, Window, WindowId};
 
 enum UserEvent {
     Attached(SessionAttachment),
@@ -140,6 +140,8 @@ struct Application {
     pressed_mouse_buttons: HashSet<MouseButton>,
     mouse_reporting_pane: Option<PaneId>,
     cursor_position: (f32, f32),
+    hovered_hyperlink: Option<(PaneId, String)>,
+    hyperlink_click_active: bool,
     selection_drag: Option<SelectionDrag>,
     selected_pane: Option<PaneId>,
     active_selection: Option<(PaneId, TerminalSelection)>,
@@ -177,6 +179,8 @@ impl Default for Application {
             pressed_mouse_buttons: HashSet::new(),
             mouse_reporting_pane: None,
             cursor_position: (0.0, 0.0),
+            hovered_hyperlink: None,
+            hyperlink_click_active: false,
             selection_drag: None,
             selected_pane: None,
             active_selection: None,
@@ -237,6 +241,11 @@ impl Application {
         self.selection_drag = self
             .selection_drag
             .filter(|drag| self.panes.contains_key(&drag.pane_id));
+        self.hovered_hyperlink = None;
+        self.hyperlink_click_active = false;
+        if let Some(renderer) = &self.renderer {
+            renderer.set_cursor_icon(CursorIcon::Default);
+        }
         self.sent_sizes.clear();
         let changed_panes = self.panes.keys().copied().collect();
         self.dirty_panes.clear();
@@ -397,7 +406,7 @@ impl Application {
             &self.geometry,
             &frames,
             &effective_changes,
-            UiState {
+            &UiState {
                 mode: self.mode,
                 message: self.message.as_deref(),
                 session_switcher: if self.text_prompt.is_none() {
@@ -434,6 +443,10 @@ impl Application {
                     timeline_scroll: surface.timeline_scroll,
                 }),
                 ime_preedit: (!self.ime_preedit.is_empty()).then_some(self.ime_preedit.as_str()),
+                hovered_hyperlink: self
+                    .hovered_hyperlink
+                    .as_ref()
+                    .map(|(pane_id, uri)| (*pane_id, uri.as_str())),
             },
         );
         Ok(())
@@ -455,6 +468,7 @@ impl Application {
                 pane.frame = pane.engine.render_frame()?;
             }
         }
+        self.update_hyperlink_hover();
         self.sync_view(&changed_panes)
     }
 
@@ -1238,6 +1252,7 @@ impl Application {
         }
         self.mode = InputMode::Normal;
         self.session_switcher = None;
+        self.clear_hyperlink_hover();
         self.agent_surface = Some(AgentSurface {
             selected: 0,
             draft: String::new(),
@@ -1404,6 +1419,23 @@ impl Application {
         }
         if self.session_switcher.is_some() {
             return;
+        }
+        if button == MouseButton::Left {
+            if state == ElementState::Released && self.hyperlink_click_active {
+                self.hyperlink_click_active = false;
+                return;
+            }
+            if state == ElementState::Pressed
+                && self.hyperlink_modifier_held()
+                && let Some((_, uri)) = self.hyperlink_at_cursor()
+            {
+                self.hyperlink_click_active = true;
+                if let Err(error) = open_hyperlink(&uri) {
+                    self.message = Some(format!("open hyperlink: {error:#}"));
+                    let _ = self.refresh_view();
+                }
+                return;
+            }
         }
         match state {
             ElementState::Pressed => {
@@ -1593,6 +1625,9 @@ impl Application {
             return;
         }
         self.mouse_dragged();
+        if self.update_hyperlink_hover() {
+            let _ = self.refresh_view();
+        }
     }
 
     fn report_mouse_wheel(&mut self, pane_id: PaneId, rows: i64) -> bool {
@@ -1697,6 +1732,68 @@ impl Application {
             .iter()
             .find(|pane| pane.rect.contains(x, y))
             .copied()
+    }
+
+    fn hyperlink_modifier_held(&self) -> bool {
+        if cfg!(target_os = "macos") {
+            self.modifiers.super_key()
+        } else {
+            self.modifiers.control_key()
+        }
+    }
+
+    fn hyperlink_at_cursor(&self) -> Option<(PaneId, String)> {
+        if self.mode != InputMode::Normal
+            || self.text_prompt.is_some()
+            || self.session_switcher.is_some()
+            || self.agent_surface.is_some()
+            || !self.pressed_mouse_buttons.is_empty()
+        {
+            return None;
+        }
+        let renderer = self.renderer.as_ref()?;
+        let pane = self.pane_at_cursor()?;
+        let point =
+            renderer.terminal_point_at(pane, self.cursor_position.0, self.cursor_position.1)?;
+        let frame = &self.panes.get(&pane.pane_id)?.frame;
+        let index = usize::from(point.row)
+            .checked_mul(usize::from(frame.cols))?
+            .checked_add(usize::from(point.column))?;
+        frame
+            .cells
+            .get(index)?
+            .hyperlink
+            .as_ref()
+            .map(|uri| (pane.pane_id, uri.clone()))
+    }
+
+    fn update_hyperlink_hover(&mut self) -> bool {
+        let next = self
+            .hyperlink_modifier_held()
+            .then(|| self.hyperlink_at_cursor())
+            .flatten();
+        if next == self.hovered_hyperlink {
+            return false;
+        }
+        self.hovered_hyperlink = next;
+        if let Some(renderer) = &self.renderer {
+            renderer.set_cursor_icon(if self.hovered_hyperlink.is_some() {
+                CursorIcon::Pointer
+            } else {
+                CursorIcon::Default
+            });
+        }
+        true
+    }
+
+    fn clear_hyperlink_hover(&mut self) -> bool {
+        if self.hovered_hyperlink.take().is_none() {
+            return false;
+        }
+        if let Some(renderer) = &self.renderer {
+            renderer.set_cursor_icon(CursorIcon::Default);
+        }
+        true
     }
 
     fn scroll_pane(&mut self, pane_id: PaneId, scroll: TerminalViewportScroll) {
@@ -1837,6 +1934,7 @@ impl Application {
             Action::WriteTerminal(bytes) => self.write_focused(bytes),
             Action::OpenSessionSwitcher => {
                 self.mode = InputMode::Normal;
+                self.clear_hyperlink_hover();
                 self.session_switcher = Some(SessionSwitcher {
                     entries: Vec::new(),
                     selected: 0,
@@ -1854,6 +1952,7 @@ impl Application {
             }
             Action::OpenAgentSurface => self.toggle_agent_surface(),
             Action::RenameTab => {
+                self.clear_hyperlink_hover();
                 self.text_prompt = Some(TextPrompt {
                     kind: TextPromptKind::RenameTab,
                     draft: String::new(),
@@ -2167,7 +2266,12 @@ impl ApplicationHandler<UserEvent> for Application {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => self.handle_key(&event),
-            WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+                if self.update_hyperlink_hover() {
+                    let _ = self.refresh_view();
+                }
+            }
             WindowEvent::Ime(Ime::Preedit(text, _)) => {
                 self.ime_preedit = text;
                 let _ = self.refresh_view();
@@ -2198,6 +2302,11 @@ impl ApplicationHandler<UserEvent> for Application {
             WindowEvent::CursorMoved { position, .. } => {
                 self.handle_cursor_moved(position.x as f32, position.y as f32);
             }
+            WindowEvent::CursorLeft { .. } => {
+                if self.clear_hyperlink_hover() {
+                    let _ = self.refresh_view();
+                }
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 self.handle_mouse_button(state, button);
             }
@@ -2205,6 +2314,51 @@ impl ApplicationHandler<UserEvent> for Application {
             _ => {}
         }
     }
+}
+
+fn open_hyperlink(uri: &str) -> Result<()> {
+    validate_hyperlink_uri(uri)?;
+
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("/usr/bin/open");
+    #[cfg(target_os = "linux")]
+    let mut command = std::process::Command::new("xdg-open");
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("rundll32");
+        command.arg("url.dll,FileProtocolHandler");
+        command
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    return Err(anyhow!(
+        "opening hyperlinks is unsupported on this platform"
+    ));
+
+    let mut child = command.arg(uri).spawn().context("launch URI handler")?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+fn validate_hyperlink_uri(uri: &str) -> Result<()> {
+    let scheme = uri
+        .split_once(':')
+        .map(|(scheme, _)| scheme)
+        .filter(|scheme| {
+            let mut characters = scheme.chars();
+            characters
+                .next()
+                .is_some_and(|first| first.is_ascii_alphabetic())
+                && characters.all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+                })
+        })
+        .ok_or_else(|| anyhow!("terminal hyperlink is not an absolute URI"))?;
+    if scheme.len() > 32 || uri.chars().any(char::is_control) {
+        return Err(anyhow!("terminal hyperlink is not a safe URI"));
+    }
+    Ok(())
 }
 
 fn expand_home_path(value: &str) -> PathBuf {
@@ -2607,5 +2761,14 @@ mod input_tests {
         assert_eq!(value, "agent e\u{301}");
         pop_grapheme(&mut value);
         assert_eq!(value, "agent ");
+    }
+
+    #[test]
+    fn terminal_hyperlinks_require_a_safe_absolute_uri() {
+        assert!(validate_hyperlink_uri("https://example.com/docs").is_ok());
+        assert!(validate_hyperlink_uri("mailto:hello@example.com").is_ok());
+        assert!(validate_hyperlink_uri("not a URI").is_err());
+        assert!(validate_hyperlink_uri("1nvalid:value").is_err());
+        assert!(validate_hyperlink_uri("https://example.com\ncommand").is_err());
     }
 }

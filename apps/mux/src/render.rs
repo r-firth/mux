@@ -36,7 +36,7 @@ use wgpu::{
     TextureFormat, TextureUsages, TextureViewDescriptor, VertexState,
 };
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::window::Window;
+use winit::window::{CursorIcon, Window};
 
 use crate::layout::{
     PANE_PADDING_X, PANE_PADDING_Y, PaneGeometry, Rect, TAB_BAR_HEIGHT, WorkspaceGeometry,
@@ -106,6 +106,7 @@ pub struct UiState<'a> {
     pub text_prompt: Option<TextPromptView<'a>>,
     pub agent_surface: Option<AgentSurfaceView<'a>>,
     pub ime_preedit: Option<&'a str>,
+    pub hovered_hyperlink: Option<(PaneId, &'a str)>,
 }
 
 #[repr(C)]
@@ -335,7 +336,7 @@ impl Renderer {
         geometry: &WorkspaceGeometry,
         frames: &HashMap<PaneId, &RenderFrame>,
         changed_panes: &HashSet<PaneId>,
-        ui: UiState<'_>,
+        ui: &UiState<'_>,
     ) {
         self.rect_vertices.clear();
         self.chrome_text.clear();
@@ -408,7 +409,10 @@ impl Renderer {
                 focused: pane.focused,
             };
             if let Some(frame) = frames.get(&pane.pane_id) {
-                self.add_terminal_rectangles(scaled_geometry, frame);
+                let hovered_hyperlink = ui
+                    .hovered_hyperlink
+                    .and_then(|(pane_id, uri)| (pane_id == pane.pane_id).then_some(uri));
+                self.add_terminal_rectangles(scaled_geometry, frame, hovered_hyperlink);
                 let previous = self.pane_text.remove(&pane.pane_id);
                 let rebuild_all = previous.as_ref().is_none_or(|text| {
                     text.geometry.rect != scaled_geometry.rect
@@ -1673,7 +1677,12 @@ impl Renderer {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn add_terminal_rectangles(&mut self, geometry: PaneGeometry, frame: &RenderFrame) {
+    fn add_terminal_rectangles(
+        &mut self,
+        geometry: PaneGeometry,
+        frame: &RenderFrame,
+        hovered_hyperlink: Option<&str>,
+    ) {
         let cell_width = self.cell_width();
         let cell_height = self.cell_height();
         let content_x = geometry.rect.x + PANE_PADDING_X * self.scale_factor;
@@ -1725,6 +1734,7 @@ impl Renderer {
                     &mut self.rect_vertices,
                     decoration_rect,
                     cell,
+                    hovered_hyperlink.is_some_and(|uri| cell.hyperlink.as_deref() == Some(uri)),
                     self.scale_factor,
                     self.config.width,
                     self.config.height,
@@ -1954,6 +1964,10 @@ impl Renderer {
 
     pub fn request_redraw(&self) {
         self.window.request_redraw();
+    }
+
+    pub fn set_cursor_icon(&self, icon: CursorIcon) {
+        self.window.set_cursor(icon);
     }
 
     pub fn drag_window(&self) -> Result<()> {
@@ -2482,6 +2496,7 @@ fn push_cell_decorations(
     vertices: &mut Vec<Vertex>,
     cell: Rect,
     render_cell: &RenderCell,
+    hyperlink_highlight: bool,
     scale_factor: f32,
     viewport_width: u32,
     viewport_height: u32,
@@ -2492,58 +2507,50 @@ fn push_cell_decorations(
         if render_cell.style.faint { 0.55 } else { 1.0 },
     );
     if render_cell.style.overline {
-        push_rect(
+        push_horizontal_cell_line(
             vertices,
-            Rect {
-                height: stroke,
-                ..cell
-            },
+            cell,
+            cell.y,
             foreground,
+            stroke,
             viewport_width,
             viewport_height,
         );
     }
     if render_cell.style.strikethrough {
-        push_rect(
+        push_horizontal_cell_line(
             vertices,
-            Rect {
-                y: cell.y + (cell.height * 0.56).round(),
-                height: stroke,
-                ..cell
-            },
+            cell,
+            cell.y + (cell.height * 0.56).round(),
             foreground,
+            stroke,
             viewport_width,
             viewport_height,
         );
     }
-
     let underline = rgb(
         render_cell.underline_color,
         if render_cell.style.faint { 0.55 } else { 1.0 },
     );
     let bottom = cell.y + cell.height - stroke;
     match render_cell.style.underline {
-        1 => push_rect(
+        1 => push_horizontal_cell_line(
             vertices,
-            Rect {
-                y: bottom,
-                height: stroke,
-                ..cell
-            },
+            cell,
+            bottom,
             underline,
+            stroke,
             viewport_width,
             viewport_height,
         ),
         2 => {
             for y in [bottom - 3.0 * stroke, bottom] {
-                push_rect(
+                push_horizontal_cell_line(
                     vertices,
-                    Rect {
-                        y,
-                        height: stroke,
-                        ..cell
-                    },
+                    cell,
+                    y,
                     underline,
+                    stroke,
                     viewport_width,
                     viewport_height,
                 );
@@ -2578,6 +2585,57 @@ fn push_cell_decorations(
         ),
         _ => {}
     }
+    if hyperlink_highlight && render_cell.style.underline == 0 {
+        push_hyperlink_underline(
+            vertices,
+            cell,
+            foreground,
+            stroke,
+            viewport_width,
+            viewport_height,
+        );
+    }
+}
+
+fn push_hyperlink_underline(
+    vertices: &mut Vec<Vertex>,
+    cell: Rect,
+    color: [f32; 4],
+    stroke: f32,
+    viewport_width: u32,
+    viewport_height: u32,
+) {
+    push_horizontal_cell_line(
+        vertices,
+        cell,
+        cell.y + cell.height - stroke,
+        color,
+        stroke,
+        viewport_width,
+        viewport_height,
+    );
+}
+
+fn push_horizontal_cell_line(
+    vertices: &mut Vec<Vertex>,
+    cell: Rect,
+    y: f32,
+    color: [f32; 4],
+    stroke: f32,
+    viewport_width: u32,
+    viewport_height: u32,
+) {
+    push_rect(
+        vertices,
+        Rect {
+            y,
+            height: stroke,
+            ..cell
+        },
+        color,
+        viewport_width,
+        viewport_height,
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -2927,7 +2985,7 @@ mod tests {
             width,
             semantic: mux_terminal::SemanticContent::Output,
             selected: false,
-            hyperlink: false,
+            hyperlink: None,
         }
     }
 }

@@ -45,6 +45,8 @@ typedef struct {
 typedef struct {
   uint32_t text_offset;
   uint32_t text_len;
+  uint32_t hyperlink_offset;
+  uint32_t hyperlink_len;
   mux_ghostty_rgb_t foreground;
   mux_ghostty_rgb_t background;
   mux_ghostty_rgb_t underline_color;
@@ -53,7 +55,6 @@ typedef struct {
   uint8_t width;
   uint8_t semantic;
   uint8_t selected;
-  uint8_t hyperlink;
 } mux_ghostty_render_cell_t;
 
 typedef struct {
@@ -1145,7 +1146,6 @@ int32_t mux_ghostty_renderer_frame(
       if (result != GHOSTTY_SUCCESS) goto error;
       out_cell->width = (uint8_t)width;
       out_cell->semantic = (uint8_t)semantic;
-      out_cell->hyperlink = hyperlink ? 1 : 0;
 
       bool selected = false;
       result = ghostty_render_state_row_cells_get(
@@ -1180,6 +1180,46 @@ int32_t mux_ghostty_renderer_frame(
         out_cell->text_offset = (uint32_t)frame.text_len;
         out_cell->text_len = (uint32_t)text.len;
         frame.text_len += text.len;
+      }
+
+      if (hyperlink) {
+        GhosttyPoint point = {
+            .tag = GHOSTTY_POINT_TAG_VIEWPORT,
+            .value = {.coordinate = {.x = x, .y = y}},
+        };
+        GhosttyGridRef ref = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+        result = ghostty_terminal_grid_ref(terminal, point, &ref);
+        if (result != GHOSTTY_SUCCESS) goto error;
+
+        size_t uri_len = 0;
+        result = ghostty_grid_ref_hyperlink_uri(&ref, NULL, 0, &uri_len);
+        if (result != GHOSTTY_SUCCESS && result != GHOSTTY_OUT_OF_SPACE) {
+          goto error;
+        }
+        if (uri_len > 0) {
+          const size_t required = frame.text_len + uri_len;
+          if (required > UINT32_MAX ||
+              !ensure_text_capacity(
+                  &renderer->text, &renderer->text_capacity, required)) {
+            result = GHOSTTY_OUT_OF_MEMORY;
+            goto error;
+          }
+          frame.text = renderer->text;
+          size_t written = 0;
+          result = ghostty_grid_ref_hyperlink_uri(
+              &ref,
+              frame.text + frame.text_len,
+              renderer->text_capacity - frame.text_len,
+              &written);
+          if (result != GHOSTTY_SUCCESS) goto error;
+          if (written > uri_len) {
+            result = GHOSTTY_INVALID_VALUE;
+            goto error;
+          }
+          out_cell->hyperlink_offset = (uint32_t)frame.text_len;
+          out_cell->hyperlink_len = (uint32_t)written;
+          frame.text_len += written;
+        }
       }
       x++;
     }
