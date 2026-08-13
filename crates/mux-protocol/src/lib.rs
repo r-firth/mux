@@ -18,8 +18,9 @@ use tokio::task::JoinHandle;
 // Bump this whenever a serialized IPC type changes incompatibly. The daemon
 // outlives the GUI, so an explicit epoch is what prevents a newly installed
 // client from interpreting an older daemon's postcard bytes as another type.
-/// Version 3 adds lossless ACP tool input/output fields to daemon snapshots.
-pub const PROTOCOL_VERSION: u16 = 3;
+/// Version 4 makes ACP sessions tab-owned and permits a pane-scoped working
+/// directory override.
+pub const PROTOCOL_VERSION: u16 = 4;
 pub const MAX_FRAME_LENGTH: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -93,6 +94,7 @@ pub enum Request {
     StartAgentForPane {
         spec: AgentSpec,
         pane_id: PaneId,
+        cwd_override: Option<PathBuf>,
     },
     SetAgentMode {
         session_id: AgentSessionId,
@@ -152,7 +154,7 @@ pub enum Response {
     SessionCreated(SessionSummary),
     Attached(SessionAttachment),
     AgentSessions(Vec<AgentSessionSnapshot>),
-    AgentStarted(AgentSessionSnapshot),
+    AgentStarted(Box<AgentSessionSnapshot>),
     Ack,
 }
 
@@ -352,6 +354,24 @@ mod tests {
 
         write_frame(&mut writer, &expected).await.expect("write");
         let actual: ServerMessage = read_frame(&mut reader).await.expect("read");
+
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn pane_scoped_agent_start_preserves_the_working_directory_override() {
+        let expected = ClientMessage::Request {
+            request_id: 9,
+            request: Request::StartAgentForPane {
+                spec: AgentSpec::codex(),
+                pane_id: PaneId::new(),
+                cwd_override: Some(PathBuf::from("/tmp/project")),
+            },
+        };
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+
+        write_frame(&mut writer, &expected).await.expect("write");
+        let actual: ClientMessage = read_frame(&mut reader).await.expect("read");
 
         assert_eq!(actual, expected);
     }

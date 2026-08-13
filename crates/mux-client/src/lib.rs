@@ -197,7 +197,7 @@ impl Client {
         cwd: PathBuf,
     ) -> Result<AgentSessionSnapshot, ClientError> {
         match self.request(Request::StartAgent { spec, cwd }).await? {
-            Response::AgentStarted(session) => Ok(session),
+            Response::AgentStarted(session) => Ok(*session),
             response => Err(ClientError::UnexpectedResponse(Box::new(response))),
         }
     }
@@ -206,12 +206,17 @@ impl Client {
         &mut self,
         spec: AgentSpec,
         pane_id: PaneId,
+        cwd_override: Option<PathBuf>,
     ) -> Result<AgentSessionSnapshot, ClientError> {
         match self
-            .request(Request::StartAgentForPane { spec, pane_id })
+            .request(Request::StartAgentForPane {
+                spec,
+                pane_id,
+                cwd_override,
+            })
             .await?
         {
-            Response::AgentStarted(session) => Ok(session),
+            Response::AgentStarted(session) => Ok(*session),
             response => Err(ClientError::UnexpectedResponse(Box::new(response))),
         }
     }

@@ -247,11 +247,9 @@ async fn run(
                         pane_id,
                         cwd_override,
                     } => {
-                        let result = if let Some(cwd) = cwd_override {
-                            client.start_agent(spec, cwd).await
-                        } else {
-                            client.start_agent_for_pane(spec, pane_id).await
-                        };
+                        let result = client
+                            .start_agent_for_pane(spec, pane_id, cwd_override)
+                            .await;
                         match result {
                             Ok(agent) => send_event(events, UserEvent::AgentStarted(agent))?,
                             Err(error) => report_backend_error(events, error),

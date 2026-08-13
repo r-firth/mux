@@ -54,8 +54,8 @@ use mux_terminal::{
 };
 use mux_terminal_ghostty::{GhosttyEngine, GhosttyFont, GhosttyTheme};
 use mux_workspace::{
-    Action, InputMode, Key as MuxKey, KeyChord, Keymap, Modifiers, PaneId, Session,
-    WorkspaceCommand,
+    Action, AgentSessionId, InputMode, Key as MuxKey, KeyChord, Keymap, Modifiers, PaneId, Session,
+    TabId, WorkspaceCommand,
 };
 use settings::AppSettings;
 use tracing::{error, info};
@@ -70,6 +70,8 @@ const TEXT: u32 = 0x00e8_ecf3;
 const MUTED_TEXT: u32 = 0x008c_96a8;
 const SIGNAL: u32 = 0x005e_b6e8;
 const EMBEDDED_TERMINAL_FONT: &str = "JetBrainsMono Nerd Font Mono";
+
+gpui::actions!(mux_agent, [CancelAgentTurn]);
 
 enum UserEvent {
     Attached(SessionAttachment),
@@ -111,12 +113,15 @@ struct MuxApp {
     sent_sizes: HashMap<PaneId, TerminalSize>,
     sessions: Vec<SessionSummary>,
     agents: Vec<AgentSessionSnapshot>,
-    selected_agent: usize,
+    /// A missing entry selects the first session for that tab. `None` as the
+    /// stored value deliberately selects the new-session composer.
+    selected_agents: HashMap<TabId, Option<AgentSessionId>>,
     agent_input: Entity<InputState>,
     _agent_input_subscription: gpui::Subscription,
     pending_agent_prompt: Option<AgentPrompt>,
     agent_scroll: ScrollHandle,
     expanded_agent_items: HashSet<String>,
+    agent_toggle_prefix: bool,
     agent_context: AgentContextMode,
     selected_pane: Option<PaneId>,
     selection_drag: Option<PaneId>,
@@ -213,12 +218,13 @@ impl MuxApp {
             sent_sizes: HashMap::new(),
             sessions: Vec::new(),
             agents: Vec::new(),
-            selected_agent: 0,
+            selected_agents: HashMap::new(),
             agent_input,
             _agent_input_subscription: agent_input_subscription,
             pending_agent_prompt: None,
             agent_scroll: ScrollHandle::new(),
             expanded_agent_items: HashSet::new(),
+            agent_toggle_prefix: false,
             agent_context: AgentContextMode::Pane,
             selected_pane: None,
             selection_drag: None,
@@ -243,14 +249,23 @@ impl MuxApp {
             UserEvent::Server(event) => self.apply_server_event(event),
             UserEvent::Agents(agents) => {
                 self.agents = agents;
-                self.selected_agent = self.selected_agent.min(self.agents.len().saturating_sub(1));
+                let valid = self
+                    .agents
+                    .iter()
+                    .filter_map(|agent| agent.tab_id.map(|tab_id| (tab_id, agent.id)))
+                    .collect::<HashSet<_>>();
+                self.selected_agents.retain(|tab_id, selection| {
+                    selection.is_none_or(|session_id| valid.contains(&(*tab_id, session_id)))
+                });
                 self.agent_scroll.scroll_to_bottom();
                 Ok(())
             }
             UserEvent::AgentStarted(agent) => {
                 let session_id = agent.id;
+                if let Some(tab_id) = agent.tab_id {
+                    self.selected_agents.insert(tab_id, Some(session_id));
+                }
                 self.agents.push(agent);
-                self.selected_agent = self.agents.len().saturating_sub(1);
                 if let Some(prompt) = self.pending_agent_prompt.take() {
                     self.backend
                         .send(CommandMessage::PromptAgent { session_id, prompt });
@@ -359,6 +374,35 @@ impl MuxApp {
             .as_ref()?
             .active_tab()
             .map(|tab| tab.focused_pane)
+    }
+
+    fn active_tab_id(&self) -> Option<TabId> {
+        self.session.as_ref().map(|session| session.active_tab)
+    }
+
+    fn agents_for_active_tab(&self) -> impl Iterator<Item = &AgentSessionSnapshot> {
+        let tab_id = self.active_tab_id();
+        self.agents
+            .iter()
+            .filter(move |agent| agent.tab_id == tab_id && tab_id.is_some())
+    }
+
+    fn active_agent(&self) -> Option<&AgentSessionSnapshot> {
+        let tab_id = self.active_tab_id()?;
+        match self.selected_agents.get(&tab_id) {
+            Some(Some(session_id)) => self
+                .agents
+                .iter()
+                .find(|agent| agent.tab_id == Some(tab_id) && agent.id == *session_id),
+            Some(None) => None,
+            None => self.agents_for_active_tab().next(),
+        }
+    }
+
+    fn select_active_tab_agent(&mut self, selection: Option<AgentSessionId>) {
+        if let Some(tab_id) = self.active_tab_id() {
+            self.selected_agents.insert(tab_id, selection);
+        }
     }
 
     fn send_workspace(&self, command: WorkspaceCommand) {
@@ -484,7 +528,7 @@ impl MuxApp {
             Action::PreviousTab => self.send_workspace(WorkspaceCommand::PreviousTab),
             Action::OpenSessionSwitcher => self.open_sessions(window, cx),
             Action::DetachSession => cx.quit(),
-            Action::OpenAgentSurface => self.open_agents(window, cx),
+            Action::OpenAgentSurface => self.toggle_agents(window, cx),
             Action::OpenSettings => self.open_settings(window, cx),
             Action::OpenCommandPalette => window.push_notification(
                 Notification::info("Command palette is being moved to GPUI"),
@@ -712,9 +756,21 @@ impl MuxApp {
         });
     }
 
+    fn toggle_agents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_sheet(cx) {
+            window.close_sheet(cx);
+            self.agent_toggle_prefix = false;
+            self.focus_handle.focus(window);
+            self.mode = InputMode::Normal;
+            return;
+        }
+        self.open_agents(window, cx);
+    }
+
     fn open_agents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.backend.send(CommandMessage::ListAgents);
         self.agent_scroll.scroll_to_bottom();
+        self.agent_toggle_prefix = false;
         let sheet_width = (f32::from(window.viewport_size().width) * 0.46).clamp(410.0, 560.0);
         // Give the nested timeline the space between gpui-component's title
         // and footer so its local scroll handle—not the sheet's private outer
@@ -729,9 +785,9 @@ impl MuxApp {
             };
             let (picker, agent, scroll, expanded_items, empty_state, title, footer) = {
                 let this = entity.read(cx);
-                let picker = (this.agents.len() > 1)
+                let picker = (this.agents_for_active_tab().count() > 1)
                     .then(|| agent_session_picker(&app, this).into_any_element());
-                let agent = this.agents.get(this.selected_agent).cloned();
+                let agent = this.active_agent().cloned();
                 let scroll = this.agent_scroll.clone();
                 let expanded_items = this.expanded_agent_items.clone();
                 let empty_state = agent
@@ -750,7 +806,19 @@ impl MuxApp {
                 )
             };
 
-            let mut content = v_flex().h_full().min_h_0().gap_2();
+            let escape_app = app.clone();
+            let cancel_app = app.clone();
+            let mut content = v_flex()
+                .key_context("MuxAgentSheet")
+                .capture_key_down(move |event, window, cx| {
+                    handle_agent_sheet_key_down(&escape_app, event, window, cx);
+                })
+                .on_action(move |_: &CancelAgentTurn, window, cx| {
+                    cancel_or_close_agent_sheet(&cancel_app, window, cx);
+                })
+                .h_full()
+                .min_h_0()
+                .gap_2();
             if let Some(picker) = picker {
                 content = content.child(picker);
             }
@@ -797,10 +865,10 @@ impl MuxApp {
             });
             return;
         }
-        let Some(agent) = self
-            .agents
-            .get(self.selected_agent)
+        let Some(session_id) = self
+            .active_agent()
             .filter(|agent| agent.status != AgentSessionStatus::Closed)
+            .map(|agent| agent.id)
         else {
             if self.pending_agent_prompt.is_some() {
                 window.push_notification(Notification::info("Agent is starting…"), cx);
@@ -826,7 +894,7 @@ impl MuxApp {
         };
         let context = self.agent_prompt_context().unwrap_or_default();
         self.backend.send(CommandMessage::PromptAgent {
-            session_id: agent.id,
+            session_id,
             prompt: AgentPrompt {
                 text: draft.to_owned(),
                 context,
@@ -871,12 +939,12 @@ impl MuxApp {
             "prev" | "previous" => self.select_relative_agent(-1),
             "use" => self.select_agent(parts.next(), window, cx),
             "end" | "close" => {
-                if let Some(agent) = self.agents.get(self.selected_agent) {
+                if let Some(agent) = self.active_agent() {
                     self.backend.send(CommandMessage::CloseAgent(agent.id));
                 }
             }
             "cancel" => {
-                if let Some(agent) = self.agents.get(self.selected_agent) {
+                if let Some(agent) = self.active_agent() {
                     self.backend.send(CommandMessage::CancelAgent(agent.id));
                 }
             }
@@ -924,7 +992,7 @@ impl MuxApp {
     }
 
     fn set_agent_detail_expansion(&mut self, expanded: bool, all: bool) {
-        let Some(agent) = self.agents.get(self.selected_agent) else {
+        let Some(agent) = self.active_agent() else {
             return;
         };
         let mut keys = agent
@@ -947,20 +1015,27 @@ impl MuxApp {
     }
 
     fn select_relative_agent(&mut self, delta: isize) {
-        if self.agents.is_empty() {
+        let agents = self
+            .agents_for_active_tab()
+            .map(|agent| agent.id)
+            .collect::<Vec<_>>();
+        if agents.is_empty() {
             return;
         }
-        self.selected_agent = if delta < 0 {
-            self.selected_agent
-                .checked_sub(1)
-                .unwrap_or(self.agents.len() - 1)
-        } else if delta > 0 && self.selected_agent + 1 == self.agents.len() {
+        let selected = self.active_agent().map(|agent| agent.id);
+        let index = selected
+            .and_then(|selected| agents.iter().position(|agent| *agent == selected))
+            .unwrap_or(0);
+        let next = if delta < 0 {
+            index.checked_sub(1).unwrap_or(agents.len() - 1)
+        } else if delta > 0 && index + 1 == agents.len() {
             0
         } else if delta > 0 {
-            self.selected_agent + 1
+            index + 1
         } else {
-            self.selected_agent
+            index
         };
+        self.select_active_tab_agent(Some(agents[next]));
         self.agent_scroll.scroll_to_bottom();
     }
 
@@ -972,8 +1047,7 @@ impl MuxApp {
     ) {
         let Some(requested) = requested else {
             let sessions = self
-                .agents
-                .iter()
+                .agents_for_active_tab()
                 .enumerate()
                 .map(|(index, agent)| format!("{}:{}", index + 1, agent.name))
                 .collect::<Vec<_>>()
@@ -981,13 +1055,14 @@ impl MuxApp {
             window.push_notification(Notification::info(format!("Sessions: {sessions}")), cx);
             return;
         };
+        let agents = self.agents_for_active_tab().collect::<Vec<_>>();
         let index = requested
             .parse::<usize>()
             .ok()
             .and_then(|index| index.checked_sub(1))
-            .filter(|index| *index < self.agents.len())
+            .filter(|index| *index < agents.len())
             .or_else(|| {
-                self.agents.iter().position(|agent| {
+                agents.iter().position(|agent| {
                     agent.name.eq_ignore_ascii_case(requested)
                         || agent
                             .agent_name
@@ -996,7 +1071,7 @@ impl MuxApp {
                 })
             });
         if let Some(index) = index {
-            self.selected_agent = index;
+            self.select_active_tab_agent(Some(agents[index].id));
             self.agent_scroll.scroll_to_bottom();
         } else {
             window.push_notification(Notification::warning("Unknown agent session"), cx);
@@ -1009,7 +1084,7 @@ impl MuxApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(agent) = self.agents.get(self.selected_agent) else {
+        let Some(agent) = self.active_agent() else {
             return;
         };
         let method = requested
@@ -1040,7 +1115,7 @@ impl MuxApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(agent) = self.agents.get(self.selected_agent) else {
+        let Some(agent) = self.active_agent() else {
             return;
         };
         let Some(permission) = agent.pending_permission() else {
@@ -1075,7 +1150,7 @@ impl MuxApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(agent) = self.agents.get(self.selected_agent) else {
+        let Some(agent) = self.active_agent() else {
             return;
         };
         let Some(option) = agent
@@ -1119,7 +1194,7 @@ impl MuxApp {
     }
 
     fn set_agent_mode(&self, requested: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(agent) = self.agents.get(self.selected_agent) else {
+        let Some(agent) = self.active_agent() else {
             return;
         };
         let Some(requested) = requested else {
@@ -1740,8 +1815,7 @@ impl Render for MuxApp {
             root = root.child(macos_window_controls());
         }
         let active_agents = self
-            .agents
-            .iter()
+            .agents_for_active_tab()
             .filter(|agent| agent.status != AgentSessionStatus::Closed)
             .count();
         root = root.child(header_actions(cx.weak_entity(), active_agents));
@@ -1789,7 +1863,7 @@ fn header_actions(app: gpui::WeakEntity<MuxApp>, active_agents: usize) -> impl I
                 .hover(|style| style.bg(rgb(CHROME_RAISED)).text_color(rgb(TEXT)))
                 .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
                     cx.stop_propagation();
-                    let _ = app.update(cx, |this, cx| this.open_agents(window, cx));
+                    let _ = app.update(cx, |this, cx| this.toggle_agents(window, cx));
                 })
                 .child(Icon::new(IconName::Bot).small())
                 .when(active_agents > 0, |button| {
@@ -1871,9 +1945,95 @@ fn window_control_dot(
         })
 }
 
+fn close_agent_sheet(app: &gpui::WeakEntity<MuxApp>, window: &mut Window, cx: &mut App) {
+    let _ = app.update(cx, |this, cx| {
+        this.agent_toggle_prefix = false;
+        this.focus_handle.focus(window);
+        this.mode = InputMode::Normal;
+        cx.notify();
+    });
+    window.close_sheet(cx);
+}
+
+fn handle_agent_sheet_key_down(
+    app: &gpui::WeakEntity<MuxApp>,
+    event: &KeyDownEvent,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let plain_a = event.keystroke.key.eq_ignore_ascii_case("a")
+        && !event.keystroke.modifiers.control
+        && !event.keystroke.modifiers.alt
+        && !event.keystroke.modifiers.shift
+        && !event.keystroke.modifiers.platform;
+    let control_p = event.keystroke.key.eq_ignore_ascii_case("p")
+        && event.keystroke.modifiers.control
+        && !event.keystroke.modifiers.alt
+        && !event.keystroke.modifiers.shift
+        && !event.keystroke.modifiers.platform;
+    if control_p {
+        let _ = app.update(cx, |this, _| {
+            this.agent_toggle_prefix = !this.agent_toggle_prefix;
+        });
+        cx.stop_propagation();
+        return;
+    }
+    let toggle = app
+        .update(cx, |this, _| {
+            std::mem::take(&mut this.agent_toggle_prefix) && plain_a
+        })
+        .unwrap_or(false);
+    if toggle {
+        close_agent_sheet(app, window, cx);
+        cx.stop_propagation();
+        return;
+    }
+    if event.keystroke.key != "escape"
+        || event.keystroke.modifiers.control
+        || event.keystroke.modifiers.alt
+        || event.keystroke.modifiers.shift
+        || event.keystroke.modifiers.platform
+    {
+        return;
+    }
+    cancel_or_close_agent_sheet(app, window, cx);
+}
+
+fn cancel_or_close_agent_sheet(app: &gpui::WeakEntity<MuxApp>, window: &mut Window, cx: &mut App) {
+    let close = app
+        .update(cx, |this, cx| {
+            this.agent_toggle_prefix = false;
+            let running = this
+                .active_agent()
+                .filter(|agent| {
+                    matches!(
+                        agent.status,
+                        AgentSessionStatus::Working | AgentSessionStatus::WaitingForPermission
+                    )
+                })
+                .map(|agent| agent.id);
+            if let Some(session_id) = running {
+                this.backend.send(CommandMessage::CancelAgent(session_id));
+                false
+            } else {
+                this.focus_handle.focus(window);
+                this.mode = InputMode::Normal;
+                cx.notify();
+                true
+            }
+        })
+        .unwrap_or(true);
+    if close {
+        window.close_sheet(cx);
+    }
+    cx.stop_propagation();
+}
+
 fn agent_session_picker(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl IntoElement {
     let mut picker = h_flex().gap_1().pb_1().flex_wrap();
-    for (index, agent) in this.agents.iter().enumerate() {
+    let selected = this.active_agent().map(|agent| agent.id);
+    for agent in this.agents_for_active_tab() {
+        let session_id = agent.id;
         let select_app = app.clone();
         picker = picker.child(
             Button::new(SharedString::from(format!("agent-session-{}", agent.id)))
@@ -1881,10 +2041,10 @@ fn agent_session_picker(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl I
                 .ghost()
                 .small()
                 .compact()
-                .selected(index == this.selected_agent)
+                .selected(selected == Some(session_id))
                 .on_click(move |_, window, cx| {
                     let _ = select_app.update(cx, |this, cx| {
-                        this.selected_agent = index;
+                        this.select_active_tab_agent(Some(session_id));
                         this.agent_scroll.scroll_to_bottom();
                         cx.notify();
                     });
@@ -1902,7 +2062,7 @@ fn agent_session_picker(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl I
             .tooltip("New agent session · /new")
             .on_click(move |_, window, cx| {
                 let _ = new_app.update(cx, |this, cx| {
-                    this.selected_agent = this.agents.len();
+                    this.select_active_tab_agent(None);
                     cx.notify();
                 });
                 window.refresh();
@@ -1911,18 +2071,17 @@ fn agent_session_picker(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl I
 }
 
 fn agent_sheet_title(this: &MuxApp) -> impl IntoElement {
-    let (name, status) =
-        this.agents
-            .get(this.selected_agent)
-            .map_or(("Agent".to_owned(), None), |agent| {
-                (
-                    agent
-                        .agent_name
-                        .clone()
-                        .unwrap_or_else(|| agent.name.clone()),
-                    Some(agent.status),
-                )
-            });
+    let (name, status) = this
+        .active_agent()
+        .map_or(("Agent".to_owned(), None), |agent| {
+            (
+                agent
+                    .agent_name
+                    .clone()
+                    .unwrap_or_else(|| agent.name.clone()),
+                Some(agent.status),
+            )
+        });
     h_flex()
         .gap_2()
         .child(
@@ -1980,26 +2139,39 @@ fn agent_empty_state(this: &MuxApp) -> impl IntoElement {
 
 fn agent_composer(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl IntoElement {
     let prompt_app = app.clone();
-    v_flex().w_full().flex_none().gap_0().child(
-        h_flex()
-            .w_full()
-            .items_end()
-            .gap_2()
-            .child(Input::new(&this.agent_input).min_w_0().flex_1())
-            .child(
-                Button::new("agent-send")
-                    .icon(IconName::ArrowUp)
-                    .primary()
-                    .small()
-                    .tooltip("Send · Return")
-                    .on_click(move |_, window, cx| {
-                        let _ = prompt_app.update(cx, |this, cx| {
-                            this.submit_agent_prompt(window, cx);
-                        });
-                        window.refresh();
-                    }),
-            ),
-    )
+    let keyboard_app = app.clone();
+    let cancel_app = app.clone();
+    v_flex()
+        .key_context("MuxAgentSheet")
+        .capture_key_down(move |event, window, cx| {
+            handle_agent_sheet_key_down(&keyboard_app, event, window, cx);
+        })
+        .on_action(move |_: &CancelAgentTurn, window, cx| {
+            cancel_or_close_agent_sheet(&cancel_app, window, cx);
+        })
+        .w_full()
+        .flex_none()
+        .gap_0()
+        .child(
+            h_flex()
+                .w_full()
+                .items_end()
+                .gap_2()
+                .child(Input::new(&this.agent_input).min_w_0().flex_1())
+                .child(
+                    Button::new("agent-send")
+                        .icon(IconName::ArrowUp)
+                        .primary()
+                        .small()
+                        .tooltip("Send · Return")
+                        .on_click(move |_, window, cx| {
+                            let _ = prompt_app.update(cx, |this, cx| {
+                                this.submit_agent_prompt(window, cx);
+                            });
+                            window.refresh();
+                        }),
+                ),
+        )
 }
 
 fn agent_scroll_is_near_bottom(scroll: &ScrollHandle) -> bool {
@@ -2951,6 +3123,11 @@ fn main() -> Result<()> {
                 "shift-enter",
                 Enter { secondary: true },
                 Some("Input"),
+            )]);
+            cx.bind_keys([KeyBinding::new(
+                "escape",
+                CancelAgentTurn,
+                Some("MuxAgentSheet"),
             )]);
             configure_theme(cx);
             if let Err(error) = cx.text_system().add_fonts(vec![

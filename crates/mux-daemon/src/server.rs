@@ -224,9 +224,10 @@ where
             .workspace_command(session_id, command)
             .map(Response::Attached),
         Request::ListAgentSessions => Ok(Response::AgentSessions(state.list_agents())),
-        Request::StartAgent { spec, cwd } => {
-            state.start_agent(&spec, cwd).map(Response::AgentStarted)
-        }
+        Request::StartAgent { spec, cwd } => state
+            .start_agent(&spec, cwd)
+            .map(Box::new)
+            .map(Response::AgentStarted),
         Request::PromptAgent { session_id, prompt } => state
             .prompt_agent(session_id, prompt)
             .map(|()| Response::Ack),
@@ -241,8 +242,13 @@ where
             state.cancel_agent(session_id).map(|()| Response::Ack)
         }
         Request::CloseAgent { session_id } => state.close_agent(session_id).map(|()| Response::Ack),
-        Request::StartAgentForPane { spec, pane_id } => state
-            .start_agent_for_pane(&spec, pane_id)
+        Request::StartAgentForPane {
+            spec,
+            pane_id,
+            cwd_override,
+        } => state
+            .start_agent_for_pane(&spec, pane_id, cwd_override)
+            .map(Box::new)
             .map(Response::AgentStarted),
         Request::SetAgentMode {
             session_id,
