@@ -54,16 +54,31 @@ fn build_vendored() -> PathBuf {
     let native_dir = manifest_dir.join("../../native/ghostty");
     let prefix = PathBuf::from(env::var_os("OUT_DIR").expect("out dir")).join("ghostty");
     let zig = env::var_os("MUX_ZIG").unwrap_or_else(|| "zig".into());
+    let cargo_target = env::var("TARGET").expect("Cargo target triple");
 
     require_zig_version(Path::new(&zig));
-    let status = Command::new(&zig)
+    let mut command = Command::new(&zig);
+    command
         .current_dir(&native_dir)
-        .args(["build", "install", "-Doptimize=ReleaseFast", "--prefix"])
+        .args(["build", "install", "-Doptimize=ReleaseFast"]);
+    if let Some(target) = zig_macos_target(&cargo_target) {
+        command.arg(format!("-Dtarget={target}"));
+    }
+    let status = command
+        .arg("--prefix")
         .arg(&prefix)
         .status()
         .unwrap_or_else(|error| panic!("failed to launch Zig: {error}"));
     assert!(status.success(), "vendored libghostty-vt build failed");
     prefix
+}
+
+fn zig_macos_target(cargo_target: &str) -> Option<&'static str> {
+    match cargo_target {
+        "aarch64-apple-darwin" => Some("aarch64-macos"),
+        "x86_64-apple-darwin" => Some("x86_64-macos"),
+        _ => None,
+    }
 }
 
 fn require_zig_version(zig: &Path) {

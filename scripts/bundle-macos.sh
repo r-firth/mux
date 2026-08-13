@@ -29,13 +29,18 @@ else
     cargo build -p mux --features product $cargo_profile_args
 fi
 
+target_profile_dir="$project_dir/target/$profile"
+if [ -n "${CARGO_BUILD_TARGET:-}" ]; then
+  target_profile_dir="$project_dir/target/$CARGO_BUILD_TARGET/$profile"
+fi
+
 app_dir=${MUX_APP_PATH:-$project_dir/target/Mux.app}
 contents_dir="$app_dir/Contents"
 macos_dir="$contents_dir/MacOS"
 frameworks_dir="$contents_dir/Frameworks"
 mkdir -p "$macos_dir" "$frameworks_dir"
 cp "$project_dir/packaging/macos/Info.plist" "$contents_dir/Info.plist"
-cp "$project_dir/target/$profile/mux" "$macos_dir/mux"
+cp "$target_profile_dir/mux" "$macos_dir/mux"
 
 package_id=$(cargo pkgid -p mux)
 version=${package_id##*#}
@@ -51,7 +56,7 @@ version=${version##*@}
 /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $bundle_name" \
   "$contents_dir/Info.plist"
 
-ghostty_library=$(find "$project_dir/target/$profile/build" \
+ghostty_library=$(find "$target_profile_dir/build" \
   -path '*/out/ghostty/lib/libghostty-vt.dylib' -type f -print | head -n 1)
 if [ -z "$ghostty_library" ]; then
   echo "vendored libghostty-vt was not produced" >&2
