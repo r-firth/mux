@@ -33,6 +33,15 @@ pub enum CommandMessage {
     },
     ListSessions,
     AttachSession(SessionId),
+    CreateSessionForPane {
+        name: String,
+        pane_id: PaneId,
+    },
+    RenameSession {
+        session_id: SessionId,
+        name: String,
+    },
+    KillSession(SessionId),
     ListAgents,
     StartAgent {
         spec: AgentSpec,
@@ -175,6 +184,50 @@ async fn run(
                                     .send_event(UserEvent::Attached(attachment))
                                     .map_err(|_| anyhow!("GUI event loop stopped"))?;
                             }
+                            Err(error) => report_backend_error(proxy, error),
+                        }
+                    }
+                    CommandMessage::CreateSessionForPane { name, pane_id } => {
+                        match client.create_session_for_pane(name, pane_id).await {
+                            Ok(session) => match client.attach(SessionSelector::Id(session.id)).await {
+                                Ok(attachment) => {
+                                    current_session = attachment.session.clone();
+                                    focused_pane = current_session
+                                        .active_tab()
+                                        .map(|tab| tab.focused_pane);
+                                    proxy
+                                        .send_event(UserEvent::Attached(attachment))
+                                        .map_err(|_| anyhow!("GUI event loop stopped"))?;
+                                }
+                                Err(error) => report_backend_error(proxy, error),
+                            },
+                            Err(error) => report_backend_error(proxy, error),
+                        }
+                    }
+                    CommandMessage::RenameSession { session_id, name } => {
+                        if let Err(error) = client.rename_session(session_id, name).await {
+                            report_backend_error(proxy, error);
+                        }
+                    }
+                    CommandMessage::KillSession(session_id) => {
+                        match client.kill_session(session_id).await {
+                            Ok(()) if current_session.id == session_id => {
+                                let sessions = client.list_sessions().await?;
+                                let next = if let Some(session) = sessions.first() {
+                                    session.clone()
+                                } else {
+                                    create_default_session(&mut client).await?
+                                };
+                                let attachment = client.attach(SessionSelector::Id(next.id)).await?;
+                                current_session = attachment.session.clone();
+                                focused_pane = current_session
+                                    .active_tab()
+                                    .map(|tab| tab.focused_pane);
+                                proxy
+                                    .send_event(UserEvent::Attached(attachment))
+                                    .map_err(|_| anyhow!("GUI event loop stopped"))?;
+                            }
+                            Ok(()) => {}
                             Err(error) => report_backend_error(proxy, error),
                         }
                     }

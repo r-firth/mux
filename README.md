@@ -29,6 +29,8 @@ sessions through the same stable Agent Client Protocol used by Zed.
 - Terminal and ACP integrations have explicit internal boundaries.
 - New panes and tabs start in the focused shell's live working directory; a
   brand-new workspace starts in the user's home directory.
+- `Shift+Command+S` opens a lightweight session surface for creating,
+  attaching, renaming, and explicitly killing daemon-owned sessions.
 - A native, animated agent surface launches Codex, Claude Agent, or Gemini as
   external ACP processes without turning the terminal into an IDE.
 - Agent sessions survive closing the GUI, stream conversation/tool/plan state,

@@ -99,6 +99,20 @@ pub enum Request {
         config_id: String,
         value: AgentConfigValueSelection,
     },
+    // Keep new protocol variants appended so live development daemons reject
+    // unsupported requests cleanly instead of decoding older discriminants as
+    // a different operation.
+    CreateSessionForPane {
+        name: String,
+        pane_id: PaneId,
+    },
+    RenameSession {
+        session_id: SessionId,
+        name: String,
+    },
+    KillSession {
+        session_id: SessionId,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

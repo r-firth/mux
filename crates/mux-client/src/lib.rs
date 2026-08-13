@@ -86,6 +86,39 @@ impl Client {
         }
     }
 
+    pub async fn create_session_for_pane(
+        &mut self,
+        name: String,
+        pane_id: PaneId,
+    ) -> Result<SessionSummary, ClientError> {
+        match self
+            .request(Request::CreateSessionForPane { name, pane_id })
+            .await?
+        {
+            Response::SessionCreated(session) => Ok(session),
+            response => Err(ClientError::UnexpectedResponse(Box::new(response))),
+        }
+    }
+
+    pub async fn rename_session(
+        &mut self,
+        session_id: SessionId,
+        name: String,
+    ) -> Result<(), ClientError> {
+        expect_acknowledgement(
+            self.request(Request::RenameSession { session_id, name })
+                .await?,
+            &Response::Ack,
+        )
+    }
+
+    pub async fn kill_session(&mut self, session_id: SessionId) -> Result<(), ClientError> {
+        expect_acknowledgement(
+            self.request(Request::KillSession { session_id }).await?,
+            &Response::Ack,
+        )
+    }
+
     pub async fn attach(
         &mut self,
         session: SessionSelector,

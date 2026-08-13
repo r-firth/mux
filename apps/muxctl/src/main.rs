@@ -51,6 +51,10 @@ enum Command {
         #[arg(long)]
         pane: Option<PaneId>,
     },
+    /// Rename a live session.
+    Rename { session: SessionId, name: String },
+    /// Kill a live session and all of its PTYs.
+    Kill { session: SessionId },
     /// List daemon-owned ACP agent sessions.
     AgentList,
     /// Start a persistent Codex ACP session.
@@ -146,6 +150,14 @@ async fn main() -> Result<()> {
         }
         Command::Attach { session, pane } => {
             attach(&mut client, parse_session_selector(&session), pane).await?;
+        }
+        Command::Rename { session, name } => {
+            client.rename_session(session, name.clone()).await?;
+            println!("session renamed to {name}");
+        }
+        Command::Kill { session } => {
+            client.kill_session(session).await?;
+            println!("session killed");
         }
         Command::AgentList => {
             println!(

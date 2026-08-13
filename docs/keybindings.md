@@ -15,6 +15,7 @@ the GUI and daemon do not hardcode key behavior into workspace mutations.
 | `Option+j` / `Option+Down` | Focus pane below |
 | `Option+k` / `Option+Up` | Focus pane above |
 | `Shift+Command+A` | Toggle the native ACP agent surface |
+| `Shift+Command+S` | Open the native session switcher |
 
 `Alt` is the same modifier as `Option` on macOS. Shared bindings remain active
 inside the supported modes, matching Zellij. Enter or Escape returns from a
@@ -40,11 +41,15 @@ mode to normal terminal input. All other Normal-mode keys, including
 | `l` / `j` / Right / Down | Next tab |
 | `1` through `9` | Select a numbered tab and return to Normal |
 | `n` | Create a tab and return to Normal |
+| `r` | Rename the active tab |
 | `x` | Close the active tab and return to Normal |
 
-Resize and session actions exist behind the action boundary but intentionally
-have no Normal-mode prefix yet. This keeps the foreground program untouched
-except for `Ctrl+p`, `Ctrl+t`, and the explicit Option navigation bindings.
+The session switcher attaches with Enter or a number key. `n` creates and
+attaches a session in the focused pane's live working directory, `r` renames,
+and `x` asks for a second press before killing the selected session. Resize and
+Zellij's `Ctrl+o` session prefix intentionally have no Normal-mode binding yet.
+This keeps foreground Control-key input untouched except for `Ctrl+p` and
+`Ctrl+t`.
 
 The agent surface is an application-level overlay rather than a terminal mode.
 While open, Escape or `Shift+Command+A` closes it, `Ctrl+c` cancels the active

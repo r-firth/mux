@@ -69,6 +69,7 @@ const AGENT_PERMISSION: [f32; 4] = [0.075, 0.053, 0.022, 1.0];
 pub struct SessionSwitcherView<'a> {
     pub entries: &'a [SessionSummary],
     pub selected: usize,
+    pub pending_kill: Option<mux_workspace::SessionId>,
 }
 
 #[derive(Clone, Copy)]
@@ -1377,7 +1378,7 @@ impl Renderer {
         let row_height = 36.0 * scale;
         let panel_width = (460.0 * scale).min(window.width - 40.0 * scale);
         let visible_rows = switcher.entries.len().clamp(1, 9) as f32;
-        let panel_height = 58.0 * scale + row_height * visible_rows;
+        let panel_height = 82.0 * scale + row_height * visible_rows;
         let panel = Rect {
             x: ((window.width - panel_width) / 2.0).round(),
             y: ((window.height - panel_height) / 2.0).round(),
@@ -1405,6 +1406,7 @@ impl Renderer {
             Family::SansSerif,
             Weight::SEMIBOLD,
         ));
+        self.add_session_switcher_help(panel, switcher.pending_kill.is_some());
         if switcher.entries.is_empty() {
             self.overlay_text.push(make_text(
                 &mut self.font_system,
@@ -1438,11 +1440,49 @@ impl Renderer {
                     self.config.height,
                 );
             }
-            self.add_session_switcher_row(index, entry, row);
+            self.add_session_switcher_row(
+                index,
+                entry,
+                row,
+                switcher.pending_kill == Some(entry.id),
+            );
         }
     }
 
-    fn add_session_switcher_row(&mut self, index: usize, entry: &SessionSummary, row: Rect) {
+    fn add_session_switcher_help(&mut self, panel: Rect, pending_kill: bool) {
+        let scale = self.scale_factor;
+        let help = if pending_kill {
+            "Press x again to kill this session · Esc cancel"
+        } else {
+            "↑↓ choose · Enter attach · n new · r rename · x kill"
+        };
+        self.overlay_text.push(make_text(
+            &mut self.font_system,
+            help,
+            Rect {
+                x: panel.x + 16.0 * scale,
+                y: panel.y + panel.height - 26.0 * scale,
+                width: panel.width - 32.0 * scale,
+                height: 18.0 * scale,
+            },
+            10.5 * scale,
+            if pending_kill {
+                Color::rgb(235, 164, 116)
+            } else {
+                Color::rgb(139, 151, 171)
+            },
+            Family::SansSerif,
+            Weight::NORMAL,
+        ));
+    }
+
+    fn add_session_switcher_row(
+        &mut self,
+        index: usize,
+        entry: &SessionSummary,
+        row: Rect,
+        pending_kill: bool,
+    ) {
         let scale = self.scale_factor;
         let label = format!("{}  {}", index + 1, entry.name);
         self.overlay_text.push(make_text(
@@ -1455,11 +1495,19 @@ impl Renderer {
                 height: row.height - 8.0 * scale,
             },
             13.0 * scale,
-            Color::rgb(224, 229, 239),
+            if pending_kill {
+                Color::rgb(246, 184, 137)
+            } else {
+                Color::rgb(224, 229, 239)
+            },
             Family::SansSerif,
             Weight::MEDIUM,
         ));
-        let pane_count = format!("{} panes", entry.pane_count);
+        let pane_count = if entry.pane_count == 1 {
+            "1 pane".to_owned()
+        } else {
+            format!("{} panes", entry.pane_count)
+        };
         self.overlay_text.push(make_text(
             &mut self.font_system,
             &pane_count,
