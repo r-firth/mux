@@ -20,7 +20,7 @@ use agent_client_protocol::schema::v1::{
     SessionConfigOptionCategory, SessionConfigOptionsCapabilities, SessionConfigSelectOptions,
     SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, ToolCall,
-    ToolCallContent, ToolCallStatus,
+    ToolCallContent, ToolCallStatus, ToolCallUpdate,
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, ConnectionTo};
 use mux_workspace::AgentSessionId;
@@ -250,6 +250,53 @@ pub struct AgentTool {
     pub kind: AgentToolKind,
     pub status: ToolStatus,
     pub detail: Option<String>,
+    /// Structured parameters supplied by the ACP agent. Kept losslessly so
+    /// clients can present useful expandable tool details instead of trying
+    /// to reverse-engineer a human-readable title.
+    #[serde(default, with = "optional_json_value")]
+    pub raw_input: Option<serde_json::Value>,
+    /// Structured result supplied by the ACP agent.
+    #[serde(default, with = "optional_json_value")]
+    pub raw_output: Option<serde_json::Value>,
+}
+
+/// `serde_json::Value` relies on `deserialize_any`, which compact non-self-
+/// describing formats such as Postcard deliberately do not implement. ACP
+/// tool values cross the daemon boundary as canonical JSON text, then regain
+/// their structured representation here. This keeps the product model
+/// lossless without coupling it to the IPC codec.
+mod optional_json_value {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+
+    // Serde's `serialize_with` ABI passes a reference to the field, so this
+    // signature cannot use Clippy's otherwise-preferred `Option<&T>` form.
+    #[allow(clippy::ref_option)]
+    pub fn serialize<S>(value: &Option<serde_json::Value>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            return value.serialize(serializer);
+        }
+        let value = value
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(serde::ser::Error::custom)?;
+        value.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            return Option::<serde_json::Value>::deserialize(deserializer);
+        }
+        Option::<String>::deserialize(deserializer)?
+            .map(|value| serde_json::from_str(&value).map_err(D::Error::custom))
+            .transpose()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1323,42 +1370,7 @@ fn emit_session_update(sink: &EventSink, update: SessionUpdate) {
             session_id: sink.session_id,
             tool: normalize_tool(tool),
         }),
-        SessionUpdate::ToolCallUpdate(update) => {
-            let current = sink
-                .snapshot
-                .read()
-                .timeline
-                .iter()
-                .find_map(|item| match item {
-                    AgentTimelineItem::Tool(tool) if tool.id == update.tool_call_id.to_string() => {
-                        Some(tool.clone())
-                    }
-                    _ => None,
-                });
-            let mut tool = current.unwrap_or_else(|| AgentTool {
-                id: update.tool_call_id.to_string(),
-                title: "Agent action".to_owned(),
-                kind: AgentToolKind::Other,
-                status: ToolStatus::Pending,
-                detail: None,
-            });
-            if let Some(title) = update.fields.title {
-                tool.title = title;
-            }
-            if let Some(kind) = update.fields.kind {
-                tool.kind = normalize_tool_kind(kind);
-            }
-            if let Some(status) = update.fields.status {
-                tool.status = normalize_tool_status(status);
-            }
-            if let Some(content) = update.fields.content {
-                tool.detail = normalize_tool_content(&content);
-            }
-            sink.emit(AgentEvent::ToolActivity {
-                session_id: sink.session_id,
-                tool,
-            });
-        }
+        SessionUpdate::ToolCallUpdate(update) => emit_tool_update(sink, update),
         SessionUpdate::Plan(plan) => sink.emit(AgentEvent::PlanUpdated {
             session_id: sink.session_id,
             entries: plan
@@ -1404,6 +1416,51 @@ fn emit_session_update(sink: &EventSink, update: SessionUpdate) {
     }
 }
 
+fn emit_tool_update(sink: &EventSink, update: ToolCallUpdate) {
+    let current = sink
+        .snapshot
+        .read()
+        .timeline
+        .iter()
+        .find_map(|item| match item {
+            AgentTimelineItem::Tool(tool) if tool.id == update.tool_call_id.to_string() => {
+                Some(tool.clone())
+            }
+            _ => None,
+        });
+    let mut tool = current.unwrap_or_else(|| AgentTool {
+        id: update.tool_call_id.to_string(),
+        title: "Agent action".to_owned(),
+        kind: AgentToolKind::Other,
+        status: ToolStatus::Pending,
+        detail: None,
+        raw_input: None,
+        raw_output: None,
+    });
+    if let Some(title) = update.fields.title {
+        tool.title = title;
+    }
+    if let Some(kind) = update.fields.kind {
+        tool.kind = normalize_tool_kind(kind);
+    }
+    if let Some(status) = update.fields.status {
+        tool.status = normalize_tool_status(status);
+    }
+    if let Some(content) = update.fields.content {
+        tool.detail = normalize_tool_content(&content);
+    }
+    if let Some(raw_input) = update.fields.raw_input {
+        tool.raw_input = Some(raw_input);
+    }
+    if let Some(raw_output) = update.fields.raw_output {
+        tool.raw_output = Some(raw_output);
+    }
+    sink.emit(AgentEvent::ToolActivity {
+        session_id: sink.session_id,
+        tool,
+    });
+}
+
 fn emit_content_chunk(sink: &EventSink, role: AgentMessageRole, chunk: ContentChunk) {
     if let ContentBlock::Text(text) = chunk.content {
         sink.emit(AgentEvent::ContentDelta {
@@ -1422,6 +1479,8 @@ fn normalize_tool(tool: ToolCall) -> AgentTool {
         kind: normalize_tool_kind(tool.kind),
         status: normalize_tool_status(tool.status),
         detail: normalize_tool_content(&tool.content),
+        raw_input: tool.raw_input,
+        raw_output: tool.raw_output,
     }
 }
 
@@ -1887,6 +1946,29 @@ mod tests {
                 text: "hello world".to_owned(),
             }]
         );
+    }
+
+    #[test]
+    fn tool_input_and_output_are_preserved_for_native_clients() {
+        let tool = ToolCall::new("tool-1", "Run tests")
+            .kind(agent_client_protocol::schema::v1::ToolKind::Execute)
+            .status(ToolCallStatus::Completed)
+            .raw_input(serde_json::json!({"command": "cargo test"}))
+            .raw_output(serde_json::json!({"exit_code": 0, "output": "ok"}));
+
+        let normalized = normalize_tool(tool);
+
+        assert_eq!(
+            normalized.raw_input,
+            Some(serde_json::json!({"command": "cargo test"}))
+        );
+        assert_eq!(
+            normalized.raw_output,
+            Some(serde_json::json!({"exit_code": 0, "output": "ok"}))
+        );
+        let json = serde_json::to_value(&normalized).expect("serialize tool as JSON");
+        assert_eq!(json["raw_input"]["command"], "cargo test");
+        assert_eq!(json["raw_output"]["exit_code"], 0);
     }
 
     #[test]

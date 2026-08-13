@@ -264,12 +264,16 @@ async fn attach(
     loop {
         enum Next {
             Input(std::io::Result<usize>),
-            Event(Result<ServerEvent, mux_client::ClientError>),
+            Event(Box<ServerEvent>),
+            EventError(mux_client::ClientError),
         }
 
         let next = tokio::select! {
             result = stdin.read(&mut input) => Next::Input(result),
-            result = client.next_event() => Next::Event(result),
+            result = client.next_event() => match result {
+                Ok(event) => Next::Event(Box::new(event)),
+                Err(error) => Next::EventError(error),
+            },
         };
 
         match next {
@@ -280,32 +284,34 @@ async fn attach(
                     .await?;
             }
             Next::Input(Err(error)) => return Err(error.into()),
-            Next::Event(Ok(ServerEvent::PaneOutput {
-                pane_id: event_pane,
-                bytes,
-                ..
-            })) if event_pane == pane_id => {
-                let stdout = std::io::stdout();
-                let mut output = stdout.lock();
-                output.write_all(&bytes)?;
-                output.flush()?;
-            }
-            Next::Event(Ok(ServerEvent::PaneExited {
-                pane_id: event_pane,
-                status,
-                ..
-            })) if event_pane == pane_id => {
-                eprintln!(
-                    "\n[pane exited: code={:?}, success={}]",
-                    status.code, status.success
-                );
-                return Ok(());
-            }
-            Next::Event(Ok(ServerEvent::ResyncRequired { .. })) => {
-                bail!("client fell behind the daemon stream; reattach to resynchronize");
-            }
-            Next::Event(Ok(_)) => {}
-            Next::Event(Err(error)) => return Err(error.into()),
+            Next::Event(event) => match *event {
+                ServerEvent::PaneOutput {
+                    pane_id: event_pane,
+                    bytes,
+                    ..
+                } if event_pane == pane_id => {
+                    let stdout = std::io::stdout();
+                    let mut output = stdout.lock();
+                    output.write_all(&bytes)?;
+                    output.flush()?;
+                }
+                ServerEvent::PaneExited {
+                    pane_id: event_pane,
+                    status,
+                    ..
+                } if event_pane == pane_id => {
+                    eprintln!(
+                        "\n[pane exited: code={:?}, success={}]",
+                        status.code, status.success
+                    );
+                    return Ok(());
+                }
+                ServerEvent::ResyncRequired { .. } => {
+                    bail!("client fell behind the daemon stream; reattach to resynchronize");
+                }
+                _ => {}
+            },
+            Next::EventError(error) => return Err(error.into()),
         }
     }
 }

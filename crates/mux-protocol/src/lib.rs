@@ -18,7 +18,8 @@ use tokio::task::JoinHandle;
 // Bump this whenever a serialized IPC type changes incompatibly. The daemon
 // outlives the GUI, so an explicit epoch is what prevents a newly installed
 // client from interpreting an older daemon's postcard bytes as another type.
-pub const PROTOCOL_VERSION: u16 = 2;
+/// Version 3 adds lossless ACP tool input/output fields to daemon snapshots.
+pub const PROTOCOL_VERSION: u16 = 3;
 pub const MAX_FRAME_LENGTH: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -315,6 +316,7 @@ pub enum CodecError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mux_acp::{AgentTool, AgentToolKind, ToolStatus};
 
     #[tokio::test]
     async fn framed_messages_round_trip_binary_terminal_bytes() {
@@ -329,6 +331,28 @@ mod tests {
 
         write_frame(&mut writer, &expected).await.expect("write");
         let actual: ClientMessage = read_frame(&mut reader).await.expect("read");
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn framed_agent_tools_round_trip_structured_input_and_output() {
+        let expected = ServerMessage::Event(ServerEvent::Agent(AgentEvent::ToolActivity {
+            session_id: AgentSessionId::new(),
+            tool: AgentTool {
+                id: "tool-1".to_owned(),
+                title: "Run tests".to_owned(),
+                kind: AgentToolKind::Execute,
+                status: ToolStatus::Completed,
+                detail: None,
+                raw_input: Some(serde_json::json!({"command": "cargo test"})),
+                raw_output: Some(serde_json::json!({"exit_code": 0, "output": "ok"})),
+            },
+        }));
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+
+        write_frame(&mut writer, &expected).await.expect("write");
+        let actual: ServerMessage = read_frame(&mut reader).await.expect("read");
+
         assert_eq!(actual, expected);
     }
 
