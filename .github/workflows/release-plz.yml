@@ -55,7 +55,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Create or update release PR
-        uses: googleapis/release-please-action@v4
+        uses: googleapis/release-please-action@v5
         with:
           skip-github-release: true
           token: ${{ secrets.GITHUB_TOKEN }}
