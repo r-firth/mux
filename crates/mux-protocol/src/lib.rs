@@ -21,6 +21,9 @@ use tokio::task::JoinHandle;
 /// Version 4 makes ACP sessions tab-owned and permits a pane-scoped working
 /// directory override.
 pub const PROTOCOL_VERSION: u16 = 4;
+/// Request id zero is reserved for latency-sensitive messages whose successful
+/// completion does not require a response.
+pub const UNACKNOWLEDGED_REQUEST_ID: u64 = 0;
 pub const MAX_FRAME_LENGTH: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -324,7 +327,7 @@ mod tests {
     async fn framed_messages_round_trip_binary_terminal_bytes() {
         let (mut writer, mut reader) = tokio::io::duplex(1024);
         let expected = ClientMessage::Request {
-            request_id: 7,
+            request_id: UNACKNOWLEDGED_REQUEST_ID,
             request: Request::WriteInput {
                 pane_id: PaneId::new(),
                 bytes: vec![0, 1, 2, 255],

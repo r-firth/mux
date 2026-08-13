@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use gpui::{
-    App, Bounds, Font, Hsla, IntoElement, Pixels, ShapedLine, StrikethroughStyle, Styled, TextRun,
-    TextSystem, UnderlineStyle, Window, canvas, fill, font, point, px, size,
+    App, Bounds, Font, Hsla, IntoElement, Pixels, ShapedLine, SharedString, StrikethroughStyle,
+    Styled, TextRun, TextSystem, UnderlineStyle, Window, canvas, fill, font, point, px, size,
 };
 use mux_terminal::{CellStyle, CellWidth, CursorStyle, RenderCell, RenderFrame, Rgb};
 
@@ -77,10 +77,122 @@ fn balanced_axis_padding(surface: f32, grid: f32, cell: f32, fallback: f32) -> (
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RunStyle {
     foreground: Rgb,
     style: CellStyle,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ShapedRunKey {
+    text: SharedString,
+    foreground: u32,
+    rendition: u8,
+    underline: u8,
+}
+
+struct CachedShapedRun {
+    line: ShapedLine,
+    last_used: u64,
+}
+
+/// Per-pane text shaping cache. Terminal scrolls normally move existing rows
+/// rather than changing their contents, so keeping the current and previous
+/// viewport's runs avoids reshaping almost every glyph on every wheel frame.
+/// Older runs are evicted to keep unique terminal output from growing this
+/// cache with the size of scrollback.
+#[derive(Default)]
+pub struct TerminalRenderCache {
+    font_key: Option<(String, u32)>,
+    generation: u64,
+    shaped_runs: HashMap<ShapedRunKey, CachedShapedRun>,
+}
+
+impl TerminalRenderCache {
+    fn begin_frame(&mut self, font_family: &str, font_size: f32) {
+        let font_size = font_size.to_bits();
+        if !self
+            .font_key
+            .as_ref()
+            .is_some_and(|(family, size)| family == font_family && *size == font_size)
+        {
+            self.shaped_runs.clear();
+            self.font_key = Some((font_family.to_owned(), font_size));
+        }
+        if self.generation == u64::MAX {
+            self.shaped_runs.clear();
+            self.generation = 0;
+        }
+        self.generation += 1;
+    }
+
+    fn shape_run(
+        &mut self,
+        text: String,
+        run_style: RunStyle,
+        font_family: &str,
+        metrics: GridMetrics,
+        window: &mut Window,
+    ) -> ShapedLine {
+        let foreground = run_style.foreground;
+        let style = run_style.style;
+        let key = ShapedRunKey {
+            text: text.into(),
+            foreground: (u32::from(foreground.r) << 16)
+                | (u32::from(foreground.g) << 8)
+                | u32::from(foreground.b),
+            rendition: u8::from(style.bold)
+                | (u8::from(style.italic) << 1)
+                | (u8::from(style.faint) << 2)
+                | (u8::from(style.strikethrough) << 3),
+            underline: style.underline,
+        };
+        if let Some(cached) = self.shaped_runs.get_mut(&key) {
+            cached.last_used = self.generation;
+            return cached.line.clone();
+        }
+
+        let mut run_font = font(font_family.to_owned());
+        apply_font_style(&mut run_font, style);
+        let color = terminal_color(foreground).alpha(if style.faint { 0.58 } else { 1.0 });
+        let underline = (style.underline != 0).then_some(UnderlineStyle {
+            color: Some(color),
+            thickness: px(1.0),
+            wavy: style.underline == 3,
+        });
+        let strikethrough = style.strikethrough.then_some(StrikethroughStyle {
+            color: Some(color),
+            thickness: px(1.0),
+        });
+        let text_run = TextRun {
+            len: key.text.len(),
+            font: run_font,
+            color,
+            background_color: None,
+            underline,
+            strikethrough,
+        };
+        let line = window.text_system().shape_line(
+            key.text.clone(),
+            px(metrics.font_size),
+            &[text_run],
+            None,
+        );
+        self.shaped_runs.insert(
+            key,
+            CachedShapedRun {
+                line: line.clone(),
+                last_used: self.generation,
+            },
+        );
+        line
+    }
+
+    fn finish_frame(&mut self) {
+        let oldest = self.generation.saturating_sub(1);
+        self.shaped_runs
+            .retain(|_, cached| cached.last_used >= oldest);
+    }
 }
 
 struct PreparedRun {
@@ -94,15 +206,16 @@ struct PreparedTerminal {
 }
 
 pub fn terminal_canvas(
-    frame: Arc<RenderFrame>,
+    frame: Rc<RenderFrame>,
+    cache: Rc<RefCell<TerminalRenderCache>>,
     font_family: String,
     metrics: GridMetrics,
     focused: bool,
 ) -> impl IntoElement {
-    let prepaint_frame = Arc::clone(&frame);
+    let prepaint_frame = Rc::clone(&frame);
     let paint_frame = frame;
     canvas(
-        move |_, window, _| prepare_runs(&prepaint_frame, &font_family, metrics, window),
+        move |_, window, _| prepare_runs(&prepaint_frame, &cache, &font_family, metrics, window),
         move |bounds, prepared, window, cx| {
             paint_terminal(bounds, &paint_frame, prepared, metrics, focused, window, cx);
         },
@@ -112,12 +225,15 @@ pub fn terminal_canvas(
 
 fn prepare_runs(
     frame: &RenderFrame,
+    cache: &Rc<RefCell<TerminalRenderCache>>,
     font_family: &str,
     metrics: GridMetrics,
     window: &mut Window,
 ) -> PreparedTerminal {
     let columns = usize::from(frame.cols);
     let mut runs = Vec::new();
+    let mut cache = cache.borrow_mut();
+    cache.begin_frame(font_family, metrics.font_size);
 
     for row in 0..usize::from(frame.rows) {
         let mut column = 0;
@@ -157,36 +273,7 @@ fn prepare_runs(
                 }
             }
 
-            let mut run_font = font(font_family.to_owned());
-            apply_font_style(&mut run_font, run_style.style);
-            let color = terminal_color(run_style.foreground).alpha(if run_style.style.faint {
-                0.58
-            } else {
-                1.0
-            });
-            let underline = (run_style.style.underline != 0).then_some(UnderlineStyle {
-                color: Some(color),
-                thickness: px(1.0),
-                wavy: run_style.style.underline == 3,
-            });
-            let strikethrough = run_style.style.strikethrough.then_some(StrikethroughStyle {
-                color: Some(color),
-                thickness: px(1.0),
-            });
-            let text_run = TextRun {
-                len: text.len(),
-                font: run_font,
-                color,
-                background_color: None,
-                underline,
-                strikethrough,
-            };
-            let line = window.text_system().shape_line(
-                text.into(),
-                px(metrics.font_size),
-                &[text_run],
-                None,
-            );
+            let line = cache.shape_run(text, run_style, font_family, metrics, window);
             runs.push(PreparedRun {
                 column: start,
                 row,
@@ -194,6 +281,7 @@ fn prepare_runs(
             });
         }
     }
+    cache.finish_frame();
 
     PreparedTerminal { runs }
 }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use mux_protocol::{
     ClientHello, ClientMessage, CodecError, FrameReader, PROTOCOL_VERSION, Request, Response,
-    ServerEvent, ServerHello, ServerMessage, read_frame, write_frame,
+    ServerEvent, ServerHello, ServerMessage, UNACKNOWLEDGED_REQUEST_ID, read_frame, write_frame,
 };
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
@@ -196,6 +196,8 @@ where
     else {
         return Err(ConnectionError::UnexpectedHello);
     };
+    let unacknowledged_input =
+        request_id == UNACKNOWLEDGED_REQUEST_ID && matches!(&request, Request::WriteInput { .. });
 
     let response = match request {
         Request::Health => Ok(Response::Pong),
@@ -280,6 +282,21 @@ where
             .map(|()| Response::Ack),
     };
 
+    if unacknowledged_input && response == Ok(Response::Ack) {
+        return Ok(());
+    }
+
+    write_response(writer, request_id, response).await
+}
+
+async fn write_response<W>(
+    writer: &mut W,
+    request_id: u64,
+    response: Result<Response, mux_protocol::RemoteError>,
+) -> Result<(), ConnectionError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
     write_frame(
         writer,
         &ServerMessage::Response {

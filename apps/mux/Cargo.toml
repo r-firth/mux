@@ -41,6 +41,9 @@ workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { workspace = true, default-features = false, features = ["NSAccessibility", "NSWorkspace"] }
+
 [[bin]]
 name = "mux"
 path = "src/gpui_main.rs"

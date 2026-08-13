@@ -3968,6 +3968,7 @@ dependencies = [
  "mux-terminal",
  "mux-terminal-ghostty",
  "mux-workspace",
+ "objc2-app-kit",
  "serde",
  "serde_json",
  "tempfile",

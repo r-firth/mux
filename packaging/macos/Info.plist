@@ -8,6 +8,10 @@
   <string>mux</string>
   <key>CFBundleIdentifier</key>
   <string>io.mux.Mux</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
+  <key>CFBundleIconName</key>
+  <string>AppIcon</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>

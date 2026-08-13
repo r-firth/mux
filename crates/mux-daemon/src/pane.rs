@@ -2,9 +2,8 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 #[cfg(feature = "ghostty")]
 use std::sync::OnceLock;
-use std::sync::mpsc::{RecvTimeoutError, sync_channel};
+use std::sync::mpsc::{TryRecvError, sync_channel};
 use std::thread;
-use std::time::Duration;
 
 use mux_protocol::{ProcessExit, ServerEvent, SpawnCommand};
 #[cfg(not(feature = "ghostty"))]
@@ -22,7 +21,6 @@ use tracing::{debug, error, warn};
 
 const READ_BUFFER_SIZE: usize = 64 * 1024;
 const OUTPUT_BATCH_SIZE: usize = 64 * 1024;
-const OUTPUT_COALESCE_WINDOW: Duration = Duration::from_millis(1);
 
 pub struct PaneRuntime {
     pub id: PaneId,
@@ -224,10 +222,10 @@ fn spawn_reader(
                 let mut bytes = first;
                 let mut disconnected = false;
                 while bytes.len() < OUTPUT_BATCH_SIZE {
-                    match output_receiver.recv_timeout(OUTPUT_COALESCE_WINDOW) {
+                    match output_receiver.try_recv() {
                         Ok(next) => bytes.extend_from_slice(&next),
-                        Err(RecvTimeoutError::Timeout) => break,
-                        Err(RecvTimeoutError::Disconnected) => {
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
                             disconnected = true;
                             break;
                         }

@@ -41,10 +41,14 @@ app="$verification_directory/Mux.app"
 executable="$app/Contents/MacOS/mux"
 ghostty="$app/Contents/Frameworks/libghostty-vt.dylib"
 plist="$app/Contents/Info.plist"
+app_icon="$app/Contents/Resources/AppIcon.icns"
+asset_catalog="$app/Contents/Resources/Assets.car"
 
 [ -x "$executable" ] || fail "bundle executable is missing"
 [ -f "$ghostty" ] || fail "bundled libghostty-vt is missing"
 [ -f "$plist" ] || fail "Info.plist is missing"
+[ -f "$app_icon" ] || fail "app icon is missing"
+[ -f "$asset_catalog" ] || fail "asset catalog is missing"
 
 executable_description=$(file "$executable")
 ghostty_description=$(file "$ghostty")
@@ -61,9 +65,13 @@ bundle_identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$pli
 bundle_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")
 build_number=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")
 minimum_macos=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist")
+bundle_icon_file=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$plist")
+bundle_icon_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$plist")
 [ "$bundle_identifier" = "io.mux.Mux" ] || fail "unexpected bundle identifier: $bundle_identifier"
 [ "$bundle_version" = "$expected_version" ] || fail "expected version $expected_version, found $bundle_version"
 [ "$minimum_macos" = "13.0" ] || fail "unexpected minimum macOS version: $minimum_macos"
+[ "$bundle_icon_file" = "AppIcon" ] || fail "unexpected icon file: $bundle_icon_file"
+[ "$bundle_icon_name" = "AppIcon" ] || fail "unexpected icon name: $bundle_icon_name"
 case "$build_number" in
   '' | *[!0-9]*) fail "bundle build number is not numeric: $build_number" ;;
 esac

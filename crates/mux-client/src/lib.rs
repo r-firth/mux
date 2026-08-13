@@ -8,7 +8,7 @@ use mux_acp::{AgentConfigValueSelection, AgentPrompt, AgentSessionSnapshot, Agen
 use mux_protocol::{
     ClientHello, ClientMessage, CodecError, CreateSession, FrameReader, PROTOCOL_VERSION,
     RemoteError, Request, Response, ServerEvent, ServerMessage, SessionAttachment, SessionSelector,
-    SessionSummary, read_frame, write_frame,
+    SessionSummary, UNACKNOWLEDGED_REQUEST_ID, read_frame, write_frame,
 };
 use mux_terminal::TerminalSize;
 use mux_workspace::{AgentSessionId, PaneId, SessionId, WorkspaceCommand};
@@ -143,10 +143,15 @@ impl Client {
         pane_id: PaneId,
         bytes: Vec<u8>,
     ) -> Result<(), ClientError> {
-        expect_acknowledgement(
-            self.request(Request::WriteInput { pane_id, bytes }).await?,
-            &Response::Ack,
+        write_frame(
+            &mut self.writer,
+            &ClientMessage::Request {
+                request_id: UNACKNOWLEDGED_REQUEST_ID,
+                request: Request::WriteInput { pane_id, bytes },
+            },
         )
+        .await?;
+        Ok(())
     }
 
     pub async fn resize_pane(
@@ -331,6 +336,10 @@ impl Client {
                         return Ok(event);
                     }
                 }
+                ServerMessage::Response {
+                    request_id: UNACKNOWLEDGED_REQUEST_ID,
+                    response,
+                } => handle_unacknowledged_response(response)?,
                 ServerMessage::Response { request_id, .. } => {
                     return Err(ClientError::UnexpectedResponseId(request_id));
                 }
@@ -357,6 +366,10 @@ impl Client {
                     request_id: actual,
                     response,
                 } if actual == request_id => return response.map_err(ClientError::Remote),
+                ServerMessage::Response {
+                    request_id: UNACKNOWLEDGED_REQUEST_ID,
+                    response,
+                } => handle_unacknowledged_response(response)?,
                 ServerMessage::Response {
                     request_id: actual, ..
                 } => return Err(ClientError::UnexpectedResponseId(actual)),
@@ -453,6 +466,12 @@ fn expect_acknowledgement(actual: Response, expected: &Response) -> Result<(), C
     }
 }
 
+fn handle_unacknowledged_response(
+    response: Result<Response, RemoteError>,
+) -> Result<(), ClientError> {
+    expect_acknowledgement(response.map_err(ClientError::Remote)?, &Response::Ack)
+}
+
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error("daemon connection failed: {0}")]
@@ -521,6 +540,79 @@ mod tests {
                 server,
             } if server == PROTOCOL_VERSION - 1
         ));
+        server.await.expect("fake daemon task");
+    }
+
+    #[tokio::test]
+    async fn terminal_input_does_not_wait_for_daemon_acknowledgement() {
+        let directory = tempfile::tempdir().expect("temporary state directory");
+        let socket = directory.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        let pane_id = PaneId::new();
+        let (release_ack, wait_for_release) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept client");
+            let hello: ClientMessage = read_frame(&mut stream).await.expect("read client hello");
+            assert!(matches!(hello, ClientMessage::Hello(_)));
+            write_frame(
+                &mut stream,
+                &ServerMessage::Hello(ServerHello {
+                    protocol_version: PROTOCOL_VERSION,
+                    daemon_pid: 42,
+                }),
+            )
+            .await
+            .expect("write server hello");
+
+            let input: ClientMessage = read_frame(&mut stream).await.expect("read input");
+            assert_eq!(
+                input,
+                ClientMessage::Request {
+                    request_id: UNACKNOWLEDGED_REQUEST_ID,
+                    request: Request::WriteInput {
+                        pane_id,
+                        bytes: b"j".to_vec(),
+                    },
+                }
+            );
+            wait_for_release
+                .await
+                .expect("release delayed acknowledgement");
+            // A protocol-v4 daemon may still acknowledge request zero. New
+            // clients discard that compatibility response without disturbing
+            // the event stream.
+            write_frame(
+                &mut stream,
+                &ServerMessage::Response {
+                    request_id: UNACKNOWLEDGED_REQUEST_ID,
+                    response: Ok(Response::Ack),
+                },
+            )
+            .await
+            .expect("write delayed acknowledgement");
+            write_frame(
+                &mut stream,
+                &ServerMessage::Event(ServerEvent::AgentResyncRequired),
+            )
+            .await
+            .expect("write event after acknowledgement");
+        });
+
+        let mut client = Client::connect(&socket, "input-latency-test")
+            .await
+            .expect("connect client");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.write_input(pane_id, b"j".to_vec()),
+        )
+        .await
+        .expect("input waited for an acknowledgement")
+        .expect("write input");
+        release_ack.send(()).expect("release fake daemon");
+        assert_eq!(
+            client.next_event().await.expect("next event"),
+            ServerEvent::AgentResyncRequired
+        );
         server.await.expect("fake daemon task");
     }
 }

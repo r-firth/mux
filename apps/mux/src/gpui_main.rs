@@ -10,34 +10,35 @@ mod layout;
 mod settings;
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Instant;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
 use backend::{BackendHandle, CommandMessage};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Application, Bounds, Context, Entity, FocusHandle, Hsla,
-    InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent, Menu, MenuItem,
-    ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled, SystemMenuType, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div,
-    px, rgb, size,
+    Animation, AnimationExt as _, App, AppContext as _, Application, Bounds, Context, Entity,
+    FocusHandle, Hsla, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent,
+    Menu, MenuItem, ParentElement as _, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled, SystemMenuType, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowOptions, div, px, rgb, size,
 };
 use gpui_component::{
     Icon, IconName, InteractiveElementExt as _, Selectable as _, Sizable as _, StyledExt as _,
     Theme, ThemeMode, TitleBar, WindowExt as _,
+    animation::cubic_bezier,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Enter, Input, InputEvent, InputState},
     notification::Notification,
     scroll::ScrollableElement as _,
-    spinner::Spinner,
     switch::Switch,
     v_flex,
 };
-use gpui_terminal::GridMetrics;
+use gpui_terminal::{GridMetrics, TerminalRenderCache};
 use mux_acp::{
     AgentConfigCategory, AgentConfigValue, AgentConfigValueSelection, AgentContext,
     AgentContextKind, AgentEvent, AgentMessageRole, AgentProfile, AgentPrompt,
@@ -58,7 +59,7 @@ use mux_workspace::{
     PaneId, Session, TabId, WorkspaceCommand,
 };
 use settings::AppSettings;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 const WINDOW_WIDTH: f32 = 1120.0;
 const WINDOW_HEIGHT: f32 = 720.0;
@@ -70,6 +71,21 @@ const TEXT: u32 = 0x00e8_ecf3;
 const MUTED_TEXT: u32 = 0x008c_96a8;
 const SIGNAL: u32 = 0x005e_b6e8;
 const EMBEDDED_TERMINAL_FONT: &str = "JetBrainsMono Nerd Font Mono";
+const INITIAL_USER_EVENT_BATCH_CAPACITY: usize = 8;
+const MAX_USER_EVENT_BATCH: usize = 256;
+
+#[cfg(target_os = "macos")]
+fn reduce_motion_requested() -> bool {
+    use objc2_app_kit::NSWorkspace;
+
+    NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+}
+
+#[cfg(not(target_os = "macos"))]
+const fn reduce_motion_requested() -> bool {
+    false
+}
+
 gpui::actions!(
     mux_agent,
     [
@@ -95,7 +111,53 @@ enum UserEvent {
 
 struct PaneReplica {
     engine: GhosttyEngine,
-    frame: Arc<RenderFrame>,
+    frame: Rc<RenderFrame>,
+    render_cache: Rc<RefCell<TerminalRenderCache>>,
+}
+
+impl PaneReplica {
+    fn new(engine: GhosttyEngine, frame: RenderFrame) -> Self {
+        Self {
+            engine,
+            frame: Rc::new(frame),
+            render_cache: Rc::new(RefCell::new(TerminalRenderCache::default())),
+        }
+    }
+
+    fn apply_output(&mut self, sequence: u64, bytes: &[u8]) -> Result<()> {
+        self.engine.apply_output(sequence, bytes)?;
+        Ok(())
+    }
+
+    fn publish_frame(&mut self) -> Result<()> {
+        // A canvas keeps its frame alive through both prepaint and paint. If a
+        // draw is still holding the old snapshot, `make_mut` clones before
+        // updating; otherwise libghostty writes into the existing allocation.
+        // Either way, a draw can never combine shaped text from one terminal
+        // state with backgrounds or a cursor from another.
+        self.engine
+            .render_frame_into(Rc::make_mut(&mut self.frame))?;
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct PaneScrollState {
+    fractional_rows: f32,
+}
+
+impl PaneScrollState {
+    fn accumulate(&mut self, delta_rows: f32, reset_fraction: bool) -> i64 {
+        if reset_fraction
+            || (self.fractional_rows != 0.0 && self.fractional_rows.signum() != delta_rows.signum())
+        {
+            self.fractional_rows = 0.0;
+        }
+        let accumulated = self.fractional_rows + delta_rows;
+        let whole_rows = accumulated.trunc() as i64;
+        self.fractional_rows = accumulated - whole_rows as f32;
+        whole_rows
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -112,6 +174,12 @@ enum AgentContextMode {
     Tab,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MotionPreference {
+    Full,
+    Reduced,
+}
+
 struct MuxApp {
     focus_handle: FocusHandle,
     backend: BackendHandle,
@@ -120,6 +188,7 @@ struct MuxApp {
     profiles: Vec<AgentProfile>,
     session: Option<Session>,
     panes: HashMap<PaneId, PaneReplica>,
+    pane_scrolls: HashMap<PaneId, PaneScrollState>,
     sent_sizes: HashMap<PaneId, TerminalSize>,
     sessions: Vec<SessionSummary>,
     agents: Vec<AgentSessionSnapshot>,
@@ -142,6 +211,7 @@ struct MuxApp {
     selection_clock_origin: Instant,
     keymap: Keymap,
     mode: InputMode,
+    motion: MotionPreference,
     metrics: GridMetrics,
     terminal_font: String,
     ghostty_theme: GhosttyTheme,
@@ -183,6 +253,13 @@ impl MuxApp {
             cell_height = metrics.cell_height,
             "measured terminal grid"
         );
+        let reduce_motion = reduce_motion_requested();
+        info!(reduce_motion, "resolved interface motion preference");
+        let motion = if reduce_motion {
+            MotionPreference::Reduced
+        } else {
+            MotionPreference::Full
+        };
         let agent_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Message an agent · /help for commands…")
         });
@@ -199,20 +276,7 @@ impl MuxApp {
         let backend = backend::spawn(events, state_dir.clone());
         backend.send(CommandMessage::ListAgents);
         info!("GPUI workspace view initialized");
-
-        cx.spawn_in(window, async move |entity, cx| {
-            while let Ok(event) = receiver.recv().await {
-                info!(event = event.label(), "GPUI received backend event");
-                let _ = cx.update(|window, app| {
-                    let _ = entity.update(app, |this, cx| {
-                        this.apply_user_event(event, window, cx);
-                        cx.notify();
-                    });
-                    window.refresh();
-                });
-            }
-        })
-        .detach();
+        Self::spawn_backend_event_loop(receiver, window, cx);
 
         if let Some(message) = settings_error {
             window.push_notification(Notification::warning(message), cx);
@@ -226,6 +290,7 @@ impl MuxApp {
             profiles: built_in_agent_profiles(),
             session: None,
             panes: HashMap::new(),
+            pane_scrolls: HashMap::new(),
             sent_sizes: HashMap::new(),
             sessions: Vec::new(),
             agents: Vec::new(),
@@ -246,11 +311,110 @@ impl MuxApp {
             selection_clock_origin: Instant::now(),
             keymap: Keymap::zellij_default(),
             mode: InputMode::Normal,
+            motion,
             metrics,
             terminal_font,
             ghostty_theme: GhosttyTheme::load_user().unwrap_or_default(),
             clipboard: arboard::Clipboard::new().ok(),
         }
+    }
+
+    fn spawn_backend_event_loop(
+        receiver: async_channel::Receiver<UserEvent>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn_in(window, async move |entity, cx| {
+            while let Ok(first_event) = receiver.recv().await {
+                let first_label = first_event.label();
+                let mut batch = Vec::with_capacity(INITIAL_USER_EVENT_BATCH_CAPACITY);
+                batch.push(first_event);
+                while batch.len() < MAX_USER_EVENT_BATCH {
+                    let Ok(event) = receiver.try_recv() else {
+                        break;
+                    };
+                    batch.push(event);
+                }
+                debug!(
+                    event_count = batch.len(),
+                    first_event = first_label,
+                    "GPUI received backend event batch"
+                );
+                let _ = cx.update(|window, app| {
+                    let _ = entity.update(app, |this, cx| {
+                        if this.apply_user_events(batch, window, cx) {
+                            cx.notify();
+                        }
+                    });
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn apply_user_events(
+        &mut self,
+        events: Vec<UserEvent>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut dirty_panes = HashSet::new();
+        let mut needs_render = false;
+        for event in events {
+            match event {
+                UserEvent::Server(ServerEvent::PaneOutput {
+                    pane_id,
+                    sequence,
+                    bytes,
+                    ..
+                }) => {
+                    let visible = self.terminal_pane_is_visible(pane_id);
+                    let result = self
+                        .panes
+                        .get_mut(&pane_id)
+                        .map_or(Ok(()), |pane| pane.apply_output(sequence, &bytes));
+                    match result {
+                        Ok(()) if visible => {
+                            dirty_panes.insert(pane_id);
+                            needs_render = true;
+                        }
+                        Ok(()) => {}
+                        Err(error) => Self::report_ui_error(&error, window, cx),
+                    }
+                }
+                UserEvent::Attached(attachment) => {
+                    self.publish_terminal_frames(&mut dirty_panes, window, cx);
+                    self.apply_user_event(UserEvent::Attached(attachment), window, cx);
+                    needs_render = true;
+                }
+                event => {
+                    self.apply_user_event(event, window, cx);
+                    needs_render = true;
+                }
+            }
+        }
+        self.publish_terminal_frames(&mut dirty_panes, window, cx);
+        needs_render
+    }
+
+    fn publish_terminal_frames(
+        &mut self,
+        dirty_panes: &mut HashSet<PaneId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for pane_id in dirty_panes.drain() {
+            if let Some(pane) = self.panes.get_mut(&pane_id)
+                && let Err(error) = pane.publish_frame()
+            {
+                Self::report_ui_error(&error, window, cx);
+            }
+        }
+    }
+
+    fn report_ui_error(error: &anyhow::Error, window: &mut Window, cx: &mut Context<Self>) {
+        error!(%error, "Mux UI update failed");
+        window.push_notification(Notification::error(error.to_string()), cx);
     }
 
     fn apply_user_event(&mut self, event: UserEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -328,8 +492,7 @@ impl MuxApp {
             }
         };
         if let Err(error) = result {
-            error!(%error, "Mux UI update failed");
-            window.push_notification(Notification::error(error.to_string()), cx);
+            Self::report_ui_error(&error, window, cx);
         }
     }
 
@@ -353,13 +516,7 @@ impl MuxApp {
             if !pane.terminal.replay.is_empty() {
                 engine.render_frame_into(&mut frame)?;
             }
-            panes.insert(
-                pane.pane_id,
-                PaneReplica {
-                    engine,
-                    frame: Arc::new(frame),
-                },
-            );
+            panes.insert(pane.pane_id, PaneReplica::new(engine, frame));
         }
         self.session = Some(attachment.session);
         // Every attachment replaces the local emulators from daemon-owned
@@ -367,6 +524,7 @@ impl MuxApp {
         // retaining an old sent size can leave a fresh replica at the
         // checkpoint's previous dimensions indefinitely.
         self.sent_sizes.clear();
+        self.pane_scrolls.clear();
         self.panes = panes;
         let valid_agent_panes = self
             .session
@@ -394,9 +552,8 @@ impl MuxApp {
                 ..
             } => {
                 if let Some(pane) = self.panes.get_mut(&pane_id) {
-                    pane.engine.apply_output(sequence, &bytes)?;
-                    pane.engine
-                        .render_frame_into(Arc::make_mut(&mut pane.frame))?;
+                    pane.apply_output(sequence, &bytes)?;
+                    pane.publish_frame()?;
                 }
             }
             ServerEvent::PaneExited { .. }
@@ -435,6 +592,13 @@ impl MuxApp {
             .filter(|pane_id| tab.layout.contains(*pane_id))
     }
 
+    fn terminal_pane_is_visible(&self, pane_id: PaneId) -> bool {
+        let Some(session) = self.session.as_ref() else {
+            return false;
+        };
+        pane_needs_live_frame(session, self.active_agent_pane(), pane_id)
+    }
+
     fn agent_scroll_for(&mut self, tab_id: TabId) -> ScrollHandle {
         self.agent_scrolls.entry(tab_id).or_default().clone()
     }
@@ -465,6 +629,11 @@ impl MuxApp {
             self.agent_panes.remove(&tab_id);
             self.agent_follow_tail.remove(&tab_id);
             self.agent_scroll_needs_settle.remove(&tab_id);
+            if let Some(pane) = self.panes.get_mut(&pane_id)
+                && let Err(error) = pane.publish_frame()
+            {
+                Self::report_ui_error(&error, window, cx);
+            }
             self.focus_handle.focus(window);
         } else {
             self.agent_panes.insert(tab_id, pane_id);
@@ -479,10 +648,16 @@ impl MuxApp {
     }
 
     fn return_agent_pane_to_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab_id) = self.active_tab_id() {
-            self.agent_panes.remove(&tab_id);
+        if let Some(tab_id) = self.active_tab_id()
+            && let Some(pane_id) = self.agent_panes.remove(&tab_id)
+        {
             self.agent_follow_tail.remove(&tab_id);
             self.agent_scroll_needs_settle.remove(&tab_id);
+            if let Some(pane) = self.panes.get_mut(&pane_id)
+                && let Err(error) = pane.publish_frame()
+            {
+                Self::report_ui_error(&error, window, cx);
+            }
         }
         self.focus_handle.focus(window);
         self.mode = InputMode::Normal;
@@ -1376,8 +1551,7 @@ impl MuxApp {
             .get_mut(&pane_id)
             .ok_or_else(|| anyhow!("selection pane is unavailable"))?;
         let status = pane.engine.selection_gesture(event)?;
-        pane.engine
-            .render_frame_into(Arc::make_mut(&mut pane.frame))?;
+        pane.publish_frame()?;
         self.selected_pane = status.has_selection.then_some(pane_id);
         Ok(())
     }
@@ -1393,7 +1567,7 @@ impl MuxApp {
         modifiers: gpui::Modifiers,
         any_button_pressed: bool,
     ) -> bool {
-        let Some(frame) = self.panes.get(&pane_id).map(|pane| &pane.frame) else {
+        let Some(frame) = self.panes.get(&pane_id).map(|pane| Rc::clone(&pane.frame)) else {
             return false;
         };
         let padding =
@@ -1501,11 +1675,9 @@ impl MuxApp {
             && let Some(pane) = self.panes.get_mut(&previous)
         {
             let _ = pane.engine.set_selection(None);
-            let _ = pane
-                .engine
-                .render_frame_into(Arc::make_mut(&mut pane.frame));
+            let _ = pane.publish_frame();
         }
-        let Some(frame) = self.panes.get(&pane_id).map(|pane| Arc::clone(&pane.frame)) else {
+        let Some(frame) = self.panes.get(&pane_id).map(|pane| Rc::clone(&pane.frame)) else {
             return;
         };
         let pointer = self.selection_pointer(rect, &frame, event.position);
@@ -1538,7 +1710,7 @@ impl MuxApp {
         if self.selection_drag != Some(pane_id) || !event.dragging() {
             return;
         }
-        let Some(frame) = self.panes.get(&pane_id).map(|pane| Arc::clone(&pane.frame)) else {
+        let Some(frame) = self.panes.get(&pane_id).map(|pane| Rc::clone(&pane.frame)) else {
             return;
         };
         let pointer = self.selection_pointer(rect, &frame, event.position);
@@ -1566,14 +1738,26 @@ impl MuxApp {
         self.selection_drag = None;
     }
 
-    fn scroll_pane(&mut self, pane_id: PaneId, rect: layout::Rect, event: &gpui::ScrollWheelEvent) {
-        let rows = match event.delta {
-            gpui::ScrollDelta::Lines(delta) => -delta.y * 3.0,
-            gpui::ScrollDelta::Pixels(delta) => -f32::from(delta.y) / self.metrics.cell_height,
+    fn scroll_pane(
+        &mut self,
+        pane_id: PaneId,
+        rect: layout::Rect,
+        event: &gpui::ScrollWheelEvent,
+    ) -> bool {
+        let (delta_rows, reset_fraction) = match event.delta {
+            gpui::ScrollDelta::Lines(delta) => (-delta.y * 3.0, true),
+            gpui::ScrollDelta::Pixels(delta) => (
+                -f32::from(delta.y) / self.metrics.cell_height,
+                matches!(event.touch_phase, gpui::TouchPhase::Started),
+            ),
         };
-        let rows = rows.trunc() as i64;
+        let rows = self
+            .pane_scrolls
+            .entry(pane_id)
+            .or_default()
+            .accumulate(delta_rows, reset_fraction);
         if rows == 0 {
-            return;
+            return false;
         }
         let wheel_button = if rows < 0 {
             TerminalMouseButton::Four
@@ -1593,18 +1777,25 @@ impl MuxApp {
             );
         }
         if reported && !event.modifiers.shift {
-            return;
+            return false;
         }
-        if let Some(pane) = self.panes.get_mut(&pane_id)
-            && pane
-                .engine
-                .scroll_viewport(TerminalViewportScroll::Delta(rows))
-                .is_ok()
+
+        let Some(pane) = self.panes.get_mut(&pane_id) else {
+            self.pane_scrolls.remove(&pane_id);
+            return false;
+        };
+        if let Err(error) = pane
+            .engine
+            .scroll_viewport(TerminalViewportScroll::Delta(rows))
         {
-            let _ = pane
-                .engine
-                .render_frame_into(Arc::make_mut(&mut pane.frame));
+            error!(pane_id = %pane_id, %error, "could not scroll terminal viewport");
+            return false;
         }
+        if let Err(error) = pane.publish_frame() {
+            error!(pane_id = %pane_id, %error, "could not render scrolled terminal viewport");
+            return false;
+        }
+        true
     }
 
     fn sync_terminal_sizes(&mut self, width: f32, height: f32) -> layout::WorkspaceGeometry {
@@ -1629,12 +1820,13 @@ impl MuxApp {
                 let Some(replica) = self.panes.get_mut(&pane.pane_id) else {
                     continue;
                 };
-                if let Err(error) = replica.engine.resize(size).and_then(|()| {
-                    replica
-                        .engine
-                        .render_frame_into(Arc::make_mut(&mut replica.frame))
-                }) {
+                let resized = replica.engine.resize(size);
+                if let Err(error) = resized {
                     error!(pane_id = %pane.pane_id, %error, "could not resize terminal replica");
+                    continue;
+                }
+                if let Err(error) = replica.publish_frame() {
+                    error!(pane_id = %pane.pane_id, %error, "could not render resized terminal replica");
                     continue;
                 }
                 self.sent_sizes.insert(pane.pane_id, size);
@@ -1774,6 +1966,7 @@ impl MuxApp {
                 show_help,
                 follow_tail,
                 settle_scroll,
+                self.motion,
                 window,
                 cx,
             ));
@@ -1796,7 +1989,7 @@ impl MuxApp {
                 .child(agent_composer(&app, self)),
         );
 
-        div()
+        let pane = div()
             .id(SharedString::from(format!("agent-pane-{pane_id}")))
             .absolute()
             .left(px(rect.x))
@@ -1808,8 +2001,20 @@ impl MuxApp {
             .overflow_hidden()
             .border_1()
             .border_color(if focused { rgb(SIGNAL) } else { rgb(BORDER) })
-            .child(body)
+            .child(body);
+        if self.motion == MotionPreference::Reduced {
+            pane.into_any_element()
+        } else {
+            pane.with_animation(
+                SharedString::from(format!("agent-pane-enter-{pane_id}")),
+                interface_animation(170),
+                move |pane, delta| {
+                    pane.left(px(rect.x + (1.0 - delta) * 4.0))
+                        .opacity(0.72 + delta * 0.28)
+                },
+            )
             .into_any_element()
+        }
     }
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1857,7 +2062,7 @@ impl MuxApp {
         .child(div().w(px(52.0)).h_full())
     }
 
-    fn render_mode_bar(&self) -> impl IntoElement {
+    fn render_mode_bar(&self) -> gpui::AnyElement {
         let (label, help) = match self.mode {
             InputMode::Normal => ("NORMAL", ""),
             InputMode::Pane => (
@@ -1871,7 +2076,7 @@ impl MuxApp {
             InputMode::Session => ("SESSION", "w switch · d detach"),
             InputMode::Resize => ("RESIZE", "arrows resize · Enter finish"),
         };
-        h_flex()
+        let bar = h_flex()
             .absolute()
             .left_0()
             .right_0()
@@ -1889,7 +2094,20 @@ impl MuxApp {
                     .text_color(rgb(SIGNAL))
                     .child(label),
             )
-            .child(div().text_xs().text_color(rgb(MUTED_TEXT)).child(help))
+            .child(div().text_xs().text_color(rgb(MUTED_TEXT)).child(help));
+        if self.motion == MotionPreference::Reduced {
+            bar.into_any_element()
+        } else {
+            bar.with_animation(
+                SharedString::from(format!("mode-bar-enter-{label}")),
+                interface_animation(140),
+                |bar, delta| {
+                    bar.bottom(px(-6.0 + delta * 6.0))
+                        .opacity(0.4 + delta * 0.6)
+                },
+            )
+            .into_any_element()
+        }
     }
 }
 
@@ -2010,13 +2228,15 @@ impl Render for MuxApp {
                 })
                 .on_scroll_wheel(move |event, _, cx| {
                     let _ = scroll_app.update(cx, |this, cx| {
-                        this.scroll_pane(pane_id, rect, event);
-                        cx.notify();
+                        if this.scroll_pane(pane_id, rect, event) {
+                            cx.notify();
+                        }
                     });
                     cx.stop_propagation();
                 })
                 .child(gpui_terminal::terminal_canvas(
-                    Arc::clone(&pane.frame),
+                    Rc::clone(&pane.frame),
+                    Rc::clone(&pane.render_cache),
                     self.terminal_font.clone(),
                     self.metrics,
                     focused,
@@ -2024,16 +2244,7 @@ impl Render for MuxApp {
             if focused && pane_count > 1 {
                 // A short "focus beam" is visible at a glance without boxing
                 // every pane or stealing terminal pixels with permanent borders.
-                surface = surface.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left(px(8.0))
-                        .w(px(34.0))
-                        .h(px(2.0))
-                        .rounded_full()
-                        .bg(rgb(SIGNAL)),
-                );
+                surface = surface.child(pane_focus_beam(pane_id, self.motion));
             }
             root = root.child(surface);
         }
@@ -2041,15 +2252,33 @@ impl Render for MuxApp {
         if self.mode != InputMode::Normal {
             root = root.child(self.render_mode_bar());
         }
-        if cfg!(target_os = "macos") {
-            root = root.child(macos_window_controls());
-        }
         let active_agents = self
             .agents_for_active_tab()
             .filter(|agent| agent.status != AgentSessionStatus::Closed)
             .count();
         root = root.child(header_actions(cx.weak_entity(), active_agents));
         root
+    }
+}
+
+fn pane_focus_beam(pane_id: PaneId, motion: MotionPreference) -> gpui::AnyElement {
+    let beam = div()
+        .absolute()
+        .top_0()
+        .left(px(8.0))
+        .w(px(34.0))
+        .h(px(2.0))
+        .rounded_full()
+        .bg(rgb(SIGNAL));
+    if motion == MotionPreference::Reduced {
+        beam.into_any_element()
+    } else {
+        beam.with_animation(
+            SharedString::from(format!("pane-focus-{pane_id}")),
+            interface_animation(120),
+            |beam, delta| beam.w(px(10.0 + delta * 24.0)).opacity(0.35 + delta * 0.65),
+        )
+        .into_any_element()
     }
 }
 
@@ -2124,55 +2353,6 @@ fn header_actions(app: gpui::WeakEntity<MuxApp>, active_agents: usize) -> impl I
                 })
                 .child(Icon::new(IconName::Settings2).small()),
         )
-}
-
-fn macos_window_controls() -> impl IntoElement {
-    h_flex()
-        .absolute()
-        .top(px(8.0))
-        .left(px(12.0))
-        .gap(px(8.0))
-        .child(window_control_dot(
-            "window-close",
-            0x00ff_5f57,
-            |window, cx| {
-                window.remove_window();
-                cx.quit();
-            },
-        ))
-        .child(window_control_dot(
-            "window-minimize",
-            0x00fe_bc2e,
-            |window, _| window.minimize_window(),
-        ))
-        .child(window_control_dot(
-            "window-zoom",
-            0x0028_c840,
-            |window, _| {
-                window.zoom_window();
-            },
-        ))
-}
-
-fn window_control_dot(
-    id: &'static str,
-    color: u32,
-    action: impl Fn(&mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .size(px(12.0))
-        .rounded_full()
-        .bg(rgb(color))
-        .hover(|style| style.opacity(0.82))
-        .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
-            window.prevent_default();
-            cx.stop_propagation();
-        })
-        .on_click(move |_, window, cx| {
-            cx.stop_propagation();
-            action(window, cx);
-        })
 }
 
 fn return_agent_pane(app: &gpui::WeakEntity<MuxApp>, window: &mut Window, cx: &mut App) {
@@ -2368,7 +2548,7 @@ fn agent_empty_state(this: &MuxApp) -> impl IntoElement {
         .flex_1()
         .items_center()
         .justify_center()
-        .gap_2()
+        .gap_3()
         .px_5()
         .overflow_hidden()
         .text_center()
@@ -2381,8 +2561,10 @@ fn agent_empty_state(this: &MuxApp) -> impl IntoElement {
         .child(
             div()
                 .w_full()
-                .max_w(px(420.0))
+                .max_w(px(560.0))
                 .min_w_0()
+                .min_h(px(40.0))
+                .flex_none()
                 .whitespace_normal()
                 .text_sm()
                 .line_height(px(20.0))
@@ -2396,8 +2578,10 @@ fn agent_empty_state(this: &MuxApp) -> impl IntoElement {
                 .w_full()
                 .max_w(px(420.0))
                 .min_w_0()
+                .flex_none()
                 .whitespace_normal()
                 .text_xs()
+                .line_height(px(18.0))
                 .text_color(rgb(MUTED_TEXT))
                 .child("Starts in the focused pane's directory."),
         )
@@ -2604,6 +2788,7 @@ fn agent_timeline(
     show_help: bool,
     follow_tail: bool,
     settle_scroll: bool,
+    motion: MotionPreference,
     window: &mut Window,
     _cx: &mut App,
 ) -> impl IntoElement {
@@ -2690,7 +2875,7 @@ fn agent_timeline(
         if matches!(item, AgentTimelineItem::Context { .. }) {
             continue;
         }
-        timeline = timeline.child(match item {
+        let content = match item {
             AgentTimelineItem::Message { role, text, .. } if *role != AgentMessageRole::Thought => {
                 agent_message_item(agent, index, *role, text)
             }
@@ -2706,6 +2891,24 @@ fn agent_timeline(
                 agent_tool_item(app, agent, index, tool, expanded_items)
             }
             _ => agent_event_item(item),
+        };
+        let row = div().w_full().min_w_0().flex_none().child(content);
+        timeline = timeline.child(if motion == MotionPreference::Reduced {
+            row.into_any_element()
+        } else {
+            row.with_animation(
+                SharedString::from(format!(
+                    "agent-item-enter-{}",
+                    agent_item_key(agent, index, item)
+                )),
+                interface_animation(140),
+                |row, delta| {
+                    row.relative()
+                        .top(px((1.0 - delta) * 3.0))
+                        .opacity(0.35 + delta * 0.65)
+                },
+            )
+            .into_any_element()
         });
     }
     if show_help {
@@ -2818,9 +3021,9 @@ fn thinking_item(
         .rounded_md()
         .text_color(rgb(MUTED_TEXT))
         .child(if running {
-            Spinner::new()
+            Icon::new(IconName::LoaderCircle)
                 .xsmall()
-                .color(rgb(MUTED_TEXT).into())
+                .text_color(rgb(MUTED_TEXT))
                 .into_any_element()
         } else {
             Icon::new(IconName::Asterisk)
@@ -3310,9 +3513,9 @@ fn tool_status_element(status: ToolStatus) -> gpui::AnyElement {
             .xsmall()
             .text_color(rgb(MUTED_TEXT))
             .into_any_element(),
-        ToolStatus::Running => Spinner::new()
+        ToolStatus::Running => Icon::new(IconName::LoaderCircle)
             .xsmall()
-            .color(tool_accent(status).into())
+            .text_color(tool_accent(status))
             .into_any_element(),
         ToolStatus::Completed => Icon::new(IconName::CircleCheck)
             .xsmall()
@@ -3454,6 +3657,25 @@ fn status_color(status: AgentSessionStatus) -> gpui::Rgba {
         AgentSessionStatus::Failed => rgb(0x00ef_7d7d),
         _ => rgb(MUTED_TEXT),
     }
+}
+
+fn interface_animation(duration_ms: u64) -> Animation {
+    Animation::new(Duration::from_millis(duration_ms))
+        .with_easing(cubic_bezier(0.16, 1.0, 0.3, 1.0))
+}
+
+fn pane_needs_live_frame(
+    session: &Session,
+    active_agent_pane: Option<PaneId>,
+    pane_id: PaneId,
+) -> bool {
+    let Some(tab) = session.active_tab() else {
+        return false;
+    };
+    let included = tab
+        .zoomed_pane
+        .map_or_else(|| tab.layout.contains(pane_id), |zoomed| zoomed == pane_id);
+    included && active_agent_pane != Some(pane_id)
 }
 
 const fn agent_status_label(status: AgentSessionStatus) -> &'static str {
@@ -3863,7 +4085,11 @@ fn main() -> Result<()> {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(560.0), px(360.0))),
-                    titlebar: (!cfg!(target_os = "macos")).then(TitleBar::title_bar_options),
+                    // Keep a native titled/resizable AppKit window while drawing content through
+                    // its transparent titlebar. A missing GPUI titlebar drops the standard
+                    // resizable/minimizable/closable style masks on macOS, which also prevents
+                    // window managers such as Rectangle from applying a requested frame.
+                    titlebar: Some(TitleBar::title_bar_options()),
                     window_background: WindowBackgroundAppearance::Opaque,
                     app_id: Some("dev.mux.terminal".to_owned()),
                     ..Default::default()
@@ -3892,4 +4118,83 @@ fn main() -> Result<()> {
             }
         });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::rc::Rc;
+
+    use mux_terminal::{TerminalRenderer as _, TerminalSize};
+    use mux_terminal_ghostty::GhosttyEngine;
+
+    use super::{PaneReplica, PaneScrollState, pane_needs_live_frame, terminal_frame_text};
+
+    #[test]
+    fn terminal_output_is_published_as_one_immutable_snapshot() {
+        let mut engine = GhosttyEngine::new(TerminalSize {
+            cols: 20,
+            rows: 4,
+            ..TerminalSize::default()
+        })
+        .expect("new terminal");
+        let frame = engine.render_frame().expect("initial frame");
+        let mut pane = PaneReplica::new(engine, frame);
+        let displayed = Rc::clone(&pane.frame);
+
+        pane.apply_output(1, b"one ").expect("first output");
+        pane.apply_output(2, b"two").expect("second output");
+
+        assert!(Rc::ptr_eq(&displayed, &pane.frame));
+        assert!(!terminal_frame_text(&displayed).contains("one two"));
+
+        pane.publish_frame().expect("publish frame");
+
+        assert!(!Rc::ptr_eq(&displayed, &pane.frame));
+        assert!(!terminal_frame_text(&displayed).contains("one two"));
+        assert!(terminal_frame_text(&pane.frame).contains("one two"));
+    }
+
+    #[test]
+    fn precise_scroll_accumulates_sub_row_motion() {
+        let mut scroll = PaneScrollState::default();
+
+        assert_eq!(scroll.accumulate(0.35, true), 0);
+        assert_eq!(scroll.accumulate(0.35, false), 0);
+        assert_eq!(scroll.accumulate(0.35, false), 1);
+        assert!((scroll.fractional_rows - 0.05).abs() < f32::EPSILON * 4.0);
+    }
+
+    #[test]
+    fn precise_scroll_reversal_drops_opposing_residue() {
+        let mut scroll = PaneScrollState::default();
+
+        assert_eq!(scroll.accumulate(0.8, true), 0);
+        assert_eq!(scroll.accumulate(-0.25, false), 0);
+        assert!((scroll.fractional_rows + 0.25).abs() < f32::EPSILON);
+        assert_eq!(scroll.accumulate(-0.8, false), -1);
+    }
+
+    #[test]
+    fn a_new_scroll_gesture_does_not_inherit_old_residue() {
+        let mut scroll = PaneScrollState::default();
+
+        assert_eq!(scroll.accumulate(0.8, true), 0);
+        assert_eq!(scroll.accumulate(0.25, true), 0);
+        assert!((scroll.fractional_rows - 0.25).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn hidden_and_replaced_panes_do_not_request_live_frames() {
+        let left = mux_workspace::PaneId::new();
+        let right = mux_workspace::PaneId::new();
+        let mut session =
+            mux_workspace::Session::with_panes("performance", &[left, right]).expect("session");
+
+        assert!(!pane_needs_live_frame(&session, Some(left), left));
+        assert!(pane_needs_live_frame(&session, Some(left), right));
+
+        session.active_tab_mut().expect("active tab").zoomed_pane = Some(left);
+        assert!(!pane_needs_live_frame(&session, None, right));
+        assert!(pane_needs_live_frame(&session, None, left));
+    }
 }

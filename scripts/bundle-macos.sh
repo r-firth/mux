@@ -38,9 +38,22 @@ app_dir=${MUX_APP_PATH:-$project_dir/target/Mux.app}
 contents_dir="$app_dir/Contents"
 macos_dir="$contents_dir/MacOS"
 frameworks_dir="$contents_dir/Frameworks"
-mkdir -p "$macos_dir" "$frameworks_dir"
+resources_dir="$contents_dir/Resources"
+mkdir -p "$macos_dir" "$frameworks_dir" "$resources_dir"
 cp "$project_dir/packaging/macos/Info.plist" "$contents_dir/Info.plist"
 cp "$target_profile_dir/mux" "$macos_dir/mux"
+
+asset_catalog_info="$resources_dir/AssetCatalogInfo.plist"
+xcrun actool \
+  --compile "$resources_dir" \
+  --platform macosx \
+  --minimum-deployment-target 13.0 \
+  --target-device mac \
+  --app-icon AppIcon \
+  --standalone-icon-behavior all \
+  --output-partial-info-plist "$asset_catalog_info" \
+  "$project_dir/packaging/macos/Assets.xcassets" >/dev/null
+rm -f "$asset_catalog_info"
 
 package_id=$(cargo pkgid -p mux)
 version=${package_id##*#}
