@@ -247,6 +247,11 @@ async fn run(
                         pane_id,
                         cwd_override,
                     } => {
+                        // Finder-launched macOS apps do not inherit PATH from
+                        // the user's shell. Resolve it here, off the UI
+                        // thread, and include it in the existing request so a
+                        // live daemon does not need restarting.
+                        let spec = spec.resolve_runtime_environment();
                         let result = client
                             .start_agent_for_pane(spec, pane_id, cwd_override)
                             .await;

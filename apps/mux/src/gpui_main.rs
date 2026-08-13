@@ -70,6 +70,8 @@ const TEXT: u32 = 0x00e8_ecf3;
 const MUTED_TEXT: u32 = 0x008c_96a8;
 const SIGNAL: u32 = 0x005e_b6e8;
 const EMBEDDED_TERMINAL_FONT: &str = "JetBrainsMono Nerd Font Mono";
+const AGENT_SHEET_MIN_WIDTH: f32 = 340.0;
+const AGENT_SHEET_MAX_WIDTH: f32 = 720.0;
 
 gpui::actions!(mux_agent, [CancelAgentTurn]);
 
@@ -102,6 +104,17 @@ enum AgentContextMode {
     Pane,
 }
 
+#[derive(Clone)]
+struct AgentSheetResize;
+
+struct AgentSheetResizePreview;
+
+impl Render for AgentSheetResizePreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
 struct MuxApp {
     focus_handle: FocusHandle,
     backend: BackendHandle,
@@ -120,6 +133,7 @@ struct MuxApp {
     _agent_input_subscription: gpui::Subscription,
     pending_agent_prompt: Option<AgentPrompt>,
     agent_scroll: ScrollHandle,
+    agent_sheet_width: Option<f32>,
     expanded_agent_items: HashSet<String>,
     agent_toggle_prefix: bool,
     agent_context: AgentContextMode,
@@ -223,6 +237,7 @@ impl MuxApp {
             _agent_input_subscription: agent_input_subscription,
             pending_agent_prompt: None,
             agent_scroll: ScrollHandle::new(),
+            agent_sheet_width: None,
             expanded_agent_items: HashSet::new(),
             agent_toggle_prefix: false,
             agent_context: AgentContextMode::Pane,
@@ -771,19 +786,12 @@ impl MuxApp {
         self.backend.send(CommandMessage::ListAgents);
         self.agent_scroll.scroll_to_bottom();
         self.agent_toggle_prefix = false;
-        let sheet_width = (f32::from(window.viewport_size().width) * 0.46).clamp(410.0, 560.0);
-        // Give the nested timeline the space between gpui-component's title
-        // and footer so its local scroll handle—not the sheet's private outer
-        // scroller—owns overflow. The component rows are 36 px and 60 px.
-        let sheet_body_height =
-            (f32::from(window.viewport_size().height) - layout::TAB_BAR_HEIGHT - 36.0 - 60.0)
-                .max(0.0);
         let app = cx.weak_entity();
         window.open_sheet(cx, move |sheet, window, cx| {
             let Some(entity) = app.upgrade() else {
                 return sheet;
             };
-            let (picker, agent, scroll, expanded_items, empty_state, title, footer) = {
+            let (picker, agent, scroll, expanded_items, empty_state, title, footer, sheet_width) = {
                 let this = entity.read(cx);
                 let picker = (this.agents_for_active_tab().count() > 1)
                     .then(|| agent_session_picker(&app, this).into_any_element());
@@ -795,6 +803,10 @@ impl MuxApp {
                     .then(|| agent_empty_state(this).into_any_element());
                 let title = agent_sheet_title(this).into_any_element();
                 let footer = agent_composer(&app, this).into_any_element();
+                let sheet_width = resolved_agent_sheet_width(
+                    f32::from(window.viewport_size().width),
+                    this.agent_sheet_width,
+                );
                 (
                     picker,
                     agent,
@@ -803,8 +815,17 @@ impl MuxApp {
                     empty_state,
                     title,
                     footer,
+                    sheet_width,
                 )
             };
+
+            // Give the nested timeline the space between gpui-component's
+            // title and footer so its local scroll handle—not the sheet's
+            // private outer scroller—owns overflow. Recompute on every frame
+            // so resizing the window cannot leave stale sheet geometry.
+            let sheet_body_height =
+                (f32::from(window.viewport_size().height) - layout::TAB_BAR_HEIGHT - 36.0 - 60.0)
+                    .max(0.0);
 
             let escape_app = app.clone();
             let cancel_app = app.clone();
@@ -816,9 +837,14 @@ impl MuxApp {
                 .on_action(move |_: &CancelAgentTurn, window, cx| {
                     cancel_or_close_agent_sheet(&cancel_app, window, cx);
                 })
+                .relative()
+                .w_full()
                 .h_full()
+                .min_w_0()
                 .min_h_0()
-                .gap_2();
+                .px_4()
+                .gap_2()
+                .child(agent_sheet_resize_handle(&app));
             if let Some(picker) = picker {
                 content = content.child(picker);
             }
@@ -844,6 +870,7 @@ impl MuxApp {
                 .overlay_closable(false)
                 .h(px(sheet_body_height))
                 .overflow_hidden()
+                .px_0()
                 .pt_1()
                 .pb_0()
                 .footer(footer)
@@ -1945,6 +1972,57 @@ fn window_control_dot(
         })
 }
 
+fn resolved_agent_sheet_width(viewport_width: f32, preferred: Option<f32>) -> f32 {
+    let maximum = (viewport_width - 24.0).clamp(280.0, AGENT_SHEET_MAX_WIDTH);
+    let minimum = AGENT_SHEET_MIN_WIDTH.min(maximum);
+    let responsive_default = if viewport_width < 760.0 {
+        maximum
+    } else {
+        (viewport_width * 0.46).clamp(410.0, 600.0)
+    };
+    preferred
+        .unwrap_or(responsive_default)
+        .clamp(minimum, maximum)
+}
+
+fn agent_sheet_resize_handle(app: &gpui::WeakEntity<MuxApp>) -> impl IntoElement {
+    let resize_app = app.clone();
+    div()
+        .id("agent-sheet-resize-handle")
+        .group("agent-sheet-resize-handle")
+        .absolute()
+        .top_0()
+        .left_0()
+        .h_full()
+        .w(px(9.0))
+        .cursor_col_resize()
+        .on_drag(AgentSheetResize, |_, _, _, cx| {
+            cx.new(|_| AgentSheetResizePreview)
+        })
+        .on_drag_move(
+            move |event: &gpui::DragMoveEvent<AgentSheetResize>, window, cx| {
+                let requested =
+                    f32::from(window.viewport_size().width) - f32::from(event.event.position.x);
+                let _ = resize_app.update(cx, |this, cx| {
+                    this.agent_sheet_width = Some(resolved_agent_sheet_width(
+                        f32::from(window.viewport_size().width),
+                        Some(requested),
+                    ));
+                    cx.notify();
+                });
+                window.refresh();
+            },
+        )
+        .child(
+            div()
+                .ml(px(4.0))
+                .h_full()
+                .w(px(1.0))
+                .bg(rgb(BORDER))
+                .group_hover("agent-sheet-resize-handle", |style| style.bg(rgb(SIGNAL))),
+        )
+}
+
 fn close_agent_sheet(app: &gpui::WeakEntity<MuxApp>, window: &mut Window, cx: &mut App) {
     let _ = app.update(cx, |this, cx| {
         this.agent_toggle_prefix = false;
@@ -2030,7 +2108,7 @@ fn cancel_or_close_agent_sheet(app: &gpui::WeakEntity<MuxApp>, window: &mut Wind
 }
 
 fn agent_session_picker(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl IntoElement {
-    let mut picker = h_flex().gap_1().pb_1().flex_wrap();
+    let mut picker = h_flex().w_full().min_w_0().gap_1().pb_1().flex_wrap();
     let selected = this.active_agent().map(|agent| agent.id);
     for agent in this.agents_for_active_tab() {
         let session_id = agent.id;
@@ -2083,17 +2161,22 @@ fn agent_sheet_title(this: &MuxApp) -> impl IntoElement {
             )
         });
     h_flex()
+        .w_full()
+        .min_w_0()
+        .overflow_hidden()
         .gap_2()
         .child(
             div()
                 .size(px(6.0))
+                .flex_none()
                 .rounded_full()
                 .bg(status.map_or(rgb(MUTED_TEXT), status_color)),
         )
-        .child(name)
+        .child(div().min_w_0().flex_1().truncate().child(name))
         .when_some(status, |title, status| {
             title.child(
                 div()
+                    .flex_none()
                     .text_xs()
                     .font_normal()
                     .text_color(rgb(MUTED_TEXT))
@@ -2103,37 +2186,54 @@ fn agent_sheet_title(this: &MuxApp) -> impl IntoElement {
 }
 
 fn agent_empty_state(this: &MuxApp) -> impl IntoElement {
-    let profiles = this
+    let mut profiles = this
         .enabled_profiles()
-        .map(|profile| profile.id.as_str())
-        .collect::<Vec<_>>()
-        .join(" or ");
-    let profiles = if profiles.is_empty() {
-        "an enabled agent".to_owned()
-    } else {
-        profiles
+        .map(|profile| profile.name.as_str())
+        .collect::<Vec<_>>();
+    let profiles = match profiles.pop() {
+        None => "an enabled agent".to_owned(),
+        Some(last) if profiles.is_empty() => last.to_owned(),
+        Some(last) if profiles.len() == 1 => format!("{} or {last}", profiles[0]),
+        Some(last) => format!("{}, or {last}", profiles.join(", ")),
     };
     v_flex()
+        .w_full()
+        .min_w_0()
         .flex_1()
         .items_center()
         .justify_center()
         .gap_2()
-        .px_8()
+        .px_5()
+        .overflow_hidden()
         .text_center()
         .child(
             Icon::new(IconName::Bot)
                 .size(px(24.0))
                 .text_color(rgb(MUTED_TEXT)),
         )
-        .child(div().font_semibold().child("Start from the prompt"))
-        .child(div().text_sm().text_color(rgb(MUTED_TEXT)).child(format!(
-            "Type a message to start {profiles}, or use /new <agent> [cwd]."
-        )))
+        .child(div().font_semibold().child("Start an agent"))
         .child(
             div()
+                .w_full()
+                .max_w(px(420.0))
+                .min_w_0()
+                .whitespace_normal()
+                .text_sm()
+                .line_height(px(20.0))
+                .text_color(rgb(MUTED_TEXT))
+                .child(format!(
+                    "Message {profiles}. Use /new <agent> [cwd] to choose."
+                )),
+        )
+        .child(
+            div()
+                .w_full()
+                .max_w(px(420.0))
+                .min_w_0()
+                .whitespace_normal()
                 .text_xs()
                 .text_color(rgb(MUTED_TEXT))
-                .child("Working directory defaults to the focused terminal pane."),
+                .child("Starts in the focused pane's directory."),
         )
 }
 
@@ -2150,16 +2250,20 @@ fn agent_composer(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl IntoEle
             cancel_or_close_agent_sheet(&cancel_app, window, cx);
         })
         .w_full()
+        .min_w_0()
         .flex_none()
+        .overflow_hidden()
         .gap_0()
         .child(
             h_flex()
                 .w_full()
+                .min_w_0()
                 .items_end()
                 .gap_2()
                 .child(Input::new(&this.agent_input).min_w_0().flex_1())
                 .child(
                     Button::new("agent-send")
+                        .flex_none()
                         .icon(IconName::ArrowUp)
                         .primary()
                         .small()
@@ -2195,10 +2299,13 @@ fn agent_timeline(
     }
     let mut timeline = v_flex()
         .id(SharedString::from(format!("agent-timeline-{}", agent.id)))
+        .w_full()
         .flex_1()
+        .min_w_0()
         .min_h_0()
         .gap_2()
         .track_scroll(scroll)
+        .overflow_x_hidden()
         .overflow_y_scroll()
         .vertical_scrollbar(scroll)
         .pr_3()
@@ -2256,6 +2363,8 @@ fn agent_message_item(
     };
     let mut message = v_flex()
         .w_full()
+        .min_w_0()
+        .overflow_hidden()
         .gap_1()
         .px_2()
         .py_1p5()
@@ -2276,6 +2385,9 @@ fn agent_message_item(
     if role == AgentMessageRole::User {
         message = message.bg(rgb(CHROME_RAISED)).child(
             div()
+                .w_full()
+                .min_w_0()
+                .whitespace_normal()
                 .text_sm()
                 .line_height(px(20.0))
                 .child(text.trim().to_owned()),
@@ -2353,11 +2465,13 @@ fn thinking_item(
                 .text_color(rgb(MUTED_TEXT)),
             );
     }
-    let mut item = v_flex().w_full().gap_1().child(header);
+    let mut item = v_flex().w_full().min_w_0().gap_1().child(header);
     if expanded {
         item = item.child(
             div()
                 .ml_6()
+                .min_w_0()
+                .overflow_hidden()
                 .pl_3()
                 .border_l_1()
                 .border_color(rgb(BORDER))
@@ -2438,7 +2552,7 @@ fn agent_tool_item(
             .text_color(rgb(MUTED_TEXT)),
         );
 
-    let mut item = v_flex().w_full().gap_1().child(header);
+    let mut item = v_flex().w_full().min_w_0().gap_1().child(header);
     if expanded {
         item = item.child(agent_tool_details(tool));
     }
@@ -2447,8 +2561,10 @@ fn agent_tool_item(
 
 fn agent_tool_details(tool: &AgentTool) -> gpui::AnyElement {
     let mut details = v_flex()
+        .min_w_0()
         .ml_4()
         .mr_1()
+        .overflow_hidden()
         .gap_2()
         .p_3()
         .rounded_b_lg()
@@ -2473,6 +2589,9 @@ fn agent_tool_details(tool: &AgentTool) -> gpui::AnyElement {
     } else {
         details = details.child(
             div()
+                .w_full()
+                .min_w_0()
+                .whitespace_normal()
                 .text_xs()
                 .text_color(rgb(MUTED_TEXT))
                 .child("This agent did not publish captured output over ACP."),
@@ -2484,6 +2603,7 @@ fn agent_tool_details(tool: &AgentTool) -> gpui::AnyElement {
 fn tool_detail_section(label: &'static str, value: &str) -> gpui::AnyElement {
     v_flex()
         .w_full()
+        .min_w_0()
         .gap_1()
         .child(
             div()
@@ -2495,6 +2615,9 @@ fn tool_detail_section(label: &'static str, value: &str) -> gpui::AnyElement {
         .child(
             div()
                 .w_full()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_normal()
                 .p_2()
                 .rounded_md()
                 .bg(rgb(SURFACE))
@@ -2509,6 +2632,9 @@ fn tool_detail_section(label: &'static str, value: &str) -> gpui::AnyElement {
 fn agent_event_item(item: &AgentTimelineItem) -> gpui::AnyElement {
     let (label, text, color) = timeline_item(item);
     v_flex()
+        .w_full()
+        .min_w_0()
+        .overflow_hidden()
         .gap_1()
         .px_2()
         .py_1()
@@ -2519,7 +2645,15 @@ fn agent_event_item(item: &AgentTimelineItem) -> gpui::AnyElement {
                 .text_color(color)
                 .child(label),
         )
-        .child(div().text_sm().line_height(px(20.0)).child(text))
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .whitespace_normal()
+                .text_sm()
+                .line_height(px(20.0))
+                .child(text),
+        )
         .into_any_element()
 }
 
@@ -2545,6 +2679,10 @@ fn agent_markdown(
     TextView::markdown(id, markdown, window, cx)
         .style(style)
         .selectable(true)
+        .w_full()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_normal()
         .text_sm()
         .line_height(px(20.0))
 }
@@ -2681,7 +2819,7 @@ fn agent_permission_controls(
     app: &gpui::WeakEntity<MuxApp>,
     agent: &AgentSessionSnapshot,
 ) -> impl IntoElement {
-    let mut controls = v_flex();
+    let mut controls = v_flex().w_full().min_w_0();
     if let Some(permission) = agent.pending_permission() {
         controls = controls
             .gap_2()
@@ -2689,8 +2827,15 @@ fn agent_permission_controls(
             .rounded_lg()
             .border_1()
             .border_color(rgb(0x009f_7aea))
-            .child(div().font_semibold().child(permission.title.clone()));
-        let mut buttons = h_flex().gap_2().flex_wrap();
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .whitespace_normal()
+                    .font_semibold()
+                    .child(permission.title.clone()),
+            );
+        let mut buttons = h_flex().w_full().min_w_0().gap_2().flex_wrap();
         for option in &permission.options {
             let resolve_app = app.clone();
             let session_id = agent.id;
@@ -2723,7 +2868,7 @@ fn agent_auth_controls(
     app: &gpui::WeakEntity<MuxApp>,
     agent: &AgentSessionSnapshot,
 ) -> impl IntoElement {
-    let mut controls = h_flex().gap_2().flex_wrap();
+    let mut controls = h_flex().w_full().min_w_0().gap_2().flex_wrap();
     if agent.status == AgentSessionStatus::WaitingForAuthentication {
         for method in &agent.auth_methods {
             let auth_app = app.clone();
