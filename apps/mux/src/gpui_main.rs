@@ -26,8 +26,8 @@ use gpui::{
     px, rgb, size,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, InteractiveElementExt as _, Selectable as _, Sizable as _,
-    StyledExt as _, Theme, ThemeMode, TitleBar, WindowExt as _,
+    Icon, IconName, InteractiveElementExt as _, Selectable as _, Sizable as _, StyledExt as _,
+    Theme, ThemeMode, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Enter, Input, InputEvent, InputState},
@@ -35,7 +35,6 @@ use gpui_component::{
     scroll::ScrollableElement as _,
     spinner::Spinner,
     switch::Switch,
-    text::{TextView, TextViewStyle},
     v_flex,
 };
 use gpui_terminal::GridMetrics;
@@ -55,8 +54,8 @@ use mux_terminal::{
 };
 use mux_terminal_ghostty::{GhosttyEngine, GhosttyFont, GhosttyTheme};
 use mux_workspace::{
-    Action, AgentSessionId, InputMode, Key as MuxKey, KeyChord, Keymap, Modifiers, PaneId, Session,
-    TabId, WorkspaceCommand,
+    Action, AgentSessionId, Direction, InputMode, Key as MuxKey, KeyChord, Keymap, Modifiers,
+    PaneId, Session, TabId, WorkspaceCommand,
 };
 use settings::AppSettings;
 use tracing::{error, info};
@@ -71,10 +70,18 @@ const TEXT: u32 = 0x00e8_ecf3;
 const MUTED_TEXT: u32 = 0x008c_96a8;
 const SIGNAL: u32 = 0x005e_b6e8;
 const EMBEDDED_TERMINAL_FONT: &str = "JetBrainsMono Nerd Font Mono";
-const AGENT_SHEET_MIN_WIDTH: f32 = 340.0;
-const AGENT_SHEET_MAX_WIDTH: f32 = 720.0;
-
-gpui::actions!(mux_agent, [CancelAgentTurn, QuitMux, ReturnToTerminal]);
+gpui::actions!(
+    mux_agent,
+    [
+        CancelAgentTurn,
+        NavigateAgentDown,
+        NavigateAgentLeft,
+        NavigateAgentRight,
+        NavigateAgentUp,
+        QuitMux,
+        ToggleAgentPane
+    ]
+);
 
 enum UserEvent {
     Attached(SessionAttachment),
@@ -102,30 +109,7 @@ struct SelectionPointer {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AgentContextMode {
     None,
-    Pane,
-}
-
-#[derive(Clone)]
-struct AgentSheetResize;
-
-struct AgentSheetResizePreview;
-
-impl Render for AgentSheetResizePreview {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        gpui::Empty
-    }
-}
-
-struct AgentSheetSnapshot {
-    picker: Option<gpui::AnyElement>,
-    agent: Option<AgentSessionSnapshot>,
-    scroll: ScrollHandle,
-    expanded_items: HashSet<String>,
-    show_help: bool,
-    empty_state: Option<gpui::AnyElement>,
-    title: gpui::AnyElement,
-    footer: gpui::AnyElement,
-    width: f32,
+    Tab,
 }
 
 struct MuxApp {
@@ -145,11 +129,12 @@ struct MuxApp {
     agent_input: Entity<InputState>,
     _agent_input_subscription: gpui::Subscription,
     pending_agent_prompt: Option<AgentPrompt>,
-    agent_scroll: ScrollHandle,
-    agent_sheet_width: Option<f32>,
+    agent_panes: HashMap<TabId, PaneId>,
+    agent_scrolls: HashMap<TabId, ScrollHandle>,
+    agent_follow_tail: HashSet<TabId>,
+    agent_scroll_needs_settle: HashSet<TabId>,
     agent_help_tabs: HashSet<TabId>,
     expanded_agent_items: HashSet<String>,
-    agent_toggle_prefix: bool,
     agent_context: AgentContextMode,
     selected_pane: Option<PaneId>,
     selection_drag: Option<PaneId>,
@@ -199,9 +184,7 @@ impl MuxApp {
             "measured terminal grid"
         );
         let agent_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .auto_grow(1, 5)
-                .placeholder("Message an agent · /help for commands…")
+            InputState::new(window, cx).placeholder("Message an agent · /help for commands…")
         });
         let agent_input_subscription = cx.subscribe_in(
             &agent_input,
@@ -250,12 +233,13 @@ impl MuxApp {
             agent_input,
             _agent_input_subscription: agent_input_subscription,
             pending_agent_prompt: None,
-            agent_scroll: ScrollHandle::new(),
-            agent_sheet_width: None,
+            agent_panes: HashMap::new(),
+            agent_scrolls: HashMap::new(),
+            agent_follow_tail: HashSet::new(),
+            agent_scroll_needs_settle: HashSet::new(),
             agent_help_tabs: HashSet::new(),
             expanded_agent_items: HashSet::new(),
-            agent_toggle_prefix: false,
-            agent_context: AgentContextMode::Pane,
+            agent_context: AgentContextMode::Tab,
             selected_pane: None,
             selection_drag: None,
             mouse_reporting_pane: None,
@@ -271,7 +255,13 @@ impl MuxApp {
 
     fn apply_user_event(&mut self, event: UserEvent, window: &mut Window, cx: &mut Context<Self>) {
         let result = match event {
-            UserEvent::Attached(attachment) => self.attach(attachment),
+            UserEvent::Attached(attachment) => {
+                let attached = self.attach(attachment);
+                if attached.is_ok() && self.active_agent_pane() == self.focused_pane_id() {
+                    self.focus_agent_composer(window);
+                }
+                attached
+            }
             UserEvent::Sessions(sessions) => {
                 self.sessions = sessions;
                 Ok(())
@@ -287,24 +277,35 @@ impl MuxApp {
                 self.selected_agents.retain(|tab_id, selection| {
                     selection.is_none_or(|session_id| valid.contains(&(*tab_id, session_id)))
                 });
-                self.agent_scroll.scroll_to_bottom();
+                if let Some(tab_id) = self.active_tab_id()
+                    && self.agent_follow_tail.contains(&tab_id)
+                {
+                    self.agent_scroll_needs_settle.insert(tab_id);
+                    self.agent_scroll_for(tab_id).scroll_to_bottom();
+                }
                 Ok(())
             }
             UserEvent::AgentStarted(agent) => {
                 let session_id = agent.id;
                 if let Some(tab_id) = agent.tab_id {
                     self.selected_agents.insert(tab_id, Some(session_id));
+                    self.agent_follow_tail.insert(tab_id);
+                    self.agent_scroll_needs_settle.insert(tab_id);
+                    self.agent_scroll_for(tab_id).scroll_to_bottom();
                 }
                 self.agents.push(agent);
                 if let Some(prompt) = self.pending_agent_prompt.take() {
                     self.backend
                         .send(CommandMessage::PromptAgent { session_id, prompt });
                 }
-                self.agent_scroll.scroll_to_bottom();
                 Ok(())
             }
             UserEvent::Agent(event) => {
-                let follow_tail = self.agent_scroll_is_near_bottom();
+                let tab_id = self
+                    .agents
+                    .iter()
+                    .find(|agent| agent.id == event.session_id())
+                    .and_then(|agent| agent.tab_id);
                 if let Some(agent) = self
                     .agents
                     .iter_mut()
@@ -314,8 +315,10 @@ impl MuxApp {
                 } else {
                     self.backend.send(CommandMessage::ListAgents);
                 }
-                if follow_tail {
-                    self.agent_scroll.scroll_to_bottom();
+                if let Some(tab_id) = tab_id
+                    && self.agent_follow_tail.contains(&tab_id)
+                {
+                    self.agent_scroll_for(tab_id).scroll_to_bottom();
                 }
                 Ok(())
             }
@@ -365,6 +368,20 @@ impl MuxApp {
         // checkpoint's previous dimensions indefinitely.
         self.sent_sizes.clear();
         self.panes = panes;
+        let valid_agent_panes = self
+            .session
+            .as_ref()
+            .into_iter()
+            .flat_map(|session| &session.tabs)
+            .filter_map(|tab| {
+                self.agent_panes
+                    .get(&tab.id)
+                    .copied()
+                    .filter(|pane_id| tab.layout.contains(*pane_id))
+                    .map(|pane_id| (tab.id, pane_id))
+            })
+            .collect::<HashMap<_, _>>();
+        self.agent_panes = valid_agent_panes;
         Ok(())
     }
 
@@ -408,6 +425,84 @@ impl MuxApp {
 
     fn active_tab_id(&self) -> Option<TabId> {
         self.session.as_ref().map(|session| session.active_tab)
+    }
+
+    fn active_agent_pane(&self) -> Option<PaneId> {
+        let tab = self.session.as_ref()?.active_tab()?;
+        self.agent_panes
+            .get(&tab.id)
+            .copied()
+            .filter(|pane_id| tab.layout.contains(*pane_id))
+    }
+
+    fn agent_scroll_for(&mut self, tab_id: TabId) -> ScrollHandle {
+        self.agent_scrolls.entry(tab_id).or_default().clone()
+    }
+
+    fn follow_active_agent_tail(&mut self) {
+        if let Some(tab_id) = self.active_tab_id() {
+            self.agent_follow_tail.insert(tab_id);
+            self.agent_scroll_needs_settle.insert(tab_id);
+            self.agent_scroll_for(tab_id).scroll_to_bottom();
+        }
+    }
+
+    fn focus_agent_composer(&self, window: &mut Window) {
+        let input = self.agent_input.clone();
+        window.on_next_frame(move |window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx));
+        });
+    }
+
+    fn toggle_agent_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab_id) = self.active_tab_id() else {
+            return;
+        };
+        let Some(pane_id) = self.focused_pane_id() else {
+            return;
+        };
+        if self.agent_panes.get(&tab_id) == Some(&pane_id) {
+            self.agent_panes.remove(&tab_id);
+            self.agent_follow_tail.remove(&tab_id);
+            self.agent_scroll_needs_settle.remove(&tab_id);
+            self.focus_handle.focus(window);
+        } else {
+            self.agent_panes.insert(tab_id, pane_id);
+            self.agent_follow_tail.insert(tab_id);
+            self.agent_scroll_needs_settle.insert(tab_id);
+            self.agent_scroll_for(tab_id).scroll_to_bottom();
+            self.backend.send(CommandMessage::ListAgents);
+            self.focus_agent_composer(window);
+        }
+        self.mode = InputMode::Normal;
+        cx.notify();
+    }
+
+    fn return_agent_pane_to_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab_id) = self.active_tab_id() {
+            self.agent_panes.remove(&tab_id);
+            self.agent_follow_tail.remove(&tab_id);
+            self.agent_scroll_needs_settle.remove(&tab_id);
+        }
+        self.focus_handle.focus(window);
+        self.mode = InputMode::Normal;
+        cx.notify();
+    }
+
+    fn navigate_from_agent_pane(
+        &mut self,
+        direction: Direction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let command = if matches!(direction, Direction::Left | Direction::Right) {
+            WorkspaceCommand::FocusPaneOrTab(direction)
+        } else {
+            WorkspaceCommand::FocusPane(direction)
+        };
+        self.send_workspace(command);
+        self.focus_handle.focus(window);
+        cx.notify();
     }
 
     fn agents_for_active_tab(&self) -> impl Iterator<Item = &AgentSessionSnapshot> {
@@ -460,6 +555,13 @@ impl MuxApp {
             cx.propagate();
             return;
         }
+        if self.active_agent_pane() == self.focused_pane_id() {
+            // The focused pane is currently a native agent surface. Its input
+            // and modal-key handlers own this event; never leak it through to
+            // the live terminal process hidden behind the surface.
+            cx.propagate();
+            return;
+        }
 
         let Some(chord) = key_chord(&event.keystroke) else {
             self.send_terminal_key(&event.keystroke, false, event.is_held);
@@ -477,6 +579,10 @@ impl MuxApp {
 
     fn handle_key_up(&mut self, event: &KeyUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         if window.has_active_dialog(cx) || window.has_active_sheet(cx) {
+            cx.propagate();
+            return;
+        }
+        if self.active_agent_pane() == self.focused_pane_id() {
             cx.propagate();
             return;
         }
@@ -787,93 +893,7 @@ impl MuxApp {
     }
 
     fn toggle_agents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if window.has_active_sheet(cx) {
-            window.close_sheet(cx);
-            self.agent_toggle_prefix = false;
-            self.focus_handle.focus(window);
-            self.mode = InputMode::Normal;
-            return;
-        }
-        self.open_agents(window, cx);
-    }
-
-    fn open_agents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.backend.send(CommandMessage::ListAgents);
-        self.agent_scroll.scroll_to_bottom();
-        self.agent_toggle_prefix = false;
-        let app = cx.weak_entity();
-        window.open_sheet(cx, move |sheet, window, cx| {
-            let Some(entity) = app.upgrade() else {
-                return sheet;
-            };
-            let snapshot = {
-                let this = entity.read(cx);
-                agent_sheet_snapshot(&app, this, f32::from(window.viewport_size().width))
-            };
-
-            let sheet_body_height =
-                (f32::from(window.viewport_size().height) - layout::TAB_BAR_HEIGHT - 36.0 - 60.0)
-                    .max(0.0);
-
-            let escape_app = app.clone();
-            let cancel_app = app.clone();
-            let return_app = app.clone();
-            let mut content = v_flex()
-                .key_context("MuxAgentSheet")
-                .capture_key_down(move |event, window, cx| {
-                    handle_agent_sheet_key_down(&escape_app, event, window, cx);
-                })
-                .on_action(move |_: &CancelAgentTurn, window, cx| {
-                    cancel_or_close_agent_sheet(&cancel_app, window, cx);
-                })
-                .on_action(move |_: &ReturnToTerminal, window, cx| {
-                    close_agent_sheet(&return_app, window, cx);
-                    cx.stop_propagation();
-                })
-                .relative()
-                .w_full()
-                .h_full()
-                .min_w_0()
-                .min_h_0()
-                .px_4()
-                .gap_2()
-                .child(agent_sheet_resize_handle(&app));
-            if let Some(picker) = snapshot.picker {
-                content = content.child(picker);
-            }
-            if let Some(agent) = snapshot.agent.as_ref() {
-                content = content.child(agent_timeline(
-                    &app,
-                    agent,
-                    &snapshot.scroll,
-                    &snapshot.expanded_items,
-                    snapshot.show_help,
-                    window,
-                    cx,
-                ));
-                content = content.child(agent_auth_controls(&app, agent));
-                content = content.child(agent_permission_controls(&app, agent));
-            } else if snapshot.show_help {
-                content = content.child(agent_help_surface(None));
-            } else if let Some(empty_state) = snapshot.empty_state {
-                content = content.child(empty_state);
-            }
-            sheet
-                .title(snapshot.title)
-                .size(px(snapshot.width))
-                .margin_top(px(layout::TAB_BAR_HEIGHT))
-                .overlay(false)
-                .overlay_closable(false)
-                .h(px(sheet_body_height))
-                .overflow_hidden()
-                .px_0()
-                .pt_1()
-                .pb_0()
-                .footer(snapshot.footer)
-                .child(content)
-        });
-        self.agent_input
-            .update(cx, |input, cx| input.focus(window, cx));
+        self.toggle_agent_pane(window, cx);
     }
 
     fn submit_agent_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -887,6 +907,9 @@ impl MuxApp {
                 input.set_value("", window, cx);
             });
             return;
+        }
+        if let Some(tab_id) = self.active_tab_id() {
+            self.agent_help_tabs.remove(&tab_id);
         }
         let Some(session_id) = self
             .active_agent()
@@ -909,6 +932,7 @@ impl MuxApp {
                 context: self.agent_prompt_context().unwrap_or_default(),
             };
             self.pending_agent_prompt = Some(prompt);
+            self.follow_active_agent_tail();
             self.start_agent(profile, None);
             self.agent_input.update(cx, |input, cx| {
                 input.set_value("", window, cx);
@@ -916,6 +940,7 @@ impl MuxApp {
             return;
         };
         let context = self.agent_prompt_context().unwrap_or_default();
+        self.follow_active_agent_tail();
         self.backend.send(CommandMessage::PromptAgent {
             session_id,
             prompt: AgentPrompt {
@@ -974,10 +999,12 @@ impl MuxApp {
             "context" => {
                 self.agent_context = match parts.next() {
                     Some("none" | "off") => AgentContextMode::None,
-                    Some("pane" | "screen" | "on") | None => AgentContextMode::Pane,
+                    Some("tab" | "panes" | "pane" | "screen" | "on") | None => {
+                        AgentContextMode::Tab
+                    }
                     Some(_) => {
                         window.push_notification(
-                            Notification::warning("Usage: /context pane|none"),
+                            Notification::warning("Usage: /context tab|none"),
                             cx,
                         );
                         return true;
@@ -1005,7 +1032,7 @@ impl MuxApp {
             "help" => {
                 if let Some(tab_id) = self.active_tab_id() {
                     self.agent_help_tabs.insert(tab_id);
-                    self.agent_scroll.scroll_to_bottom();
+                    self.follow_active_agent_tail();
                     cx.notify();
                 }
             }
@@ -1059,7 +1086,7 @@ impl MuxApp {
             index
         };
         self.select_active_tab_agent(Some(agents[next]));
-        self.agent_scroll.scroll_to_bottom();
+        self.follow_active_agent_tail();
     }
 
     fn select_agent(
@@ -1094,8 +1121,9 @@ impl MuxApp {
                 })
             });
         if let Some(index) = index {
-            self.select_active_tab_agent(Some(agents[index].id));
-            self.agent_scroll.scroll_to_bottom();
+            let session_id = agents[index].id;
+            self.select_active_tab_agent(Some(session_id));
+            self.follow_active_agent_tail();
         } else {
             window.push_notification(Notification::warning("Unknown agent session"), cx);
         }
@@ -1254,10 +1282,6 @@ impl MuxApp {
             .filter(|profile| self.settings.agent_enabled(&profile.id))
     }
 
-    fn agent_scroll_is_near_bottom(&self) -> bool {
-        agent_scroll_is_near_bottom(&self.agent_scroll)
-    }
-
     fn start_agent(&self, profile: AgentProfile, cwd_override: Option<PathBuf>) {
         if let Some(pane_id) = self.focused_pane_id() {
             self.backend.send(CommandMessage::StartAgent {
@@ -1272,19 +1296,31 @@ impl MuxApp {
         if self.agent_context == AgentContextMode::None {
             return Ok(Vec::new());
         }
-        let pane_id = self
-            .focused_pane_id()
-            .ok_or_else(|| anyhow!("No focused pane is available"))?;
-        let pane = self
-            .panes
-            .get(&pane_id)
-            .ok_or_else(|| anyhow!("Focused pane is unavailable"))?;
-        Ok(vec![AgentContext {
-            kind: AgentContextKind::TerminalViewport,
-            pane_id,
-            label: "focused terminal pane".to_owned(),
-            text: terminal_frame_text(&pane.frame),
-        }])
+        let tab = self
+            .session
+            .as_ref()
+            .and_then(Session::active_tab)
+            .ok_or_else(|| anyhow!("No active tab is available"))?;
+        let agent_pane = self.agent_panes.get(&tab.id).copied();
+        let mut pane_ids = Vec::new();
+        tab.layout.pane_ids(&mut pane_ids);
+        let pane_ids = pane_ids
+            .into_iter()
+            .filter(|pane_id| Some(*pane_id) != agent_pane)
+            .collect::<Vec<_>>();
+        let pane_count = pane_ids.len();
+        Ok(pane_ids
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, pane_id)| {
+                self.panes.get(&pane_id).map(|pane| AgentContext {
+                    kind: AgentContextKind::TerminalViewport,
+                    pane_id,
+                    label: format!("terminal pane {} of {pane_count} in active tab", index + 1),
+                    text: terminal_frame_text(&pane.frame),
+                })
+            })
+            .collect())
     }
 
     fn selection_pointer(
@@ -1611,6 +1647,171 @@ impl MuxApp {
         geometry
     }
 
+    #[allow(clippy::too_many_lines)]
+    fn render_agent_pane(
+        &mut self,
+        pane_id: PaneId,
+        rect: layout::Rect,
+        focused: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Some(tab_id) = self.active_tab_id() else {
+            return gpui::Empty.into_any_element();
+        };
+        let app = cx.weak_entity();
+        let scroll = self.agent_scroll_for(tab_id);
+        let follow_tail = self.agent_follow_tail.contains(&tab_id);
+        let settle_scroll = self.agent_scroll_needs_settle.remove(&tab_id);
+        let agent = self.active_agent().cloned();
+        let show_help = self.agent_help_tabs.contains(&tab_id);
+        let other_panes = self
+            .session
+            .as_ref()
+            .and_then(Session::active_tab)
+            .map(|tab| {
+                let mut pane_ids = Vec::new();
+                tab.layout.pane_ids(&mut pane_ids);
+                pane_ids.into_iter().filter(|id| *id != pane_id).count()
+            })
+            .unwrap_or_default();
+        let expanded_items = self.expanded_agent_items.clone();
+        let picker = (self.agents_for_active_tab().count() > 1)
+            .then(|| agent_session_picker(&app, self).into_any_element());
+
+        let keyboard_app = app.clone();
+        let cancel_app = app.clone();
+        let navigate_left_app = app.clone();
+        let navigate_right_app = app.clone();
+        let navigate_up_app = app.clone();
+        let navigate_down_app = app.clone();
+        let focus_app = app.clone();
+        let mut body = v_flex()
+            .key_context("MuxAgentPane")
+            .capture_key_down(move |event, window, cx| {
+                handle_agent_pane_key_down(&keyboard_app, event, window, cx);
+            })
+            .on_action(move |_: &CancelAgentTurn, window, cx| {
+                cancel_agent_turn(&cancel_app, window, cx);
+            })
+            .on_action(move |_: &NavigateAgentLeft, window, cx| {
+                navigate_agent_pane(&navigate_left_app, Direction::Left, window, cx);
+                cx.stop_propagation();
+            })
+            .on_action(move |_: &NavigateAgentRight, window, cx| {
+                navigate_agent_pane(&navigate_right_app, Direction::Right, window, cx);
+                cx.stop_propagation();
+            })
+            .on_action(move |_: &NavigateAgentUp, window, cx| {
+                navigate_agent_pane(&navigate_up_app, Direction::Up, window, cx);
+                cx.stop_propagation();
+            })
+            .on_action(move |_: &NavigateAgentDown, window, cx| {
+                navigate_agent_pane(&navigate_down_app, Direction::Down, window, cx);
+                cx.stop_propagation();
+            })
+            .on_action({
+                let app = app.clone();
+                move |_: &ToggleAgentPane, window, cx| {
+                    return_agent_pane(&app, window, cx);
+                    cx.stop_propagation();
+                }
+            })
+            .relative()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
+            .bg(rgb(CHROME))
+            .when(!focused, move |body| {
+                body.on_any_mouse_down(move |_, window, cx| {
+                    let _ = focus_app.update(cx, |this, _cx| {
+                        this.send_workspace(WorkspaceCommand::SetFocusedPane(pane_id));
+                        this.focus_agent_composer(window);
+                    });
+                })
+            })
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .flex_none()
+                    .h(px(34.0))
+                    .px_3()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(agent_pane_title(agent.as_ref()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w(px(120.0))
+                            .truncate()
+                            .text_xs()
+                            .text_color(rgb(MUTED_TEXT))
+                            .child(format!("{other_panes} panes · ⌃A")),
+                    ),
+            );
+        if let Some(picker) = picker {
+            body = body.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .flex_none()
+                    .overflow_hidden()
+                    .px_3()
+                    .pt_2()
+                    .child(picker),
+            );
+        }
+        if let Some(agent) = agent.as_ref() {
+            body = body.child(agent_timeline(
+                &app,
+                tab_id,
+                agent,
+                &scroll,
+                &expanded_items,
+                show_help,
+                follow_tail,
+                settle_scroll,
+                window,
+                cx,
+            ));
+            body = body.child(agent_auth_controls(&app, agent));
+            body = body.child(agent_permission_controls(&app, agent));
+        } else if show_help {
+            body = body.child(agent_help_surface(None));
+        } else {
+            body = body.child(agent_empty_state(self));
+        }
+        body = body.child(
+            div()
+                .w_full()
+                .min_w_0()
+                .flex_none()
+                .overflow_hidden()
+                .border_t_1()
+                .border_color(rgb(BORDER))
+                .p_2()
+                .child(agent_composer(&app, self)),
+        );
+
+        div()
+            .id(SharedString::from(format!("agent-pane-{pane_id}")))
+            .absolute()
+            .left(px(rect.x))
+            .top(px(rect.y))
+            .w(px(rect.width))
+            .h(px(rect.height))
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
+            .border_1()
+            .border_color(if focused { rgb(SIGNAL) } else { rgb(BORDER) })
+            .child(body)
+            .into_any_element()
+    }
+
     fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut bar = h_flex()
             .h(px(layout::TAB_BAR_HEIGHT))
@@ -1763,6 +1964,12 @@ impl Render for MuxApp {
 
         for geometry in geometry.panes {
             let pane_id = geometry.pane_id;
+            if self.active_agent_pane() == Some(pane_id) {
+                let rect = geometry.rect;
+                let focused = geometry.focused;
+                root = root.child(self.render_agent_pane(pane_id, rect, focused, window, cx));
+                continue;
+            }
             let Some(pane) = self.panes.get(&pane_id) else {
                 continue;
             };
@@ -1968,135 +2175,75 @@ fn window_control_dot(
         })
 }
 
-fn agent_sheet_snapshot(
-    app: &gpui::WeakEntity<MuxApp>,
-    this: &MuxApp,
-    viewport_width: f32,
-) -> AgentSheetSnapshot {
-    let picker = (this.agents_for_active_tab().count() > 1)
-        .then(|| agent_session_picker(app, this).into_any_element());
-    let agent = this.active_agent().cloned();
-    let show_help = this
-        .active_tab_id()
-        .is_some_and(|tab_id| this.agent_help_tabs.contains(&tab_id));
-    let empty_state =
-        (agent.is_none() && !show_help).then(|| agent_empty_state(this).into_any_element());
-    AgentSheetSnapshot {
-        picker,
-        agent,
-        scroll: this.agent_scroll.clone(),
-        expanded_items: this.expanded_agent_items.clone(),
-        show_help,
-        empty_state,
-        title: agent_sheet_title(this).into_any_element(),
-        footer: agent_composer(app, this).into_any_element(),
-        width: resolved_agent_sheet_width(viewport_width, this.agent_sheet_width),
-    }
-}
-
-fn resolved_agent_sheet_width(viewport_width: f32, preferred: Option<f32>) -> f32 {
-    let maximum = (viewport_width - 24.0).clamp(280.0, AGENT_SHEET_MAX_WIDTH);
-    let minimum = AGENT_SHEET_MIN_WIDTH.min(maximum);
-    let responsive_default = if viewport_width < 760.0 {
-        maximum
-    } else {
-        (viewport_width * 0.46).clamp(410.0, 600.0)
-    };
-    preferred
-        .unwrap_or(responsive_default)
-        .clamp(minimum, maximum)
-}
-
-fn agent_sheet_resize_handle(app: &gpui::WeakEntity<MuxApp>) -> impl IntoElement {
-    let resize_app = app.clone();
-    div()
-        .id("agent-sheet-resize-handle")
-        .group("agent-sheet-resize-handle")
-        .absolute()
-        .top_0()
-        .left_0()
-        .h_full()
-        .w(px(9.0))
-        .cursor_col_resize()
-        .on_drag(AgentSheetResize, |_, _, _, cx| {
-            cx.new(|_| AgentSheetResizePreview)
-        })
-        .on_drag_move(
-            move |event: &gpui::DragMoveEvent<AgentSheetResize>, window, cx| {
-                let requested =
-                    f32::from(window.viewport_size().width) - f32::from(event.event.position.x);
-                let _ = resize_app.update(cx, |this, cx| {
-                    this.agent_sheet_width = Some(resolved_agent_sheet_width(
-                        f32::from(window.viewport_size().width),
-                        Some(requested),
-                    ));
-                    cx.notify();
-                });
-                window.refresh();
-            },
-        )
-        .child(
-            div()
-                .ml(px(4.0))
-                .h_full()
-                .w(px(1.0))
-                .bg(rgb(BORDER))
-                .group_hover("agent-sheet-resize-handle", |style| style.bg(rgb(SIGNAL))),
-        )
-}
-
-fn close_agent_sheet(app: &gpui::WeakEntity<MuxApp>, window: &mut Window, cx: &mut App) {
+fn return_agent_pane(app: &gpui::WeakEntity<MuxApp>, window: &mut Window, cx: &mut App) {
     let _ = app.update(cx, |this, cx| {
-        this.agent_toggle_prefix = false;
-        this.focus_handle.focus(window);
-        this.mode = InputMode::Normal;
-        cx.notify();
+        this.return_agent_pane_to_terminal(window, cx);
     });
-    window.close_sheet(cx);
 }
 
-fn handle_agent_sheet_key_down(
+fn navigate_agent_pane(
+    app: &gpui::WeakEntity<MuxApp>,
+    direction: Direction,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let _ = app.update(cx, |this, cx| {
+        this.navigate_from_agent_pane(direction, window, cx);
+    });
+}
+
+fn handle_agent_pane_key_down(
     app: &gpui::WeakEntity<MuxApp>,
     event: &KeyDownEvent,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let plain_a = event.keystroke.key.eq_ignore_ascii_case("a")
-        && !event.keystroke.modifiers.control
-        && !event.keystroke.modifiers.alt
-        && !event.keystroke.modifiers.shift
-        && !event.keystroke.modifiers.platform;
-    let control_p = event.keystroke.key.eq_ignore_ascii_case("p")
+    let control_a = event.keystroke.key.eq_ignore_ascii_case("a")
         && event.keystroke.modifiers.control
         && !event.keystroke.modifiers.alt
         && !event.keystroke.modifiers.shift
         && !event.keystroke.modifiers.platform;
-    let alt_left = event.keystroke.key.eq_ignore_ascii_case("left")
-        && event.keystroke.modifiers.alt
-        && !event.keystroke.modifiers.control
-        && !event.keystroke.modifiers.shift
-        && !event.keystroke.modifiers.platform;
-    if alt_left {
-        close_agent_sheet(app, window, cx);
+    if control_a {
+        return_agent_pane(app, window, cx);
         cx.stop_propagation();
         return;
     }
-    if control_p {
-        let _ = app.update(cx, |this, _| {
-            this.agent_toggle_prefix = !this.agent_toggle_prefix;
+    let alt_direction = event
+        .keystroke
+        .modifiers
+        .alt
+        .then_some(match event.keystroke.key.as_str() {
+            "left" | "h" => Some(Direction::Left),
+            "right" | "l" => Some(Direction::Right),
+            "up" | "k" => Some(Direction::Up),
+            "down" | "j" => Some(Direction::Down),
+            _ => None,
+        })
+        .flatten()
+        .filter(|_| {
+            !event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.shift
+                && !event.keystroke.modifiers.platform
+        });
+    if let Some(direction) = alt_direction {
+        let _ = app.update(cx, |this, cx| {
+            this.navigate_from_agent_pane(direction, window, cx);
         });
         cx.stop_propagation();
         return;
     }
-    let toggle = app
-        .update(cx, |this, _| {
-            std::mem::take(&mut this.agent_toggle_prefix) && plain_a
-        })
-        .unwrap_or(false);
-    if toggle {
-        close_agent_sheet(app, window, cx);
-        cx.stop_propagation();
-        return;
+    if let Some(chord) = key_chord(&event.keystroke) {
+        let action = app
+            .update(cx, |this, _| this.keymap.resolve(this.mode, chord).cloned())
+            .ok()
+            .flatten();
+        if let Some(action) = action {
+            let _ = app.update(cx, |this, cx| {
+                this.perform_action(action, window, cx);
+            });
+            cx.stop_propagation();
+            return;
+        }
     }
     if event.keystroke.key != "escape"
         || event.keystroke.modifiers.control
@@ -2106,36 +2253,25 @@ fn handle_agent_sheet_key_down(
     {
         return;
     }
-    cancel_or_close_agent_sheet(app, window, cx);
+    cancel_agent_turn(app, window, cx);
 }
 
-fn cancel_or_close_agent_sheet(app: &gpui::WeakEntity<MuxApp>, window: &mut Window, cx: &mut App) {
-    let close = app
-        .update(cx, |this, cx| {
-            this.agent_toggle_prefix = false;
-            let running = this
-                .active_agent()
-                .filter(|agent| {
-                    matches!(
-                        agent.status,
-                        AgentSessionStatus::Working | AgentSessionStatus::WaitingForPermission
-                    )
-                })
-                .map(|agent| agent.id);
-            if let Some(session_id) = running {
-                this.backend.send(CommandMessage::CancelAgent(session_id));
-                false
-            } else {
-                this.focus_handle.focus(window);
-                this.mode = InputMode::Normal;
-                cx.notify();
-                true
-            }
-        })
-        .unwrap_or(true);
-    if close {
-        window.close_sheet(cx);
-    }
+fn cancel_agent_turn(app: &gpui::WeakEntity<MuxApp>, _window: &mut Window, cx: &mut App) {
+    let _ = app.update(cx, |this, cx| {
+        let running = this
+            .active_agent()
+            .filter(|agent| {
+                matches!(
+                    agent.status,
+                    AgentSessionStatus::Working | AgentSessionStatus::WaitingForPermission
+                )
+            })
+            .map(|agent| agent.id);
+        if let Some(session_id) = running {
+            this.backend.send(CommandMessage::CancelAgent(session_id));
+        }
+        cx.notify();
+    });
     cx.stop_propagation();
 }
 
@@ -2155,7 +2291,7 @@ fn agent_session_picker(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl I
                 .on_click(move |_, window, cx| {
                     let _ = select_app.update(cx, |this, cx| {
                         this.select_active_tab_agent(Some(session_id));
-                        this.agent_scroll.scroll_to_bottom();
+                        this.follow_active_agent_tail();
                         cx.notify();
                     });
                     window.refresh();
@@ -2180,20 +2316,18 @@ fn agent_session_picker(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl I
     )
 }
 
-fn agent_sheet_title(this: &MuxApp) -> impl IntoElement {
-    let (name, status) = this
-        .active_agent()
-        .map_or(("Agent".to_owned(), None), |agent| {
-            (
-                agent
-                    .agent_name
-                    .clone()
-                    .unwrap_or_else(|| agent.name.clone()),
-                Some(agent.status),
-            )
-        });
+fn agent_pane_title(agent: Option<&AgentSessionSnapshot>) -> impl IntoElement {
+    let (name, status) = agent.map_or(("Agent".to_owned(), None), |agent| {
+        (
+            agent
+                .agent_name
+                .clone()
+                .unwrap_or_else(|| agent.name.clone()),
+            Some(agent.status),
+        )
+    });
     h_flex()
-        .w_full()
+        .flex_1()
         .min_w_0()
         .overflow_hidden()
         .gap_2()
@@ -2276,7 +2410,8 @@ fn agent_help_surface(agent: Option<&AgentSessionSnapshot>) -> impl IntoElement 
         .flex_1()
         .min_h_0()
         .overflow_y_scrollbar()
-        .pr_3()
+        .px_3()
+        .pt_2()
         .pb_3()
         .child(agent_help_card(agent))
 }
@@ -2285,6 +2420,7 @@ fn agent_help_card(agent: Option<&AgentSessionSnapshot>) -> gpui::AnyElement {
     let mut card = v_flex()
         .w_full()
         .min_w_0()
+        .flex_none()
         .gap_3()
         .p_3()
         .rounded_lg()
@@ -2315,7 +2451,7 @@ fn agent_help_card(agent: Option<&AgentSessionSnapshot>) -> gpui::AnyElement {
         )
         .child(agent_help_section(
             "KEYBOARD",
-            &["⌃P A  toggle agent", "⌥←  return to terminal", "Esc  cancel / close", "Return  send"],
+            &["⌃A  toggle agent pane", "⌥arrows  navigate panes", "Esc  cancel run", "Return  send"],
         ))
         .child(agent_help_section(
             "SESSIONS",
@@ -2323,7 +2459,7 @@ fn agent_help_card(agent: Option<&AgentSessionSnapshot>) -> gpui::AnyElement {
         ))
         .child(agent_help_section(
             "CONTEXT + VIEW",
-            &["/context pane|none", "/expand [all]", "/collapse [all]"],
+            &["/context tab|none", "/expand [all]", "/collapse [all]"],
         ))
         .child(agent_help_section(
             "CONFIGURE",
@@ -2388,18 +2524,40 @@ fn agent_composer(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl IntoEle
     let prompt_app = app.clone();
     let keyboard_app = app.clone();
     let cancel_app = app.clone();
-    let return_app = app.clone();
+    let navigate_left_app = app.clone();
+    let navigate_right_app = app.clone();
+    let navigate_up_app = app.clone();
+    let navigate_down_app = app.clone();
     v_flex()
-        .key_context("MuxAgentSheet")
+        .key_context("MuxAgentPane")
         .capture_key_down(move |event, window, cx| {
-            handle_agent_sheet_key_down(&keyboard_app, event, window, cx);
+            handle_agent_pane_key_down(&keyboard_app, event, window, cx);
         })
         .on_action(move |_: &CancelAgentTurn, window, cx| {
-            cancel_or_close_agent_sheet(&cancel_app, window, cx);
+            cancel_agent_turn(&cancel_app, window, cx);
         })
-        .on_action(move |_: &ReturnToTerminal, window, cx| {
-            close_agent_sheet(&return_app, window, cx);
+        .on_action(move |_: &NavigateAgentLeft, window, cx| {
+            navigate_agent_pane(&navigate_left_app, Direction::Left, window, cx);
             cx.stop_propagation();
+        })
+        .on_action(move |_: &NavigateAgentRight, window, cx| {
+            navigate_agent_pane(&navigate_right_app, Direction::Right, window, cx);
+            cx.stop_propagation();
+        })
+        .on_action(move |_: &NavigateAgentUp, window, cx| {
+            navigate_agent_pane(&navigate_up_app, Direction::Up, window, cx);
+            cx.stop_propagation();
+        })
+        .on_action(move |_: &NavigateAgentDown, window, cx| {
+            navigate_agent_pane(&navigate_down_app, Direction::Down, window, cx);
+            cx.stop_propagation();
+        })
+        .on_action({
+            let app = app.clone();
+            move |_: &ToggleAgentPane, window, cx| {
+                return_agent_pane(&app, window, cx);
+                cx.stop_propagation();
+            }
         })
         .w_full()
         .min_w_0()
@@ -2436,24 +2594,42 @@ fn agent_scroll_is_near_bottom(scroll: &ScrollHandle) -> bool {
     maximum + offset <= 48.0
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn agent_timeline(
     app: &gpui::WeakEntity<MuxApp>,
+    tab_id: TabId,
     agent: &AgentSessionSnapshot,
     scroll: &ScrollHandle,
     expanded_items: &HashSet<String>,
     show_help: bool,
+    follow_tail: bool,
+    settle_scroll: bool,
     window: &mut Window,
-    cx: &mut App,
+    _cx: &mut App,
 ) -> impl IntoElement {
-    // Keep following content whose intrinsic height changes after a streamed
-    // update (notably parsed Markdown), but respect an intentional scroll up.
-    if agent_scroll_is_near_bottom(scroll) {
+    // Keep following streamed content until the user intentionally scrolls up.
+    // GPUI applies this request after layout, so newly parsed Markdown height is
+    // included instead of leaving the newest response below the viewport.
+    if follow_tail {
         scroll.scroll_to_bottom();
     }
+    if follow_tail && settle_scroll {
+        let settled_scroll = scroll.clone();
+        window.on_next_frame(move |window, _| {
+            let maximum = settled_scroll.max_offset();
+            settled_scroll.set_offset(gpui::point(px(0.0), -maximum.height));
+            window.refresh();
+        });
+    }
+    let scroll_app = app.clone();
+    let wheel_scroll = scroll.clone();
+    let scrollbar_scroll = scroll.clone();
+    let scrollbar_app = app.clone();
+    let release_app = app.clone();
+    let release_scroll = scroll.clone();
     let mut timeline = v_flex()
         .id(SharedString::from(format!("agent-timeline-{}", agent.id)))
-        .w_full()
-        .flex_1()
+        .size_full()
         .min_w_0()
         .min_h_0()
         .gap_2()
@@ -2462,7 +2638,43 @@ fn agent_timeline(
         .overflow_y_scroll()
         .vertical_scrollbar(scroll)
         .pr_3()
-        .pb_3();
+        .px_3()
+        .pt_2()
+        .pb_3()
+        .on_any_mouse_down(move |event, _, cx| {
+            let bounds = scrollbar_scroll.bounds();
+            if event.position.x >= bounds.right() - px(18.0) {
+                let _ = scrollbar_app.update(cx, |this, cx| {
+                    this.agent_follow_tail.remove(&tab_id);
+                    this.agent_scroll_needs_settle.remove(&tab_id);
+                    cx.notify();
+                });
+            }
+        })
+        .on_mouse_up(gpui::MouseButton::Left, move |_, _, cx| {
+            if agent_scroll_is_near_bottom(&release_scroll) {
+                let _ = release_app.update(cx, |this, cx| {
+                    this.agent_follow_tail.insert(tab_id);
+                    cx.notify();
+                });
+            }
+        })
+        .on_scroll_wheel(move |event, _, cx| {
+            let delta = event.delta.pixel_delta(px(20.0));
+            let _ = scroll_app.update(cx, |this, cx| {
+                if delta.y > px(0.0) {
+                    this.agent_follow_tail.remove(&tab_id);
+                    this.agent_scroll_needs_settle.remove(&tab_id);
+                } else {
+                    let remaining = f32::from(wheel_scroll.max_offset().height)
+                        + f32::from(wheel_scroll.offset().y);
+                    if remaining <= 48.0 + f32::from(delta.y.abs()) {
+                        this.agent_follow_tail.insert(tab_id);
+                    }
+                }
+                cx.notify();
+            });
+        });
     if agent.timeline.is_empty() && !show_help {
         timeline = timeline.child(
             v_flex()
@@ -2480,7 +2692,7 @@ fn agent_timeline(
         }
         timeline = timeline.child(match item {
             AgentTimelineItem::Message { role, text, .. } if *role != AgentMessageRole::Thought => {
-                agent_message_item(agent, index, *role, text, window, cx)
+                agent_message_item(agent, index, *role, text)
             }
             AgentTimelineItem::Message { text, .. } => thinking_item(
                 app,
@@ -2489,8 +2701,6 @@ fn agent_timeline(
                 text,
                 expanded_items,
                 index + 1 == agent.timeline.len() && agent.status == AgentSessionStatus::Working,
-                window,
-                cx,
             ),
             AgentTimelineItem::Tool(tool) => {
                 agent_tool_item(app, agent, index, tool, expanded_items)
@@ -2501,16 +2711,42 @@ fn agent_timeline(
     if show_help {
         timeline = timeline.child(agent_help_card(Some(agent)));
     }
-    timeline
+    let latest_app = app.clone();
+    div()
+        .relative()
+        .w_full()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .overflow_hidden()
+        .child(timeline)
+        .when(!follow_tail, |viewport| {
+            viewport.child(
+                Button::new(SharedString::from(format!("agent-latest-{tab_id}")))
+                    .label("↓ Latest")
+                    .small()
+                    .compact()
+                    .primary()
+                    .absolute()
+                    .right(px(14.0))
+                    .bottom(px(12.0))
+                    .on_click(move |_, window, cx| {
+                        let _ = latest_app.update(cx, |this, cx| {
+                            this.agent_follow_tail.insert(tab_id);
+                            this.agent_scroll_for(tab_id).scroll_to_bottom();
+                            cx.notify();
+                        });
+                        window.refresh();
+                    }),
+            )
+        })
 }
 
 fn agent_message_item(
-    agent: &AgentSessionSnapshot,
-    index: usize,
+    _agent: &AgentSessionSnapshot,
+    _index: usize,
     role: AgentMessageRole,
     text: &str,
-    window: &mut Window,
-    cx: &mut App,
 ) -> gpui::AnyElement {
     let (label, accent) = match role {
         AgentMessageRole::User => ("You", rgb(SIGNAL)),
@@ -2519,7 +2755,9 @@ fn agent_message_item(
     };
     let mut message = v_flex()
         .w_full()
+        .max_w_full()
         .min_w_0()
+        .flex_none()
         .overflow_hidden()
         .gap_1()
         .px_2()
@@ -2542,19 +2780,16 @@ fn agent_message_item(
         message = message.bg(rgb(CHROME_RAISED)).child(
             div()
                 .w_full()
+                .max_w_full()
                 .min_w_0()
+                .overflow_hidden()
                 .whitespace_normal()
                 .text_sm()
                 .line_height(px(20.0))
                 .child(text.trim().to_owned()),
         );
     } else {
-        message = message.child(agent_markdown(
-            SharedString::from(format!("agent-message-{}-{index}", agent.id)),
-            SharedString::from(text.to_owned()),
-            window,
-            cx,
-        ));
+        message = message.child(agent_rich_text(text));
     }
     message.into_any_element()
 }
@@ -2567,8 +2802,6 @@ fn thinking_item(
     text: &str,
     expanded_items: &HashSet<String>,
     running: bool,
-    window: &mut Window,
-    cx: &mut App,
 ) -> gpui::AnyElement {
     let summary = thought_summary(text);
     let detail = thought_detail(text, &summary);
@@ -2577,6 +2810,7 @@ fn thinking_item(
     let mut header = h_flex()
         .id(SharedString::from(format!("thought-{key}")))
         .w_full()
+        .max_w_full()
         .min_w_0()
         .gap_2()
         .px_2()
@@ -2621,22 +2855,32 @@ fn thinking_item(
                 .text_color(rgb(MUTED_TEXT)),
             );
     }
-    let mut item = v_flex().w_full().min_w_0().gap_1().child(header);
+    let mut item = v_flex()
+        .w_full()
+        .max_w_full()
+        .min_w_0()
+        .flex_none()
+        .overflow_hidden()
+        .gap_1()
+        .child(header);
     if expanded {
         item = item.child(
             div()
-                .ml_6()
+                .w_full()
                 .min_w_0()
                 .overflow_hidden()
-                .pl_3()
-                .border_l_1()
-                .border_color(rgb(BORDER))
-                .child(agent_markdown(
-                    SharedString::from(format!("agent-thought-{}-{index}", agent.id)),
-                    SharedString::from(detail.unwrap_or_default().to_owned()),
-                    window,
-                    cx,
-                )),
+                .pl_6()
+                .pr_2()
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .pl_3()
+                        .border_l_1()
+                        .border_color(rgb(BORDER))
+                        .child(agent_rich_text(detail.unwrap_or_default())),
+                ),
         );
     }
     item.into_any_element()
@@ -2656,6 +2900,7 @@ fn agent_tool_item(
     let header = h_flex()
         .id(SharedString::from(format!("tool-{key}")))
         .w_full()
+        .max_w_full()
         .min_w_0()
         .gap_2()
         .px_2()
@@ -2708,7 +2953,14 @@ fn agent_tool_item(
             .text_color(rgb(MUTED_TEXT)),
         );
 
-    let mut item = v_flex().w_full().min_w_0().gap_1().child(header);
+    let mut item = v_flex()
+        .w_full()
+        .max_w_full()
+        .min_w_0()
+        .flex_none()
+        .overflow_hidden()
+        .gap_1()
+        .child(header);
     if expanded {
         item = item.child(agent_tool_details(tool));
     }
@@ -2717,9 +2969,11 @@ fn agent_tool_item(
 
 fn agent_tool_details(tool: &AgentTool) -> gpui::AnyElement {
     let mut details = v_flex()
+        .w_full()
+        .max_w_full()
         .min_w_0()
-        .ml_4()
-        .mr_1()
+        .pl_4()
+        .pr_1()
         .overflow_hidden()
         .gap_2()
         .p_3()
@@ -2771,6 +3025,7 @@ fn tool_detail_section(label: &'static str, value: &str) -> gpui::AnyElement {
         .child(
             div()
                 .w_full()
+                .max_w_full()
                 .min_w_0()
                 .overflow_hidden()
                 .whitespace_normal()
@@ -2789,7 +3044,9 @@ fn agent_event_item(item: &AgentTimelineItem) -> gpui::AnyElement {
     let (label, text, color) = timeline_item(item);
     v_flex()
         .w_full()
+        .max_w_full()
         .min_w_0()
+        .flex_none()
         .overflow_hidden()
         .gap_1()
         .px_2()
@@ -2804,6 +3061,7 @@ fn agent_event_item(item: &AgentTimelineItem) -> gpui::AnyElement {
         .child(
             div()
                 .w_full()
+                .max_w_full()
                 .min_w_0()
                 .whitespace_normal()
                 .text_sm()
@@ -2813,34 +3071,139 @@ fn agent_event_item(item: &AgentTimelineItem) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn agent_markdown(
-    id: impl Into<gpui::ElementId>,
-    markdown: impl Into<SharedString>,
-    window: &mut Window,
-    cx: &mut App,
-) -> TextView {
-    let mut style = TextViewStyle::default()
-        .paragraph_gap(gpui::rems(0.45))
-        .heading_font_size(|level, base| if level <= 2 { base } else { base * 0.92 })
-        .code_block(
-            gpui::StyleRefinement::default()
-                .bg(rgb(SURFACE))
-                .p_2()
-                .rounded_md()
-                .font_family(EMBEDDED_TERMINAL_FONT)
-                .text_xs(),
-        );
-    style.highlight_theme = cx.theme().highlight_theme.clone();
-    style.is_dark = true;
-    TextView::markdown(id, markdown, window, cx)
-        .style(style)
-        .selectable(true)
+fn agent_rich_text(markdown: &str) -> gpui::AnyElement {
+    let minimum_lines = markdown
+        .lines()
+        .filter(|line| !line.trim().starts_with("```"))
+        .count()
+        .max(1);
+    let mut blocks = Vec::new();
+    let mut code_lines = Vec::new();
+    let mut in_code = false;
+    let mut previous_was_blank = false;
+
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            if in_code {
+                push_agent_code_block(&mut blocks, &mut code_lines);
+            }
+            in_code = !in_code;
+            previous_was_blank = false;
+            continue;
+        }
+        if in_code {
+            code_lines.push(line.to_owned());
+            continue;
+        }
+        if trimmed.is_empty() {
+            if !previous_was_blank {
+                blocks.push(div().h(px(4.0)).flex_none().into_any_element());
+            }
+            previous_was_blank = true;
+            continue;
+        }
+        previous_was_blank = false;
+        blocks.push(agent_rich_text_line(trimmed));
+    }
+    push_agent_code_block(&mut blocks, &mut code_lines);
+
+    v_flex()
         .w_full()
+        .max_w_full()
         .min_w_0()
+        .min_h(px(minimum_lines as f32 * 20.0))
+        .flex_none()
         .overflow_hidden()
-        .whitespace_normal()
+        .gap_1()
         .text_sm()
         .line_height(px(20.0))
+        .children(blocks)
+        .into_any_element()
+}
+
+fn agent_rich_text_line(line: &str) -> gpui::AnyElement {
+    let (text, heading) = if let Some(text) = line.strip_prefix("### ") {
+        (text, true)
+    } else if let Some(text) = line.strip_prefix("## ") {
+        (text, true)
+    } else if let Some(text) = line.strip_prefix("# ") {
+        (text, true)
+    } else if let Some(text) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+        return div()
+            .w_full()
+            .min_w_0()
+            .flex_none()
+            .whitespace_normal()
+            .child(format!("• {}", clean_inline_markdown(text)))
+            .into_any_element();
+    } else if let Some(text) = line.strip_prefix("> ") {
+        return div()
+            .w_full()
+            .min_w_0()
+            .flex_none()
+            .pl_2()
+            .border_l_1()
+            .border_color(rgb(BORDER))
+            .whitespace_normal()
+            .text_color(rgb(MUTED_TEXT))
+            .child(clean_inline_markdown(text))
+            .into_any_element();
+    } else {
+        (line, false)
+    };
+    div()
+        .w_full()
+        .max_w_full()
+        .min_w_0()
+        .flex_none()
+        .overflow_hidden()
+        .whitespace_normal()
+        .when(heading, |line| line.font_semibold().text_color(rgb(TEXT)))
+        .child(clean_inline_markdown(text))
+        .into_any_element()
+}
+
+fn push_agent_code_block(blocks: &mut Vec<gpui::AnyElement>, lines: &mut Vec<String>) {
+    if lines.is_empty() {
+        return;
+    }
+    let mut code = v_flex()
+        .w_full()
+        .max_w_full()
+        .min_w_0()
+        .flex_none()
+        .overflow_hidden()
+        .gap_0()
+        .p_2()
+        .rounded_md()
+        .bg(rgb(SURFACE))
+        .font_family(EMBEDDED_TERMINAL_FONT)
+        .text_xs()
+        .line_height(px(18.0));
+    for line in lines.drain(..) {
+        code = code.child(
+            div()
+                .w_full()
+                .min_w_0()
+                .flex_none()
+                .overflow_hidden()
+                .whitespace_normal()
+                .child(if line.is_empty() {
+                    " ".to_owned()
+                } else {
+                    line
+                }),
+        );
+    }
+    blocks.push(code.into_any_element());
+}
+
+fn clean_inline_markdown(text: &str) -> String {
+    text.replace("**", "")
+        .replace("__", "")
+        .replace("~~", "")
+        .replace('`', "")
 }
 
 fn agent_item_key(agent: &AgentSessionSnapshot, index: usize, item: &AgentTimelineItem) -> String {
@@ -3333,15 +3696,27 @@ fn configure_application_menu(cx: &mut App) {
 fn configure_application_actions(cx: &mut App) {
     cx.on_action(quit_mux);
     cx.bind_keys([KeyBinding::new("cmd-q", QuitMux, None)]);
+    // gpui-component's Input owns some Option-arrow combinations for text
+    // navigation. Bind all four explicitly in the agent pane and composer so
+    // pane navigation behaves identically regardless of which child has focus.
+    for context in ["MuxAgentPane", "MuxAgentPane > Input"] {
+        cx.bind_keys([
+            KeyBinding::new("alt-left", NavigateAgentLeft, Some(context)),
+            KeyBinding::new("alt-right", NavigateAgentRight, Some(context)),
+            KeyBinding::new("alt-up", NavigateAgentUp, Some(context)),
+            KeyBinding::new("alt-down", NavigateAgentDown, Some(context)),
+        ]);
+    }
     cx.bind_keys([KeyBinding::new(
-        "alt-left",
-        ReturnToTerminal,
-        Some("MuxAgentSheet"),
+        "ctrl-a",
+        ToggleAgentPane,
+        Some("MuxAgentPane"),
     )]);
-    // gpui-component's Input binds Option-Left to word navigation. Adding a
-    // later binding at the same depth lets the agent composer own it; inputs
-    // without a ReturnToTerminal handler still fall through to word motion.
-    cx.bind_keys([KeyBinding::new("alt-left", ReturnToTerminal, Some("Input"))]);
+    cx.bind_keys([KeyBinding::new(
+        "ctrl-a",
+        ToggleAgentPane,
+        Some("MuxAgentPane > Input"),
+    )]);
     configure_application_menu(cx);
 }
 
@@ -3461,7 +3836,7 @@ fn main() -> Result<()> {
             cx.bind_keys([KeyBinding::new(
                 "escape",
                 CancelAgentTurn,
-                Some("MuxAgentSheet"),
+                Some("MuxAgentPane"),
             )]);
             configure_theme(cx);
             if let Err(error) = cx.text_system().add_fonts(vec![

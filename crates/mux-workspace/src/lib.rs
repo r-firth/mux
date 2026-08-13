@@ -664,6 +664,11 @@ impl Keymap {
         keymap.bind_zellij_shared_navigation();
         keymap.bind(
             InputMode::Normal,
+            KeyChord::control('a'),
+            Action::OpenAgentSurface,
+        );
+        keymap.bind(
+            InputMode::Normal,
             KeyChord {
                 key: Key::Character('a'),
                 modifiers: Modifiers::SUPER.union(Modifiers::SHIFT),
@@ -988,6 +993,10 @@ mod tests {
         assert_eq!(
             keymap.resolve(InputMode::Normal, KeyChord::control('n')),
             None
+        );
+        assert_eq!(
+            keymap.resolve(InputMode::Normal, KeyChord::control('a')),
+            Some(&Action::OpenAgentSurface),
         );
         assert_eq!(
             keymap.resolve(
