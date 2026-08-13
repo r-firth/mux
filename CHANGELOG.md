@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/r-firth/mux/compare/v0.3.0...v0.4.0) (2026-08-13)
+
+### Features
+
+* replace the agent side sheet with keyboard-first agent panes in the terminal grid
+* scope agent panes and sessions to their tab, with context from the tab's other terminal panes
+* render a responsive ACP timeline with expandable thinking and tool details
+
+### Bug Fixes
+
+* keep streaming conversations pinned to the latest message while preserving intentional scrollback
+* wrap agent, tool, and composer content within narrow panes
+* navigate out of agent panes in every direction with Option-arrow, including tab fall-through at horizontal edges
+
 ## [0.3.0](https://github.com/r-firth/mux/compare/v0.2.0...v0.3.0) (2026-08-13)
 
 
