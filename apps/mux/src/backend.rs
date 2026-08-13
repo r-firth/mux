@@ -10,9 +10,10 @@ use mux_protocol::{CreateSession, ErrorCode, ServerEvent, SessionSelector, Spawn
 use mux_terminal::TerminalSize;
 use mux_workspace::{AgentSessionId, Direction, PaneId, Session, SessionId, WorkspaceCommand};
 use tokio::sync::mpsc;
-use winit::event_loop::EventLoopProxy;
 
 use crate::UserEvent;
+
+type EventSender = async_channel::Sender<UserEvent>;
 
 #[derive(Debug)]
 pub enum CommandMessage {
@@ -85,7 +86,7 @@ impl BackendHandle {
     }
 }
 
-pub fn spawn(proxy: EventLoopProxy<UserEvent>, state_dir: Option<PathBuf>) -> BackendHandle {
+pub fn spawn(events: EventSender, state_dir: Option<PathBuf>) -> BackendHandle {
     let (sender, receiver) = mpsc::unbounded_channel();
     thread::Builder::new()
         .name("mux-backend".to_owned())
@@ -95,8 +96,8 @@ pub fn spawn(proxy: EventLoopProxy<UserEvent>, state_dir: Option<PathBuf>) -> Ba
                 .thread_name("mux-backend-io")
                 .build()
                 .expect("create backend runtime");
-            if let Err(error) = runtime.block_on(run(receiver, &proxy, state_dir)) {
-                let _ = proxy.send_event(UserEvent::BackendError(error.to_string()));
+            if let Err(error) = runtime.block_on(run(receiver, &events, state_dir)) {
+                let _ = events.send_blocking(UserEvent::BackendError(error.to_string()));
             }
         })
         .expect("spawn backend thread");
@@ -106,7 +107,7 @@ pub fn spawn(proxy: EventLoopProxy<UserEvent>, state_dir: Option<PathBuf>) -> Ba
 #[allow(clippy::too_many_lines)]
 async fn run(
     mut commands: mpsc::UnboundedReceiver<CommandMessage>,
-    proxy: &EventLoopProxy<UserEvent>,
+    events: &EventSender,
     state_dir: Option<PathBuf>,
 ) -> Result<()> {
     let state_dir = state_dir
@@ -115,6 +116,7 @@ async fn run(
     let socket = socket_path(&state_dir);
     let mut client = connect_or_start_daemon(&state_dir, &socket).await?;
     let sessions = client.list_sessions().await?;
+    send_event(events, UserEvent::Sessions(sessions.clone()))?;
     let session_id = if let Some(session) = sessions.first() {
         session.id
     } else {
@@ -123,9 +125,7 @@ async fn run(
     let attachment = client.attach(SessionSelector::Id(session_id)).await?;
     let mut current_session = attachment.session.clone();
     let mut focused_pane = attachment.session.active_tab().map(|tab| tab.focused_pane);
-    proxy
-        .send_event(UserEvent::Attached(attachment))
-        .map_err(|_| anyhow!("GUI event loop stopped"))?;
+    send_event(events, UserEvent::Attached(attachment))?;
 
     loop {
         tokio::select! {
@@ -136,21 +136,21 @@ async fn run(
                             && let Err(error) = client.write_input(pane_id, bytes).await
                             && !is_stale_pane_error(&error)
                         {
-                            report_backend_error(proxy, error);
+                            report_backend_error(events, error);
                         }
                     }
                     CommandMessage::Write { pane_id, bytes } => {
                         if let Err(error) = client.write_input(pane_id, bytes).await
                             && !is_stale_pane_error(&error)
                         {
-                            report_backend_error(proxy, error);
+                            report_backend_error(events, error);
                         }
                     }
                     CommandMessage::Resize { pane_id, size } => {
                         if let Err(error) = client.resize_pane(pane_id, size).await
                             && !is_stale_pane_error(&error)
                         {
-                            report_backend_error(proxy, error);
+                            report_backend_error(events, error);
                         }
                     }
                     CommandMessage::Workspace { session_id, command } => {
@@ -162,19 +162,15 @@ async fn run(
                                     .session
                                     .active_tab()
                                     .map(|tab| tab.focused_pane);
-                                proxy
-                                    .send_event(UserEvent::Attached(attachment))
-                                    .map_err(|_| anyhow!("GUI event loop stopped"))?;
+                                send_event(events, UserEvent::Attached(attachment))?;
                             }
-                            Err(error) => report_backend_error(proxy, error),
+                            Err(error) => report_backend_error(events, error),
                         }
                     }
                     CommandMessage::ListSessions => {
                         match client.list_sessions().await {
-                            Ok(sessions) => proxy
-                                .send_event(UserEvent::Sessions(sessions))
-                                .map_err(|_| anyhow!("GUI event loop stopped"))?,
-                            Err(error) => report_backend_error(proxy, error),
+                            Ok(sessions) => send_event(events, UserEvent::Sessions(sessions))?,
+                            Err(error) => report_backend_error(events, error),
                         }
                     }
                     CommandMessage::AttachSession(session_id) => {
@@ -184,11 +180,9 @@ async fn run(
                                 focused_pane = current_session
                                     .active_tab()
                                     .map(|tab| tab.focused_pane);
-                                proxy
-                                    .send_event(UserEvent::Attached(attachment))
-                                    .map_err(|_| anyhow!("GUI event loop stopped"))?;
+                                send_event(events, UserEvent::Attached(attachment))?;
                             }
-                            Err(error) => report_backend_error(proxy, error),
+                            Err(error) => report_backend_error(events, error),
                         }
                     }
                     CommandMessage::CreateSessionForPane { name, pane_id } => {
@@ -199,18 +193,22 @@ async fn run(
                                     focused_pane = current_session
                                         .active_tab()
                                         .map(|tab| tab.focused_pane);
-                                    proxy
-                                        .send_event(UserEvent::Attached(attachment))
-                                        .map_err(|_| anyhow!("GUI event loop stopped"))?;
+                                    send_event(events, UserEvent::Attached(attachment))?;
+                                    let sessions = client.list_sessions().await?;
+                                    send_event(events, UserEvent::Sessions(sessions))?;
                                 }
-                                Err(error) => report_backend_error(proxy, error),
+                                Err(error) => report_backend_error(events, error),
                             },
-                            Err(error) => report_backend_error(proxy, error),
+                            Err(error) => report_backend_error(events, error),
                         }
                     }
                     CommandMessage::RenameSession { session_id, name } => {
-                        if let Err(error) = client.rename_session(session_id, name).await {
-                            report_backend_error(proxy, error);
+                        match client.rename_session(session_id, name).await {
+                            Ok(()) => {
+                                let sessions = client.list_sessions().await?;
+                                send_event(events, UserEvent::Sessions(sessions))?;
+                            }
+                            Err(error) => report_backend_error(events, error),
                         }
                     }
                     CommandMessage::KillSession(session_id) => {
@@ -227,20 +225,21 @@ async fn run(
                                 focused_pane = current_session
                                     .active_tab()
                                     .map(|tab| tab.focused_pane);
-                                proxy
-                                    .send_event(UserEvent::Attached(attachment))
-                                    .map_err(|_| anyhow!("GUI event loop stopped"))?;
+                                send_event(events, UserEvent::Attached(attachment))?;
+                                let sessions = client.list_sessions().await?;
+                                send_event(events, UserEvent::Sessions(sessions))?;
                             }
-                            Ok(()) => {}
-                            Err(error) => report_backend_error(proxy, error),
+                            Ok(()) => {
+                                let sessions = client.list_sessions().await?;
+                                send_event(events, UserEvent::Sessions(sessions))?;
+                            }
+                            Err(error) => report_backend_error(events, error),
                         }
                     }
                     CommandMessage::ListAgents => {
                         match client.list_agent_sessions().await {
-                            Ok(agents) => proxy
-                                .send_event(UserEvent::Agents(agents))
-                                .map_err(|_| anyhow!("GUI event loop stopped"))?,
-                            Err(error) => report_backend_error(proxy, error),
+                            Ok(agents) => send_event(events, UserEvent::Agents(agents))?,
+                            Err(error) => report_backend_error(events, error),
                         }
                     }
                     CommandMessage::StartAgent {
@@ -254,15 +253,13 @@ async fn run(
                             client.start_agent_for_pane(spec, pane_id).await
                         };
                         match result {
-                            Ok(agent) => proxy
-                                .send_event(UserEvent::AgentStarted(agent))
-                                .map_err(|_| anyhow!("GUI event loop stopped"))?,
-                            Err(error) => report_backend_error(proxy, error),
+                            Ok(agent) => send_event(events, UserEvent::AgentStarted(agent))?,
+                            Err(error) => report_backend_error(events, error),
                         }
                     }
                     CommandMessage::PromptAgent { session_id, prompt } => {
                         if let Err(error) = client.prompt_agent_with_context(session_id, prompt).await {
-                            report_backend_error(proxy, error);
+                            report_backend_error(events, error);
                         }
                     }
                     CommandMessage::AuthenticateAgent {
@@ -270,7 +267,7 @@ async fn run(
                         method_id,
                     } => {
                         if let Err(error) = client.authenticate_agent(session_id, method_id).await {
-                            report_backend_error(proxy, error);
+                            report_backend_error(events, error);
                         }
                     }
                     CommandMessage::ResolveAgentPermission {
@@ -282,22 +279,22 @@ async fn run(
                             .resolve_agent_permission(session_id, request_id, option_id)
                             .await
                         {
-                            report_backend_error(proxy, error);
+                            report_backend_error(events, error);
                         }
                     }
                     CommandMessage::CancelAgent(session_id) => {
                         if let Err(error) = client.cancel_agent(session_id).await {
-                            report_backend_error(proxy, error);
+                            report_backend_error(events, error);
                         }
                     }
                     CommandMessage::CloseAgent(session_id) => {
                         if let Err(error) = client.close_agent(session_id).await {
-                            report_backend_error(proxy, error);
+                            report_backend_error(events, error);
                         }
                     }
                     CommandMessage::SetAgentMode { session_id, mode_id } => {
                         if let Err(error) = client.set_agent_mode(session_id, mode_id).await {
-                            report_backend_error(proxy, error);
+                            report_backend_error(events, error);
                         }
                     }
                     CommandMessage::SetAgentConfig {
@@ -309,7 +306,7 @@ async fn run(
                             .set_agent_config(session_id, config_id, value)
                             .await
                         {
-                            report_backend_error(proxy, error);
+                            report_backend_error(events, error);
                         }
                     }
                 }
@@ -317,8 +314,7 @@ async fn run(
             event = client.next_event() => {
                 match event? {
                     event @ (ServerEvent::PaneOutput { .. } | ServerEvent::PaneExited { .. }) => {
-                        proxy.send_event(UserEvent::Server(event))
-                            .map_err(|_| anyhow!("GUI event loop stopped"))?;
+                        send_event(events, UserEvent::Server(event))?;
                     }
                     ServerEvent::ResyncRequired { session_id }
                     | ServerEvent::WorkspaceChanged { session_id } => {
@@ -328,17 +324,12 @@ async fn run(
                             .session
                             .active_tab()
                             .map(|tab| tab.focused_pane);
-                        proxy.send_event(UserEvent::Attached(attachment))
-                            .map_err(|_| anyhow!("GUI event loop stopped"))?;
+                        send_event(events, UserEvent::Attached(attachment))?;
                     }
-                    ServerEvent::Agent(event) => proxy
-                        .send_event(UserEvent::Agent(event))
-                        .map_err(|_| anyhow!("GUI event loop stopped"))?,
+                    ServerEvent::Agent(event) => send_event(events, UserEvent::Agent(event))?,
                     ServerEvent::AgentResyncRequired => {
                         let agents = client.list_agent_sessions().await?;
-                        proxy
-                            .send_event(UserEvent::Agents(agents))
-                            .map_err(|_| anyhow!("GUI event loop stopped"))?;
+                        send_event(events, UserEvent::Agents(agents))?;
                     }
                 }
             }
@@ -376,8 +367,14 @@ fn is_stale_pane_error(error: &ClientError) -> bool {
     )
 }
 
-fn report_backend_error(proxy: &EventLoopProxy<UserEvent>, error: impl std::fmt::Display) {
-    let _ = proxy.send_event(UserEvent::BackendError(error.to_string()));
+fn send_event(events: &EventSender, event: UserEvent) -> Result<()> {
+    events
+        .send_blocking(event)
+        .map_err(|_| anyhow!("GUI event loop stopped"))
+}
+
+fn report_backend_error(events: &EventSender, error: impl std::fmt::Display) {
+    let _ = events.send_blocking(UserEvent::BackendError(error.to_string()));
 }
 
 async fn connect_or_start_daemon(

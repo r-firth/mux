@@ -30,23 +30,19 @@ make its upgrade a deliberate compatibility task. Do not port Ghostty's VT
 implementation to Rust. Do not make Ghostty's opaque snapshot format part of
 our public IPC version; identify it by engine build and checkpoint format.
 
-The pinned engine is now exercised end-to-end through the native GPU renderer:
-Unicode fallback, wide-cell placement, styled cells, cursor, colors, damage,
+The pinned engine is exercised end-to-end through the native GPUI renderer:
+Unicode fallback, wide-cell placement, styled cells, cursor, colors,
 checkpoints, resize, reattachment, selection/copy/paste, mode-aware keyboard and
-mouse encoding, scrollback, and sustained output all have automated or
-native-window coverage. OSC 8 URIs are carried through the adapter per cell and
-activated only by a deliberate modifier-click, with no regex reconstruction in
-the GUI. Ghostty's gesture engine now owns cell/word/line selection, repeat-click
-thresholds, direction-aware and rectangular dragging, and viewport autoscroll;
-the GUI only translates native pane geometry and runs its timer. The primary
-remaining terminal risks are search, accessibility, and broader compatibility
-testing. The pinned C API exposes viewport and history cells but not Ghostty's
+mouse encoding, and scrollback have automated or native-window coverage. OSC 8
+URIs are carried through the adapter per cell, but activation UI is not yet wired.
+Ghostty's gesture engine owns cell/word/line selection, repeat-click
+thresholds, and direction-aware and rectangular dragging; the GUI translates
+native pane geometry. The primary
+remaining terminal risks are IME, hyperlink interaction, cursor-blink scheduling,
+search, accessibility, and broader compatibility testing. The pinned C API exposes viewport and history cells but not Ghostty's
 synchronous screen-search engine, so search is deliberately held behind the
 terminal boundary instead of duplicating VT-aware matching with an O(history)
-GUI scan. Cursor blink policy comes from Ghostty and now
-uses its 600 ms cadence with input/output and window-focus resets. Native IME is
-enabled, preedit is rendered, and candidate windows follow the active terminal
-caret or agent composer input area.
+GUI scan.
 
 The C render adapter retains and grows its row, cell, and grapheme buffers
 instead of allocating a full viewport on every frame. The Rust render boundary
@@ -56,11 +52,10 @@ updates. It still copies cell fields before row shaping; measure that remaining
 copy under sustained output before considering a more incremental borrowed or
 delta API.
 
-Mux loads Ghostty's primary `font-family` and `font-size` settings at startup,
-resolves the requested local face in the native shaping database, and measures
-that face rather than assuming a fixed advance. The same resolved cell metrics
+Mux loads Ghostty's primary `font-family` and `font-size` settings at startup
+and resolves the requested local face in GPUI's shaping database. The same cell metrics
 drive rendering, cursor placement, pane sizing, PTY resize, mouse reporting,
-selection, and IME placement. An unavailable configured face falls back to the
+and selection. An unavailable configured face falls back to the
 bundled JetBrains Mono Nerd Font, while the shaping stack retains system glyph
 fallback. Broader Ghostty font features such as per-style family overrides,
 variation axes, synthetic-style controls, and explicit fallback lists remain
@@ -103,7 +98,7 @@ reshape the agent surface between display frames or starve terminal rendering.
 Authentication remains owned by each agent. Existing Codex credentials are
 inherited by its external process. For fresh installs, Mux now persists the
 stable methods advertised by `initialize`, surfaces an authentication-required
-state, runs the selected agent-owned method through `/login`, and retries
+state, runs the selected agent-owned method from the agent sheet, and retries
 `session/new`. It deliberately does not enable ACP's unstable terminal or
 environment-variable auth transports. Adapter installation/update UX remains
 the largest cross-agent lifecycle risk. Mux now preflights the external runtime

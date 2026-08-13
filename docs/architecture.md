@@ -6,8 +6,8 @@ state. A GUI is a replaceable view and input source; closing it never implies
 closing a shell.
 
 ```text
-native GUI
-  window / input / GPU renderer / transient chrome
+native GPUI GUI
+  GPUI window + input / libghostty canvas / gpui-component overlays
          | local framed IPC
          v
 workspace daemon
@@ -58,22 +58,19 @@ whether that trade remains correct.
 
 ## Rendering direction
 
-The native shell uses `winit` plus `wgpu` (Metal on macOS) and `glyphon` for
-shaping and glyph caching. Rendering consumes libghostty render-state snapshots
-through a small adapter. The renderer caches shaped terminal rows, respects
-Ghostty damage, places wide glyphs on exact grid columns, and batches GPU
-rectangle uploads. Ghostty also owns selection formatting, bracketed paste,
-mode-aware keyboard and mouse encoding, and the scrollback viewport; the GUI
-feeds its reusable selection-gesture engine native pointer geometry and schedules
-autoscroll ticks. This keeps click thresholds, word/line expansion, reversed
-selection, and rectangular selection aligned with Ghostty. The GUI adds native
-clipboard handling, a contextual history indicator, and visible IME preedit with
-the platform candidate surface anchored to the active input area.
-OSC 8 targets also come from Ghostty cell state rather than terminal-text
-guessing; the GUI adds modifier-gated hover and URI activation. The renderer
-honours Ghostty's cursor blink state with the same 600 ms cadence, waking the
-event loop only at the next interaction deadline. Accessibility, search, and
-broader platform behavior remain base-terminal work.
+The native shell uses GPUI for the window, input dispatch, shaping, and GPU
+painting. A custom GPUI canvas consumes libghostty render-state snapshots
+through the terminal boundary, paints exact cell backgrounds and cursor shapes,
+and anchors shaped runs to Ghostty columns so fallback and wide glyphs do not
+move later cells. GPUI Component supplies sheets, dialogs, inputs, switches,
+buttons, notifications, icons, and animation without imposing IDE chrome.
+
+Ghostty owns selection formatting, bracketed paste, mode-aware keyboard and
+mouse encoding, and the scrollback viewport. The GUI feeds its reusable
+selection-gesture engine native pointer geometry. Accessibility, IME preedit,
+hyperlink activation, search, cursor-blink scheduling, damage-aware row caches,
+and broader compatibility testing remain base-terminal work and should be
+completed before claiming parity with mature native terminals.
 
 No rendering dependency is pulled into the daemon, and no GUI type crosses the
 wire. This keeps an AppKit-specific shell or a future renderer experiment from
@@ -108,8 +105,8 @@ Agent-native slash commands likewise come from ACP's live
 lifecycle command set in the composer.
 
 Authentication remains agent-owned. Mux stores the stable auth methods from
-`initialize`; when `session/new` returns `auth_required`, it exposes `/login`,
-sends ACP `authenticate` with the selected method ID, and retries
+`initialize`; when `session/new` returns `auth_required`, it presents those
+methods in the agent sheet, sends ACP `authenticate` with the selected method ID, and retries
 `session/new`. Credentials never enter Mux IPC or durable agent snapshots.
 
 Terminal context is off by default. If requested, the GUI adds selected text or
