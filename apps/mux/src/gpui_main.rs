@@ -20,9 +20,10 @@ use backend::{BackendHandle, CommandMessage};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Application, Bounds, Context, Entity, FocusHandle, Hsla,
-    InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent, ParentElement as _,
-    Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowOptions, div, px, rgb, size,
+    InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent, Menu, MenuItem,
+    ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled, SystemMenuType, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div,
+    px, rgb, size,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, InteractiveElementExt as _, Selectable as _, Sizable as _,
@@ -73,7 +74,7 @@ const EMBEDDED_TERMINAL_FONT: &str = "JetBrainsMono Nerd Font Mono";
 const AGENT_SHEET_MIN_WIDTH: f32 = 340.0;
 const AGENT_SHEET_MAX_WIDTH: f32 = 720.0;
 
-gpui::actions!(mux_agent, [CancelAgentTurn]);
+gpui::actions!(mux_agent, [CancelAgentTurn, QuitMux, ReturnToTerminal]);
 
 enum UserEvent {
     Attached(SessionAttachment),
@@ -115,6 +116,18 @@ impl Render for AgentSheetResizePreview {
     }
 }
 
+struct AgentSheetSnapshot {
+    picker: Option<gpui::AnyElement>,
+    agent: Option<AgentSessionSnapshot>,
+    scroll: ScrollHandle,
+    expanded_items: HashSet<String>,
+    show_help: bool,
+    empty_state: Option<gpui::AnyElement>,
+    title: gpui::AnyElement,
+    footer: gpui::AnyElement,
+    width: f32,
+}
+
 struct MuxApp {
     focus_handle: FocusHandle,
     backend: BackendHandle,
@@ -134,6 +147,7 @@ struct MuxApp {
     pending_agent_prompt: Option<AgentPrompt>,
     agent_scroll: ScrollHandle,
     agent_sheet_width: Option<f32>,
+    agent_help_tabs: HashSet<TabId>,
     expanded_agent_items: HashSet<String>,
     agent_toggle_prefix: bool,
     agent_context: AgentContextMode,
@@ -238,6 +252,7 @@ impl MuxApp {
             pending_agent_prompt: None,
             agent_scroll: ScrollHandle::new(),
             agent_sheet_width: None,
+            agent_help_tabs: HashSet::new(),
             expanded_agent_items: HashSet::new(),
             agent_toggle_prefix: false,
             agent_context: AgentContextMode::Pane,
@@ -791,44 +806,18 @@ impl MuxApp {
             let Some(entity) = app.upgrade() else {
                 return sheet;
             };
-            let (picker, agent, scroll, expanded_items, empty_state, title, footer, sheet_width) = {
+            let snapshot = {
                 let this = entity.read(cx);
-                let picker = (this.agents_for_active_tab().count() > 1)
-                    .then(|| agent_session_picker(&app, this).into_any_element());
-                let agent = this.active_agent().cloned();
-                let scroll = this.agent_scroll.clone();
-                let expanded_items = this.expanded_agent_items.clone();
-                let empty_state = agent
-                    .is_none()
-                    .then(|| agent_empty_state(this).into_any_element());
-                let title = agent_sheet_title(this).into_any_element();
-                let footer = agent_composer(&app, this).into_any_element();
-                let sheet_width = resolved_agent_sheet_width(
-                    f32::from(window.viewport_size().width),
-                    this.agent_sheet_width,
-                );
-                (
-                    picker,
-                    agent,
-                    scroll,
-                    expanded_items,
-                    empty_state,
-                    title,
-                    footer,
-                    sheet_width,
-                )
+                agent_sheet_snapshot(&app, this, f32::from(window.viewport_size().width))
             };
 
-            // Give the nested timeline the space between gpui-component's
-            // title and footer so its local scroll handle—not the sheet's
-            // private outer scroller—owns overflow. Recompute on every frame
-            // so resizing the window cannot leave stale sheet geometry.
             let sheet_body_height =
                 (f32::from(window.viewport_size().height) - layout::TAB_BAR_HEIGHT - 36.0 - 60.0)
                     .max(0.0);
 
             let escape_app = app.clone();
             let cancel_app = app.clone();
+            let return_app = app.clone();
             let mut content = v_flex()
                 .key_context("MuxAgentSheet")
                 .capture_key_down(move |event, window, cx| {
@@ -836,6 +825,10 @@ impl MuxApp {
                 })
                 .on_action(move |_: &CancelAgentTurn, window, cx| {
                     cancel_or_close_agent_sheet(&cancel_app, window, cx);
+                })
+                .on_action(move |_: &ReturnToTerminal, window, cx| {
+                    close_agent_sheet(&return_app, window, cx);
+                    cx.stop_propagation();
                 })
                 .relative()
                 .w_full()
@@ -845,26 +838,29 @@ impl MuxApp {
                 .px_4()
                 .gap_2()
                 .child(agent_sheet_resize_handle(&app));
-            if let Some(picker) = picker {
+            if let Some(picker) = snapshot.picker {
                 content = content.child(picker);
             }
-            if let Some(agent) = agent.as_ref() {
+            if let Some(agent) = snapshot.agent.as_ref() {
                 content = content.child(agent_timeline(
                     &app,
                     agent,
-                    &scroll,
-                    &expanded_items,
+                    &snapshot.scroll,
+                    &snapshot.expanded_items,
+                    snapshot.show_help,
                     window,
                     cx,
                 ));
                 content = content.child(agent_auth_controls(&app, agent));
                 content = content.child(agent_permission_controls(&app, agent));
-            } else if let Some(empty_state) = empty_state {
+            } else if snapshot.show_help {
+                content = content.child(agent_help_surface(None));
+            } else if let Some(empty_state) = snapshot.empty_state {
                 content = content.child(empty_state);
             }
             sheet
-                .title(title)
-                .size(px(sheet_width))
+                .title(snapshot.title)
+                .size(px(snapshot.width))
                 .margin_top(px(layout::TAB_BAR_HEIGHT))
                 .overlay(false)
                 .overlay_closable(false)
@@ -873,7 +869,7 @@ impl MuxApp {
                 .px_0()
                 .pt_1()
                 .pb_0()
-                .footer(footer)
+                .footer(snapshot.footer)
                 .child(content)
         });
         self.agent_input
@@ -1006,13 +1002,13 @@ impl MuxApp {
             "collapse" => {
                 self.set_agent_detail_expansion(false, parts.next() == Some("all"));
             }
-            "help" => window.push_notification(
-                Notification::info(
-                    "/new [agent] [cwd] · /next · /prev · /use <session> · /end · /cancel · /expand [all] · /collapse [all] · /context pane|none · /mode <id> · /model <id> · /effort <id> · /login [method] · /allow [always] · /deny [always]",
-                )
-                .autohide(false),
-                cx,
-            ),
+            "help" => {
+                if let Some(tab_id) = self.active_tab_id() {
+                    self.agent_help_tabs.insert(tab_id);
+                    self.agent_scroll.scroll_to_bottom();
+                    cx.notify();
+                }
+            }
             _ => return false,
         }
         true
@@ -1972,6 +1968,32 @@ fn window_control_dot(
         })
 }
 
+fn agent_sheet_snapshot(
+    app: &gpui::WeakEntity<MuxApp>,
+    this: &MuxApp,
+    viewport_width: f32,
+) -> AgentSheetSnapshot {
+    let picker = (this.agents_for_active_tab().count() > 1)
+        .then(|| agent_session_picker(app, this).into_any_element());
+    let agent = this.active_agent().cloned();
+    let show_help = this
+        .active_tab_id()
+        .is_some_and(|tab_id| this.agent_help_tabs.contains(&tab_id));
+    let empty_state =
+        (agent.is_none() && !show_help).then(|| agent_empty_state(this).into_any_element());
+    AgentSheetSnapshot {
+        picker,
+        agent,
+        scroll: this.agent_scroll.clone(),
+        expanded_items: this.expanded_agent_items.clone(),
+        show_help,
+        empty_state,
+        title: agent_sheet_title(this).into_any_element(),
+        footer: agent_composer(app, this).into_any_element(),
+        width: resolved_agent_sheet_width(viewport_width, this.agent_sheet_width),
+    }
+}
+
 fn resolved_agent_sheet_width(viewport_width: f32, preferred: Option<f32>) -> f32 {
     let maximum = (viewport_width - 24.0).clamp(280.0, AGENT_SHEET_MAX_WIDTH);
     let minimum = AGENT_SHEET_MIN_WIDTH.min(maximum);
@@ -2049,6 +2071,16 @@ fn handle_agent_sheet_key_down(
         && !event.keystroke.modifiers.alt
         && !event.keystroke.modifiers.shift
         && !event.keystroke.modifiers.platform;
+    let alt_left = event.keystroke.key.eq_ignore_ascii_case("left")
+        && event.keystroke.modifiers.alt
+        && !event.keystroke.modifiers.control
+        && !event.keystroke.modifiers.shift
+        && !event.keystroke.modifiers.platform;
+    if alt_left {
+        close_agent_sheet(app, window, cx);
+        cx.stop_propagation();
+        return;
+    }
     if control_p {
         let _ = app.update(cx, |this, _| {
             this.agent_toggle_prefix = !this.agent_toggle_prefix;
@@ -2237,10 +2269,126 @@ fn agent_empty_state(this: &MuxApp) -> impl IntoElement {
         )
 }
 
+fn agent_help_surface(agent: Option<&AgentSessionSnapshot>) -> impl IntoElement {
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scrollbar()
+        .pr_3()
+        .pb_3()
+        .child(agent_help_card(agent))
+}
+
+fn agent_help_card(agent: Option<&AgentSessionSnapshot>) -> gpui::AnyElement {
+    let mut card = v_flex()
+        .w_full()
+        .min_w_0()
+        .gap_3()
+        .p_3()
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(CHROME_RAISED))
+        .child(
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .child(
+                    Icon::new(IconName::BookOpen)
+                        .small()
+                        .text_color(rgb(SIGNAL)),
+                )
+                .child(div().font_semibold().child("Agent commands")),
+        )
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .whitespace_normal()
+                .text_sm()
+                .line_height(px(20.0))
+                .text_color(rgb(MUTED_TEXT))
+                .child("Mux commands stay local. Other slash commands are sent to the active ACP agent."),
+        )
+        .child(agent_help_section(
+            "KEYBOARD",
+            &["⌃P A  toggle agent", "⌥←  return to terminal", "Esc  cancel / close", "Return  send"],
+        ))
+        .child(agent_help_section(
+            "SESSIONS",
+            &["/new [agent] [cwd]", "/next", "/prev", "/use <session>", "/end", "/cancel"],
+        ))
+        .child(agent_help_section(
+            "CONTEXT + VIEW",
+            &["/context pane|none", "/expand [all]", "/collapse [all]"],
+        ))
+        .child(agent_help_section(
+            "CONFIGURE",
+            &["/mode <id>", "/model <id>", "/effort <id>", "/login [method]", "/allow [always]", "/deny [always]"],
+        ));
+
+    if let Some(agent) = agent {
+        let commands = agent
+            .available_commands
+            .iter()
+            .filter(|command| !command.name.starts_with('$'))
+            .take(10)
+            .map(|command| format!("/{}", command.name))
+            .collect::<Vec<_>>();
+        if !commands.is_empty() {
+            card = card.child(agent_help_owned_section("FROM AGENT", &commands));
+        }
+    }
+    card.into_any_element()
+}
+
+fn agent_help_section(label: &'static str, commands: &[&'static str]) -> gpui::AnyElement {
+    let commands = commands
+        .iter()
+        .map(|command| (*command).to_owned())
+        .collect::<Vec<_>>();
+    agent_help_owned_section(label, &commands)
+}
+
+fn agent_help_owned_section(label: &'static str, commands: &[String]) -> gpui::AnyElement {
+    let mut chips = h_flex().w_full().min_w_0().gap_1().flex_wrap();
+    for command in commands {
+        chips = chips.child(
+            div()
+                .flex_none()
+                .whitespace_nowrap()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(rgb(SURFACE))
+                .font_family(EMBEDDED_TERMINAL_FONT)
+                .text_xs()
+                .child(command.clone()),
+        );
+    }
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .gap_1p5()
+        .child(
+            div()
+                .text_size(px(9.0))
+                .font_semibold()
+                .text_color(rgb(MUTED_TEXT))
+                .child(label),
+        )
+        .child(chips)
+        .into_any_element()
+}
+
 fn agent_composer(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl IntoElement {
     let prompt_app = app.clone();
     let keyboard_app = app.clone();
     let cancel_app = app.clone();
+    let return_app = app.clone();
     v_flex()
         .key_context("MuxAgentSheet")
         .capture_key_down(move |event, window, cx| {
@@ -2248,6 +2396,10 @@ fn agent_composer(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl IntoEle
         })
         .on_action(move |_: &CancelAgentTurn, window, cx| {
             cancel_or_close_agent_sheet(&cancel_app, window, cx);
+        })
+        .on_action(move |_: &ReturnToTerminal, window, cx| {
+            close_agent_sheet(&return_app, window, cx);
+            cx.stop_propagation();
         })
         .w_full()
         .min_w_0()
@@ -2289,6 +2441,7 @@ fn agent_timeline(
     agent: &AgentSessionSnapshot,
     scroll: &ScrollHandle,
     expanded_items: &HashSet<String>,
+    show_help: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> impl IntoElement {
@@ -2310,7 +2463,7 @@ fn agent_timeline(
         .vertical_scrollbar(scroll)
         .pr_3()
         .pb_3();
-    if agent.timeline.is_empty() {
+    if agent.timeline.is_empty() && !show_help {
         timeline = timeline.child(
             v_flex()
                 .flex_1()
@@ -2344,6 +2497,9 @@ fn agent_timeline(
             }
             _ => agent_event_item(item),
         });
+    }
+    if show_help {
+        timeline = timeline.child(agent_help_card(Some(agent)));
     }
     timeline
 }
@@ -3157,6 +3313,38 @@ fn terminal_codepoint(key: &str, terminal_key: TerminalKey) -> Option<char> {
     }
 }
 
+fn quit_mux(_: &QuitMux, cx: &mut App) {
+    // The daemon owns terminal and ACP process lifetime. Quitting this native
+    // client deliberately detaches the GUI without touching the workspace.
+    cx.quit();
+}
+
+fn configure_application_menu(cx: &mut App) {
+    cx.set_menus(vec![Menu {
+        name: "Mux".into(),
+        items: vec![
+            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::separator(),
+            MenuItem::action("Quit Mux", QuitMux),
+        ],
+    }]);
+}
+
+fn configure_application_actions(cx: &mut App) {
+    cx.on_action(quit_mux);
+    cx.bind_keys([KeyBinding::new("cmd-q", QuitMux, None)]);
+    cx.bind_keys([KeyBinding::new(
+        "alt-left",
+        ReturnToTerminal,
+        Some("MuxAgentSheet"),
+    )]);
+    // gpui-component's Input binds Option-Left to word navigation. Adding a
+    // later binding at the same depth lets the agent composer own it; inputs
+    // without a ReturnToTerminal handler still fall through to word motion.
+    cx.bind_keys([KeyBinding::new("alt-left", ReturnToTerminal, Some("Input"))]);
+    configure_application_menu(cx);
+}
+
 fn configure_theme(cx: &mut App) {
     Theme::change(ThemeMode::Dark, None, cx);
     let theme = Theme::global_mut(cx);
@@ -3264,6 +3452,7 @@ fn main() -> Result<()> {
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
+            configure_application_actions(cx);
             cx.bind_keys([KeyBinding::new(
                 "shift-enter",
                 Enter { secondary: true },
