@@ -22,7 +22,7 @@ jobs:
           persist-credentials: false
       - &rust
         name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@1.88.0
+        uses: dtolnay/rust-toolchain@1.100.0
       - name: Publish GitHub release
         uses: release-plz/action@v0.5
         with:
