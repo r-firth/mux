@@ -23,7 +23,7 @@ use agent_client_protocol::schema::v1::{
     ToolCallContent, ToolCallStatus, ToolCallUpdate,
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, ConnectionTo};
-use mux_workspace::AgentSessionId;
+use mux_workspace::{AgentSessionId, TabId};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -430,6 +430,9 @@ pub enum AgentTimelineItem {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentSessionSnapshot {
     pub id: AgentSessionId,
+    /// The terminal tab that owns this agent. Direct daemon clients may start
+    /// an unscoped session, but GUI-created agents always have an owner.
+    pub tab_id: Option<TabId>,
     pub name: String,
     pub cwd: PathBuf,
     pub status: AgentSessionStatus,
@@ -655,6 +658,15 @@ impl AgentManager {
         spec: &AgentSpec,
         cwd: PathBuf,
     ) -> Result<AgentSessionSnapshot, AgentError> {
+        self.start_for_tab(spec, cwd, None)
+    }
+
+    pub fn start_for_tab(
+        &self,
+        spec: &AgentSpec,
+        cwd: PathBuf,
+        tab_id: Option<TabId>,
+    ) -> Result<AgentSessionSnapshot, AgentError> {
         if !cwd.is_absolute() {
             return Err(AgentError::InvalidWorkingDirectory(
                 "ACP working directory must be absolute".to_owned(),
@@ -671,6 +683,7 @@ impl AgentManager {
         let session_id = AgentSessionId::new();
         let snapshot = AgentSessionSnapshot {
             id: session_id,
+            tab_id,
             name: prepared.name().to_owned(),
             cwd: cwd.clone(),
             status: AgentSessionStatus::Starting,
@@ -708,6 +721,19 @@ impl AgentManager {
             }
         });
         Ok(snapshot)
+    }
+
+    /// End every external ACP process owned by a terminal tab. Closed
+    /// snapshots remain available so event subscribers can observe the final
+    /// state without racing tab teardown.
+    pub fn close_for_tab(&self, tab_id: TabId) {
+        let sessions = self.inner.sessions.read();
+        for agent in sessions.values() {
+            let snapshot = agent.snapshot.read();
+            if snapshot.tab_id == Some(tab_id) && snapshot.status != AgentSessionStatus::Closed {
+                let _ = agent.commands.send(AgentCommand::Close);
+            }
+        }
     }
 
     pub fn prompt(
@@ -1908,10 +1934,65 @@ mod tests {
     }
 
     #[test]
+    fn closing_a_tab_only_closes_its_owned_agent_sessions() {
+        let manager = AgentManager::new();
+        let owned_tab = TabId::new();
+        let other_tab = TabId::new();
+        let owned_id = AgentSessionId::new();
+        let other_id = AgentSessionId::new();
+        let (owned_tx, mut owned_rx) = mpsc::unbounded_channel();
+        let (other_tx, mut other_rx) = mpsc::unbounded_channel();
+        let snapshot = |id, tab_id| {
+            Arc::new(RwLock::new(AgentSessionSnapshot {
+                id,
+                tab_id: Some(tab_id),
+                name: "test".to_owned(),
+                cwd: PathBuf::from("/"),
+                status: AgentSessionStatus::Idle,
+                agent_name: None,
+                agent_version: None,
+                timeline: Vec::new(),
+                context_used: None,
+                context_size: None,
+                current_mode: None,
+                modes: Vec::new(),
+                config_options: Vec::new(),
+                available_commands: Vec::new(),
+                auth_methods: Vec::new(),
+            }))
+        };
+        manager.inner.sessions.write().extend([
+            (
+                owned_id,
+                ManagedAgent {
+                    snapshot: snapshot(owned_id, owned_tab),
+                    commands: owned_tx,
+                },
+            ),
+            (
+                other_id,
+                ManagedAgent {
+                    snapshot: snapshot(other_id, other_tab),
+                    commands: other_tx,
+                },
+            ),
+        ]);
+
+        manager.close_for_tab(owned_tab);
+
+        assert!(matches!(owned_rx.try_recv(), Ok(AgentCommand::Close)));
+        assert!(matches!(
+            other_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
     fn streaming_chunks_with_the_same_message_are_coalesced() {
         let id = AgentSessionId::new();
         let mut snapshot = AgentSessionSnapshot {
             id,
+            tab_id: None,
             name: "test".to_owned(),
             cwd: PathBuf::from("/"),
             status: AgentSessionStatus::Working,
@@ -1976,6 +2057,7 @@ mod tests {
         let id = AgentSessionId::new();
         let mut snapshot = AgentSessionSnapshot {
             id,
+            tab_id: None,
             name: "test".to_owned(),
             cwd: PathBuf::from("/"),
             status: AgentSessionStatus::Idle,
@@ -2015,6 +2097,7 @@ mod tests {
         let id = AgentSessionId::new();
         let mut snapshot = AgentSessionSnapshot {
             id,
+            tab_id: None,
             name: "test".to_owned(),
             cwd: PathBuf::from("/"),
             status: AgentSessionStatus::Idle,
@@ -2056,6 +2139,7 @@ mod tests {
         };
         let mut snapshot = AgentSessionSnapshot {
             id,
+            tab_id: None,
             name: "test".to_owned(),
             cwd: PathBuf::from("/"),
             status: AgentSessionStatus::Starting,
@@ -2119,6 +2203,7 @@ mod tests {
         let methods = normalize_auth_methods(&[method]);
         let snapshot = Arc::new(RwLock::new(AgentSessionSnapshot {
             id,
+            tab_id: None,
             name: "test".to_owned(),
             cwd: std::env::temp_dir(),
             status: AgentSessionStatus::Starting,
@@ -2193,6 +2278,7 @@ mod tests {
         ))]);
         let snapshot = Arc::new(RwLock::new(AgentSessionSnapshot {
             id,
+            tab_id: None,
             name: "test".to_owned(),
             cwd: std::env::temp_dir(),
             status: AgentSessionStatus::Starting,

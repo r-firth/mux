@@ -13,7 +13,7 @@ use mux_protocol::{
     SessionSummary, SpawnCommand,
 };
 use mux_terminal::TerminalSize;
-use mux_workspace::{AgentSessionId, PaneId, Session, SessionId, WorkspaceCommand};
+use mux_workspace::{AgentSessionId, PaneId, Session, SessionId, TabId, WorkspaceCommand};
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -72,16 +72,19 @@ impl DaemonState {
         &self,
         spec: &AgentSpec,
         pane_id: PaneId,
+        cwd_override: Option<PathBuf>,
     ) -> Result<AgentSessionSnapshot, RemoteError> {
-        let cwd = self
+        let (tab_id, pane_cwd) = self
             .sessions
             .read()
             .values()
-            .find_map(|session| session.cwd_for_pane(pane_id))
+            .find_map(|session| session.agent_scope_for_pane(pane_id))
             .ok_or_else(|| {
                 RemoteError::new(ErrorCode::NotFound, format!("pane not found: {pane_id}"))
             })?;
-        self.start_agent(spec, cwd)
+        self.agents
+            .start_for_tab(spec, cwd_override.unwrap_or(pane_cwd), Some(tab_id))
+            .map_err(|error| agent_error(&error))
     }
 
     pub fn prompt_agent(
@@ -278,7 +281,17 @@ impl DaemonState {
                 format!("session not found: {session_id}"),
             )
         })?;
+        let tab_ids = session
+            .model
+            .read()
+            .tabs
+            .iter()
+            .map(|tab| tab.id)
+            .collect::<Vec<_>>();
         session.kill();
+        for tab_id in tab_ids {
+            self.agents.close_for_tab(tab_id);
+        }
         self.persist_metadata().map_err(internal_error)
     }
 
@@ -321,9 +334,14 @@ impl DaemonState {
                 .map_err(internal_error);
         }
         let session = self.resolve(&SessionSelector::Id(session_id))?;
+        let closing_tab =
+            matches!(command, WorkspaceCommand::CloseTab).then(|| session.model.read().active_tab);
         let attachment = session
             .apply_command(command, self.replay_bytes_per_pane)
             .map_err(internal_error)?;
+        if let Some(tab_id) = closing_tab {
+            self.agents.close_for_tab(tab_id);
+        }
         let _ = session
             .events
             .send(ServerEvent::WorkspaceChanged { session_id });
@@ -541,6 +559,17 @@ impl SessionRuntime {
         })
     }
 
+    fn agent_scope_for_pane(&self, pane_id: PaneId) -> Option<(TabId, PathBuf)> {
+        let tab_id = self
+            .model
+            .read()
+            .tabs
+            .iter()
+            .find(|tab| tab.layout.contains(pane_id))?
+            .id;
+        self.cwd_for_pane(pane_id).map(|cwd| (tab_id, cwd))
+    }
+
     fn remove_panes(&self, pane_ids: &[PaneId]) {
         let mut panes = self.panes.write();
         for pane_id in pane_ids {
@@ -655,6 +684,18 @@ mod tests {
             .get(&original_id)
             .expect("original pane")
             .clone();
+        let original_tab = runtime.model.read().active_tab;
+        let (scoped_tab, scoped_cwd) = runtime
+            .agent_scope_for_pane(original_id)
+            .expect("agent scope for original pane");
+        assert_eq!(scoped_tab, original_tab);
+        assert_eq!(
+            scoped_cwd.canonicalize().expect("canonical scoped cwd"),
+            initial_directory
+                .path()
+                .canonicalize()
+                .expect("canonical initial cwd")
+        );
         original
             .write(format!("cd '{}'\n", inherited_directory.display()).as_bytes())
             .expect("change shell directory");
@@ -695,6 +736,16 @@ mod tests {
             .expect("new tab pane")
             .clone();
         wait_for_cwd(&tab_pane, &tab_directory);
+        let new_tab = runtime.model.read().active_tab;
+        let (scoped_tab, scoped_cwd) = runtime
+            .agent_scope_for_pane(tab_pane_id)
+            .expect("agent scope for new tab pane");
+        assert_ne!(new_tab, original_tab);
+        assert_eq!(scoped_tab, new_tab);
+        assert_eq!(
+            scoped_cwd.canonicalize().expect("canonical scoped cwd"),
+            tab_directory.canonicalize().expect("canonical tab cwd")
+        );
 
         for pane in runtime.panes.read().values() {
             let _ = pane.kill();
