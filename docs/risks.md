@@ -40,16 +40,21 @@ the GUI. Ghostty's gesture engine now owns cell/word/line selection, repeat-clic
 thresholds, direction-aware and rectangular dragging, and viewport autoscroll;
 the GUI only translates native pane geometry and runs its timer. The primary
 remaining terminal risks are search, accessibility, and broader compatibility
-testing. Cursor blink policy comes from Ghostty and now
+testing. The pinned C API exposes viewport and history cells but not Ghostty's
+synchronous screen-search engine, so search is deliberately held behind the
+terminal boundary instead of duplicating VT-aware matching with an O(history)
+GUI scan. Cursor blink policy comes from Ghostty and now
 uses its 600 ms cadence with input/output and window-focus resets. Native IME is
 enabled, preedit is rendered, and candidate windows follow the active terminal
 caret or agent composer input area.
 
 The C render adapter retains and grows its row, cell, and grapheme buffers
 instead of allocating a full viewport on every frame. The Rust render boundary
-still materializes an owned cell frame before row shaping. Measure that copy
-and its allocation profile under sustained output before replacing it with a
-more incremental borrowed/delta API.
+also refreshes an existing owned frame in place, retaining its viewport vectors
+and per-cell grapheme storage across output, scroll, selection, and resize
+updates. It still copies cell fields before row shaping; measure that remaining
+copy under sustained output before considering a more incremental borrowed or
+delta API.
 
 ## ACP
 

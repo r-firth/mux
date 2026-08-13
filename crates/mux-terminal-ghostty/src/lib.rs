@@ -843,6 +843,22 @@ mod linked {
 
     impl TerminalRenderer for GhosttyEngine {
         fn render_frame(&mut self) -> Result<RenderFrame, TerminalError> {
+            let mut rendered = RenderFrame {
+                cols: 0,
+                rows: 0,
+                dirty: RenderDirty::Clean,
+                background: Rgb::default(),
+                foreground: Rgb::default(),
+                cursor: None,
+                scroll: TerminalScrollState::default(),
+                row_metadata: Vec::new(),
+                cells: Vec::new(),
+            };
+            self.render_frame_into(&mut rendered)?;
+            Ok(rendered)
+        }
+
+        fn render_frame_into(&mut self, rendered: &mut RenderFrame) -> Result<(), TerminalError> {
             let mut frame = CRenderFrame::default();
             // SAFETY: both handles are exclusively owned and `frame` is a valid out pointer.
             let result = unsafe {
@@ -854,7 +870,7 @@ mod linked {
             };
             check(result).map_err(|error| TerminalError::Engine(error.to_string()))?;
             let guard = RenderFrameGuard(frame);
-            convert_frame(&guard.0)
+            convert_frame_into(&guard.0, rendered)
         }
     }
 
@@ -1328,24 +1344,29 @@ mod linked {
         }
     }
 
-    fn convert_frame(frame: &CRenderFrame) -> Result<RenderFrame, TerminalError> {
+    fn convert_frame_into(
+        frame: &CRenderFrame,
+        rendered: &mut RenderFrame,
+    ) -> Result<(), TerminalError> {
         let cell_count = usize::from(frame.cols) * usize::from(frame.rows);
         let rows = borrowed_slice(frame.row_metadata, usize::from(frame.rows), "rows")?;
         let cells = borrowed_slice(frame.cells, cell_count, "cells")?;
         let text = borrowed_slice(frame.text, frame.text_len, "text")?;
 
-        let row_metadata = rows
-            .iter()
-            .map(|row| RenderRow {
+        rendered
+            .row_metadata
+            .resize(usize::from(frame.rows), RenderRow::default());
+        for (target, row) in rendered.row_metadata.iter_mut().zip(rows) {
+            *target = RenderRow {
                 wrapped: row.wrapped != 0,
                 continuation: row.continuation != 0,
                 dirty: row.dirty != 0,
-            })
-            .collect();
-        let cells = cells
-            .iter()
-            .map(|cell| convert_cell(cell, text))
-            .collect::<Result<Vec<_>, _>>()?;
+            };
+        }
+        rendered.cells.resize_with(cell_count, blank_render_cell);
+        for (target, cell) in rendered.cells.iter_mut().zip(cells) {
+            convert_cell_into(cell, text, target)?;
+        }
         let cursor = if frame.cursor_has_value == 0 {
             None
         } else {
@@ -1365,29 +1386,30 @@ mod linked {
             })
         };
 
-        Ok(RenderFrame {
-            cols: frame.cols,
-            rows: frame.rows,
-            dirty: match frame.dirty {
-                0 => RenderDirty::Clean,
-                1 => RenderDirty::Partial,
-                2 => RenderDirty::Full,
-                other => return Err(invalid_render_value("dirty state", other)),
-            },
-            background: frame.background.into(),
-            foreground: frame.foreground.into(),
-            cursor,
-            scroll: TerminalScrollState {
-                total: frame.scroll_total,
-                offset: frame.scroll_offset,
-                len: frame.scroll_len,
-            },
-            row_metadata,
-            cells,
-        })
+        rendered.cols = frame.cols;
+        rendered.rows = frame.rows;
+        rendered.dirty = match frame.dirty {
+            0 => RenderDirty::Clean,
+            1 => RenderDirty::Partial,
+            2 => RenderDirty::Full,
+            other => return Err(invalid_render_value("dirty state", other)),
+        };
+        rendered.background = frame.background.into();
+        rendered.foreground = frame.foreground.into();
+        rendered.cursor = cursor;
+        rendered.scroll = TerminalScrollState {
+            total: frame.scroll_total,
+            offset: frame.scroll_offset,
+            len: frame.scroll_len,
+        };
+        Ok(())
     }
 
-    fn convert_cell(cell: &CRenderCell, text: &[u8]) -> Result<RenderCell, TerminalError> {
+    fn convert_cell_into(
+        cell: &CRenderCell,
+        text: &[u8],
+        rendered: &mut RenderCell,
+    ) -> Result<(), TerminalError> {
         let start = usize::try_from(cell.text_offset)
             .map_err(|_| TerminalError::Engine("invalid text offset".to_owned()))?;
         let length = usize::try_from(cell.text_len)
@@ -1399,8 +1421,9 @@ mod linked {
             std::str::from_utf8(text.get(start..end).ok_or_else(|| {
                 TerminalError::Engine("render text range was invalid".to_owned())
             })?)
-            .map_err(|error| TerminalError::Engine(format!("render text was not UTF-8: {error}")))?
-            .to_owned();
+            .map_err(|error| {
+                TerminalError::Engine(format!("render text was not UTF-8: {error}"))
+            })?;
         let hyperlink = if cell.hyperlink_len == 0 {
             None
         } else {
@@ -1417,43 +1440,65 @@ mod linked {
                 })?)
                 .map_err(|error| {
                     TerminalError::Engine(format!("render hyperlink was not UTF-8: {error}"))
-                })?
-                .to_owned(),
+                })?,
             )
         };
+        let width = match cell.width {
+            0 => CellWidth::Narrow,
+            1 => CellWidth::Wide,
+            2 => CellWidth::SpacerTail,
+            3 => CellWidth::SpacerHead,
+            other => return Err(invalid_render_value("cell width", other)),
+        };
+        let semantic = match cell.semantic {
+            0 => SemanticContent::Output,
+            1 => SemanticContent::Input,
+            2 => SemanticContent::Prompt,
+            other => return Err(invalid_render_value("semantic content", other)),
+        };
 
-        Ok(RenderCell {
-            grapheme,
-            foreground: cell.foreground.into(),
-            background: cell.background.into(),
-            underline_color: cell.underline_color.into(),
-            style: CellStyle {
-                bold: cell.flags & CELL_BOLD != 0,
-                italic: cell.flags & CELL_ITALIC != 0,
-                faint: cell.flags & CELL_FAINT != 0,
-                blink: cell.flags & CELL_BLINK != 0,
-                inverse: cell.flags & CELL_INVERSE != 0,
-                invisible: cell.flags & CELL_INVISIBLE != 0,
-                strikethrough: cell.flags & CELL_STRIKETHROUGH != 0,
-                overline: cell.flags & CELL_OVERLINE != 0,
-                underline: cell.underline,
-            },
-            width: match cell.width {
-                0 => CellWidth::Narrow,
-                1 => CellWidth::Wide,
-                2 => CellWidth::SpacerTail,
-                3 => CellWidth::SpacerHead,
-                other => return Err(invalid_render_value("cell width", other)),
-            },
-            semantic: match cell.semantic {
-                0 => SemanticContent::Output,
-                1 => SemanticContent::Input,
-                2 => SemanticContent::Prompt,
-                other => return Err(invalid_render_value("semantic content", other)),
-            },
-            selected: cell.selected != 0,
-            hyperlink,
-        })
+        rendered.grapheme.clear();
+        rendered.grapheme.push_str(grapheme);
+        match (rendered.hyperlink.as_mut(), hyperlink) {
+            (Some(target), Some(value)) => {
+                target.clear();
+                target.push_str(value);
+            }
+            (_, Some(value)) => rendered.hyperlink = Some(value.to_owned()),
+            (_, None) => rendered.hyperlink = None,
+        }
+        rendered.foreground = cell.foreground.into();
+        rendered.background = cell.background.into();
+        rendered.underline_color = cell.underline_color.into();
+        rendered.style = CellStyle {
+            bold: cell.flags & CELL_BOLD != 0,
+            italic: cell.flags & CELL_ITALIC != 0,
+            faint: cell.flags & CELL_FAINT != 0,
+            blink: cell.flags & CELL_BLINK != 0,
+            inverse: cell.flags & CELL_INVERSE != 0,
+            invisible: cell.flags & CELL_INVISIBLE != 0,
+            strikethrough: cell.flags & CELL_STRIKETHROUGH != 0,
+            overline: cell.flags & CELL_OVERLINE != 0,
+            underline: cell.underline,
+        };
+        rendered.width = width;
+        rendered.semantic = semantic;
+        rendered.selected = cell.selected != 0;
+        Ok(())
+    }
+
+    fn blank_render_cell() -> RenderCell {
+        RenderCell {
+            grapheme: String::new(),
+            foreground: Rgb::default(),
+            background: Rgb::default(),
+            underline_color: Rgb::default(),
+            style: CellStyle::default(),
+            width: CellWidth::Narrow,
+            semantic: SemanticContent::Output,
+            selected: false,
+            hyperlink: None,
+        }
     }
 
     fn borrowed_slice<'a, T>(
@@ -1578,6 +1623,29 @@ mod linked {
                     b: 56
                 }
             );
+        }
+
+        #[test]
+        fn render_frame_into_reuses_viewport_and_grapheme_storage() {
+            let mut engine = GhosttyEngine::new(TerminalSize {
+                cols: 80,
+                rows: 24,
+                ..TerminalSize::default()
+            })
+            .expect("new terminal");
+            engine.apply_output(1, b"x").expect("initial output");
+            let mut frame = engine.render_frame().expect("initial frame");
+            let rows = frame.row_metadata.as_ptr();
+            let cells = frame.cells.as_ptr();
+            let first_grapheme = frame.cells[0].grapheme.as_ptr();
+
+            engine.apply_output(2, b"y").expect("terminal output");
+            engine.render_frame_into(&mut frame).expect("reused frame");
+
+            assert_eq!(frame.row_metadata.as_ptr(), rows);
+            assert_eq!(frame.cells.as_ptr(), cells);
+            assert_eq!(frame.cells[0].grapheme.as_ptr(), first_grapheme);
+            assert_eq!(frame.cells[0].grapheme, "x");
         }
 
         #[test]

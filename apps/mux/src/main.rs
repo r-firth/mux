@@ -260,14 +260,17 @@ impl Application {
             // an unset (black) libghostty background. Upgrade those replicas
             // locally without disturbing a checkpoint that already carries
             // themed or OSC-modified colours.
-            if engine.render_frame()?.background == Rgb::default() && !self.ghostty_theme.is_empty()
-            {
+            let mut frame = engine.render_frame()?;
+            if frame.background == Rgb::default() && !self.ghostty_theme.is_empty() {
                 engine.apply_theme(&self.ghostty_theme)?;
+                engine.render_frame_into(&mut frame)?;
             }
             for chunk in &pane.terminal.replay {
                 engine.apply_output(chunk.sequence, &chunk.bytes)?;
             }
-            let frame = engine.render_frame()?;
+            if !pane.terminal.replay.is_empty() {
+                engine.render_frame_into(&mut frame)?;
+            }
             panes.insert(pane.pane_id, PaneReplica { engine, frame });
         }
         self.session = Some(attachment.session);
@@ -436,7 +439,7 @@ impl Application {
             }
             if let Some(pane) = self.panes.get_mut(&pane_id) {
                 pane.engine.resize(size)?;
-                pane.frame = pane.engine.render_frame()?;
+                pane.engine.render_frame_into(&mut pane.frame)?;
                 effective_changes.insert(pane_id);
             }
             if let Some(backend) = &self.backend {
@@ -521,7 +524,7 @@ impl Application {
         let changed_panes = std::mem::take(&mut self.dirty_panes);
         for pane_id in &changed_panes {
             if let Some(pane) = self.panes.get_mut(pane_id) {
-                pane.frame = pane.engine.render_frame()?;
+                pane.engine.render_frame_into(&mut pane.frame)?;
             }
         }
         let reset_cursor = std::mem::take(&mut self.cursor_blink.reset_pending);
@@ -1626,7 +1629,7 @@ impl Application {
             if snapped_to_bottom {
                 pane.engine
                     .scroll_viewport(TerminalViewportScroll::Bottom)?;
-                pane.frame = pane.engine.render_frame()?;
+                pane.engine.render_frame_into(&mut pane.frame)?;
             }
             Ok((bytes, snapped_to_bottom.then_some(pane_id)))
         })();
@@ -2146,7 +2149,7 @@ impl Application {
                 .get_mut(&pane_id)
                 .ok_or_else(|| anyhow!("terminal pane is unavailable"))?;
             pane.engine.scroll_viewport(scroll)?;
-            pane.frame = pane.engine.render_frame()?;
+            pane.engine.render_frame_into(&mut pane.frame)?;
             self.sync_view(&HashSet::from([pane_id]))?;
             self.request_redraw();
             Ok(())
@@ -2372,7 +2375,7 @@ impl Application {
             .get_mut(&pane_id)
             .ok_or_else(|| anyhow!("selection pane is unavailable"))?;
         pane.engine.set_selection(selection)?;
-        pane.frame = pane.engine.render_frame()?;
+        pane.engine.render_frame_into(&mut pane.frame)?;
         if selection.is_some() {
             self.selected_pane = Some(pane_id);
         } else if self.selected_pane == Some(pane_id) {
@@ -2394,7 +2397,7 @@ impl Application {
                 .get_mut(&pane_id)
                 .ok_or_else(|| anyhow!("selection pane is unavailable"))?;
             let status = pane.engine.selection_gesture(event)?;
-            pane.frame = pane.engine.render_frame()?;
+            pane.engine.render_frame_into(&mut pane.frame)?;
             status
         };
         self.selected_pane = status.has_selection.then_some(pane_id);
