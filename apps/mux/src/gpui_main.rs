@@ -155,6 +155,12 @@ impl MuxApp {
             font_size,
             "resolved GPUI terminal font"
         );
+        let metrics = GridMetrics::from_font(&terminal_font, font_size, cx.text_system());
+        info!(
+            cell_width = metrics.cell_width,
+            cell_height = metrics.cell_height,
+            "measured terminal grid"
+        );
         let agent_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .auto_grow(1, 5)
@@ -215,7 +221,7 @@ impl MuxApp {
             selection_clock_origin: Instant::now(),
             keymap: Keymap::zellij_default(),
             mode: InputMode::Normal,
-            metrics: GridMetrics::from_font(font_size),
+            metrics,
             terminal_font,
             ghostty_theme: GhosttyTheme::load_user().unwrap_or_default(),
             clipboard: arboard::Clipboard::new().ok(),
@@ -303,8 +309,11 @@ impl MuxApp {
             );
         }
         self.session = Some(attachment.session);
-        self.sent_sizes
-            .retain(|pane_id, _| panes.contains_key(pane_id));
+        // Every attachment replaces the local emulators from daemon-owned
+        // checkpoints. Force the next layout pass to size both copies again;
+        // retaining an old sent size can leave a fresh replica at the
+        // checkpoint's previous dimensions indefinitely.
+        self.sent_sizes.clear();
         self.panes = panes;
         Ok(())
     }
@@ -1416,6 +1425,17 @@ impl MuxApp {
                 cell_height_px: self.metrics.cell_height.round() as u32,
             };
             if self.sent_sizes.get(&pane.pane_id) != Some(&size) {
+                let Some(replica) = self.panes.get_mut(&pane.pane_id) else {
+                    continue;
+                };
+                if let Err(error) = replica.engine.resize(size).and_then(|()| {
+                    replica
+                        .engine
+                        .render_frame_into(Arc::make_mut(&mut replica.frame))
+                }) {
+                    error!(pane_id = %pane.pane_id, %error, "could not resize terminal replica");
+                    continue;
+                }
                 self.sent_sizes.insert(pane.pane_id, size);
                 self.backend.send(CommandMessage::Resize {
                     pane_id: pane.pane_id,
