@@ -27,7 +27,7 @@ use mux_terminal::{
     TerminalSelectionAutoscroll, TerminalSelectionGestureEvent, TerminalSelectionGestureStatus,
     TerminalSize, TerminalViewportScroll,
 };
-use mux_terminal_ghostty::{GhosttyEngine, GhosttyTheme};
+use mux_terminal_ghostty::{GhosttyEngine, GhosttyFont, GhosttyTheme};
 use mux_workspace::{
     Action, InputMode, Key as MuxKey, KeyChord, Keymap, Modifiers, PaneId, Session,
     WorkspaceCommand,
@@ -199,6 +199,7 @@ struct Application {
     agent_surface_target: f32,
     last_animation_frame: Option<Instant>,
     ime_preedit: String,
+    ghostty_font: GhosttyFont,
     ghostty_theme: GhosttyTheme,
 }
 
@@ -242,6 +243,7 @@ impl Default for Application {
             agent_surface_target: 0.0,
             last_animation_frame: None,
             ime_preedit: String::new(),
+            ghostty_font: GhosttyFont::load_user().unwrap_or_default(),
             ghostty_theme: GhosttyTheme::load_user().unwrap_or_default(),
         }
     }
@@ -2680,7 +2682,7 @@ impl ApplicationHandler<UserEvent> for Application {
                 return;
             }
         };
-        match pollster::block_on(Renderer::new(window)) {
+        match pollster::block_on(Renderer::new(window, self.ghostty_font.clone())) {
             Ok(renderer) => self.renderer = Some(renderer),
             Err(error) => {
                 error!(%error, "failed to initialize renderer");

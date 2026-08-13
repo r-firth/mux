@@ -25,7 +25,9 @@ use mux_terminal::{
     CellStyle, CellWidth, RenderCell, RenderDirty, RenderFrame, Rgb, TerminalMouseGeometry,
     TerminalPoint, TerminalSelectionGeometry, TerminalSurfacePosition,
 };
+use mux_terminal_ghostty::GhosttyFont;
 use mux_workspace::{InputMode, PaneId, Session};
+use tracing::info;
 use unicode_width::UnicodeWidthStr;
 use wgpu::{
     BlendState, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites,
@@ -156,6 +158,40 @@ struct TerminalTextRun {
     offset_x: f32,
 }
 
+#[derive(Clone, Copy)]
+struct TerminalGridMetrics {
+    font_size: f32,
+    cell_width: f32,
+    cell_height: f32,
+}
+
+struct ResolvedTerminalFont {
+    family: String,
+    size: f32,
+    cell_width: f32,
+    cell_height: f32,
+}
+
+impl ResolvedTerminalFont {
+    fn from_ghostty(font_system: &mut FontSystem, requested: &GhosttyFont) -> Self {
+        let family = resolve_terminal_font_family(font_system, requested.family.as_deref());
+        let size = requested.size.unwrap_or(FONT_SIZE).clamp(6.0, 72.0);
+        let cell_height = size * (CELL_HEIGHT / FONT_SIZE);
+        let cell_width = measure_terminal_cell_width(font_system, &family, size, cell_height)
+            .unwrap_or(size * (CELL_WIDTH / FONT_SIZE));
+        info!(
+            family,
+            size, cell_width, cell_height, "resolved terminal font and grid metrics"
+        );
+        Self {
+            family,
+            size,
+            cell_width,
+            cell_height,
+        }
+    }
+}
+
 struct ChromeText {
     buffer: Buffer,
     rect: Rect,
@@ -183,12 +219,13 @@ pub struct Renderer {
     rect_buffer_capacity: u64,
     overlay_rect_buffer: Option<wgpu::Buffer>,
     overlay_rect_buffer_capacity: u64,
+    terminal_font: ResolvedTerminalFont,
     scale_factor: f32,
     window: Arc<Window>,
 }
 
 impl Renderer {
-    pub async fn new(window: Arc<Window>) -> Result<Self> {
+    pub async fn new(window: Arc<Window>, requested_font: GhosttyFont) -> Result<Self> {
         window.set_ime_allowed(true);
         let size = window.inner_size();
         let instance = Instance::new(&InstanceDescriptor::default());
@@ -244,6 +281,7 @@ impl Renderer {
 
         let mut font_system = FontSystem::new();
         load_terminal_fonts(&mut font_system);
+        let terminal_font = ResolvedTerminalFont::from_ghostty(&mut font_system, &requested_font);
 
         Ok(Self {
             device,
@@ -266,6 +304,7 @@ impl Renderer {
             rect_buffer_capacity: 0,
             overlay_rect_buffer: None,
             overlay_rect_buffer_capacity: 0,
+            terminal_font,
             scale_factor: window.scale_factor() as f32,
             window,
         })
@@ -470,7 +509,13 @@ impl Renderer {
                 .any(|geometry| geometry.pane_id == *pane_id)
         });
         let font_size = self.font_size();
+        let cell_width = self.cell_width();
         let cell_height = self.cell_height();
+        let terminal_metrics = TerminalGridMetrics {
+            font_size,
+            cell_width,
+            cell_height,
+        };
         for pane in &geometry.panes {
             let scaled_geometry = PaneGeometry {
                 pane_id: pane.pane_id,
@@ -506,8 +551,8 @@ impl Renderer {
                         &mut self.font_system,
                         &mut rows,
                         frame,
-                        font_size,
-                        cell_height,
+                        &self.terminal_font.family,
+                        terminal_metrics,
                         rebuild_all,
                     );
                 }
@@ -701,7 +746,7 @@ impl Renderer {
             },
             font_size,
             Color::rgb(235, 239, 247),
-            Family::Name(TERMINAL_FONT_FAMILY),
+            Family::Name(&self.terminal_font.family),
             Weight::NORMAL,
         ));
     }
@@ -1794,7 +1839,7 @@ impl Renderer {
             },
             13.0 * scale,
             color,
-            Family::Name(TERMINAL_FONT_FAMILY),
+            Family::Name(&self.terminal_font.family),
             Weight::NORMAL,
         ));
         let cursor = self.text_prompt_cursor_rect(prompt);
@@ -2000,6 +2045,7 @@ impl Renderer {
             },
         );
         let scale_factor = self.scale_factor;
+        let cell_width = self.cell_width();
         let cell_height = self.cell_height();
         let viewport_width = self.config.width;
         let viewport_height = self.config.height;
@@ -2012,7 +2058,7 @@ impl Renderer {
                         buffer: &run.buffer,
                         left: text.geometry.rect.x
                             + PANE_PADDING_X * scale_factor
-                            + f32::from(run.column) * CELL_WIDTH * scale_factor
+                            + f32::from(run.column) * cell_width
                             + run.offset_x,
                         top: text.geometry.rect.y
                             + PANE_PADDING_Y * scale_factor
@@ -2190,15 +2236,15 @@ impl Renderer {
     }
 
     fn font_size(&self) -> f32 {
-        FONT_SIZE * self.scale_factor
+        self.terminal_font.size * self.scale_factor
     }
 
     fn cell_width(&self) -> f32 {
-        CELL_WIDTH * self.scale_factor
+        self.terminal_font.cell_width * self.scale_factor
     }
 
     fn cell_height(&self) -> f32 {
-        CELL_HEIGHT * self.scale_factor
+        self.terminal_font.cell_height * self.scale_factor
     }
 }
 
@@ -2211,6 +2257,44 @@ fn load_terminal_fonts(font_system: &mut FontSystem) {
     ] {
         font_system.db_mut().load_font_data(font.to_vec());
     }
+}
+
+fn resolve_terminal_font_family(font_system: &FontSystem, requested: Option<&str>) -> String {
+    requested
+        .filter(|requested| !requested.trim().is_empty())
+        .and_then(|requested| {
+            font_system.db().faces().find_map(|face| {
+                face.families
+                    .iter()
+                    .find(|(family, _)| family.eq_ignore_ascii_case(requested.trim()))
+                    .map(|(family, _)| family.clone())
+            })
+        })
+        .unwrap_or_else(|| TERMINAL_FONT_FAMILY.to_owned())
+}
+
+fn measure_terminal_cell_width(
+    font_system: &mut FontSystem,
+    family: &str,
+    font_size: f32,
+    cell_height: f32,
+) -> Option<f32> {
+    const SAMPLE: &str = "0000000000";
+    let mut buffer = Buffer::new(font_system, Metrics::new(font_size, cell_height));
+    buffer.set_size(font_system, Some(1_000.0), Some(cell_height));
+    buffer.set_wrap(font_system, Wrap::None);
+    buffer.set_text(
+        font_system,
+        SAMPLE,
+        &Attrs::new().family(Family::Name(family)),
+        Shaping::Advanced,
+    );
+    buffer.shape_until_scroll(font_system, false);
+    let width = buffer.layout_runs().next()?.line_w / SAMPLE.len() as f32;
+    width
+        .is_finite()
+        .then_some(width)
+        .filter(|width| *width > 0.0)
 }
 
 fn resize_row_buffers(
@@ -2230,8 +2314,8 @@ fn update_terminal_rows(
     font_system: &mut FontSystem,
     rows: &mut [TerminalRow],
     frame: &RenderFrame,
-    font_size: f32,
-    cell_height: f32,
+    font_family: &str,
+    metrics: TerminalGridMetrics,
     rebuild_all: bool,
 ) {
     let cols = usize::from(frame.cols);
@@ -2251,8 +2335,8 @@ fn update_terminal_rows(
             row,
             &frame.cells[start..end],
             frame.foreground,
-            font_size,
-            cell_height,
+            font_family,
+            metrics,
         );
     }
 }
@@ -2262,8 +2346,8 @@ fn update_terminal_row(
     row: &mut TerminalRow,
     cells: &[mux_terminal::RenderCell],
     default_foreground: Rgb,
-    font_size: f32,
-    cell_height: f32,
+    font_family: &str,
+    metrics: TerminalGridMetrics,
 ) {
     let specs = terminal_run_specs(cells);
     let mut reusable = std::mem::take(&mut row.runs).into_iter();
@@ -2271,7 +2355,12 @@ fn update_terminal_row(
         .into_iter()
         .map(|spec| {
             let mut buffer = reusable.next().map_or_else(
-                || Buffer::new(font_system, Metrics::new(font_size, cell_height)),
+                || {
+                    Buffer::new(
+                        font_system,
+                        Metrics::new(metrics.font_size, metrics.cell_height),
+                    )
+                },
                 |run| run.buffer,
             );
             let offset_x = shape_terminal_run(
@@ -2279,8 +2368,8 @@ fn update_terminal_row(
                 &mut buffer,
                 &spec,
                 default_foreground,
-                font_size,
-                cell_height,
+                font_family,
+                metrics,
             );
             TerminalTextRun {
                 buffer,
@@ -2393,27 +2482,26 @@ fn shape_terminal_run(
     buffer: &mut Buffer,
     spec: &TerminalRunSpec,
     default_foreground: Rgb,
-    font_size: f32,
-    cell_height: f32,
+    font_family: &str,
+    metrics: TerminalGridMetrics,
 ) -> f32 {
-    let cell_width = CELL_WIDTH * (font_size / FONT_SIZE);
-    let width = f32::from(spec.cell_count) * cell_width;
+    let width = f32::from(spec.cell_count) * metrics.cell_width;
     let default = Attrs::new()
-        .family(Family::Name(TERMINAL_FONT_FAMILY))
+        .family(Family::Name(font_family))
         .color(to_text_color(default_foreground, false));
     buffer.set_metrics_and_size(
         font_system,
-        Metrics::new(font_size, cell_height),
-        Some(width.max(CELL_WIDTH)),
-        Some(cell_height),
+        Metrics::new(metrics.font_size, metrics.cell_height),
+        Some(width.max(metrics.cell_width)),
+        Some(metrics.cell_height),
     );
-    buffer.set_monospace_width(font_system, Some(CELL_WIDTH * (font_size / FONT_SIZE)));
+    buffer.set_monospace_width(font_system, Some(metrics.cell_width));
     buffer.set_wrap(font_system, Wrap::None);
     buffer.set_rich_text(
         font_system,
         spec.spans.iter().map(|span| {
             let mut attrs = Attrs::new()
-                .family(Family::Name(TERMINAL_FONT_FAMILY))
+                .family(Family::Name(font_family))
                 .color(to_text_color(span.color, span.style.faint));
             if span.style.bold {
                 attrs = attrs.weight(Weight::BOLD);
@@ -2442,7 +2530,7 @@ fn make_text(
     rect: Rect,
     font_size: f32,
     color: Color,
-    family: Family<'static>,
+    family: Family<'_>,
     weight: Weight,
 ) -> ChromeText {
     let mut buffer = Buffer::new(
@@ -2476,7 +2564,7 @@ fn make_wrapped_text(
     font_size: f32,
     line_height: f32,
     color: Color,
-    family: Family<'static>,
+    family: Family<'_>,
     weight: Weight,
 ) -> ChromeText {
     let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
@@ -3084,6 +3172,36 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_font_family_resolution_is_case_insensitive_and_safe() {
+        let mut font_system = FontSystem::new();
+        load_terminal_fonts(&mut font_system);
+
+        assert_eq!(
+            resolve_terminal_font_family(&font_system, Some("jetbrainsmono nerd font mono")),
+            TERMINAL_FONT_FAMILY
+        );
+        assert_eq!(
+            resolve_terminal_font_family(&font_system, Some("Definitely Not Installed")),
+            TERMINAL_FONT_FAMILY
+        );
+    }
+
+    #[test]
+    fn terminal_grid_uses_the_resolved_face_advance() {
+        let mut font_system = FontSystem::new();
+        load_terminal_fonts(&mut font_system);
+        let measured = measure_terminal_cell_width(
+            &mut font_system,
+            TERMINAL_FONT_FAMILY,
+            FONT_SIZE,
+            CELL_HEIGHT,
+        )
+        .expect("bundled font has a measurable advance");
+
+        assert!((measured - CELL_WIDTH).abs() < 0.01, "measured={measured}");
+    }
+
+    #[test]
     fn ligatures_preserve_exact_terminal_columns() {
         let cells = "-> != === <=>"
             .chars()
@@ -3100,8 +3218,12 @@ mod tests {
             &mut buffer,
             &specs[0],
             Rgb::default(),
-            FONT_SIZE,
-            CELL_HEIGHT,
+            TERMINAL_FONT_FAMILY,
+            TerminalGridMetrics {
+                font_size: FONT_SIZE,
+                cell_width: CELL_WIDTH,
+                cell_height: CELL_HEIGHT,
+            },
         );
         let width = buffer.layout_runs().next().expect("one shaped row").line_w;
         let expected = cells.len() as f32 * CELL_WIDTH;
@@ -3163,8 +3285,12 @@ mod tests {
                 &mut buffer,
                 spec,
                 Rgb::default(),
-                FONT_SIZE,
-                CELL_HEIGHT,
+                TERMINAL_FONT_FAMILY,
+                TerminalGridMetrics {
+                    font_size: FONT_SIZE,
+                    cell_width: CELL_WIDTH,
+                    cell_height: CELL_HEIGHT,
+                },
             );
             let glyph_width = buffer.layout_runs().next().expect("shaped glyph").line_w;
             assert!(offset >= 0.0);

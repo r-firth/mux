@@ -30,6 +30,48 @@ impl Default for GhosttyTheme {
     }
 }
 
+/// The small Ghostty font subset consumed by Mux's native renderer.
+///
+/// The terminal adapter owns config discovery and parsing, while the renderer
+/// remains responsible for resolving a local face and deriving grid metrics.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GhosttyFont {
+    pub family: Option<String>,
+    pub size: Option<f32>,
+}
+
+impl GhosttyFont {
+    /// Load the primary regular family and point size from Ghostty's normal
+    /// user config locations. Repeated families follow Ghostty's reset/append
+    /// semantics; Mux uses the first family and leaves fallback to the native
+    /// shaping stack.
+    pub fn load_user() -> Result<Self, ThemeError> {
+        let Some((_, configs)) = user_config_paths() else {
+            return Ok(Self::default());
+        };
+        let mut font = Self::default();
+        let mut families = Vec::new();
+        for config in configs {
+            let contents = read_config(&config)?;
+            parse_font_config(&contents, &mut families, &mut font.size);
+        }
+        font.family = families.into_iter().next();
+        Ok(font)
+    }
+
+    #[cfg(test)]
+    fn load_from_path(path: &Path) -> Result<Self, ThemeError> {
+        let contents = read_config(path)?;
+        let mut families = Vec::new();
+        let mut size = None;
+        parse_font_config(&contents, &mut families, &mut size);
+        Ok(Self {
+            family: families.into_iter().next(),
+            size,
+        })
+    }
+}
+
 impl GhosttyTheme {
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -42,31 +84,9 @@ impl GhosttyTheme {
     /// Load Ghostty's user colour configuration from its conventional macOS
     /// or XDG location. Unknown Ghostty options are intentionally ignored.
     pub fn load_user() -> Result<Self, ThemeError> {
-        let Some(base) = BaseDirs::new() else {
+        let Some((roots, configs)) = user_config_paths() else {
             return Ok(Self::default());
         };
-        let home = base.home_dir();
-        let macos_root = home.join("Library/Application Support/com.mitchellh.ghostty");
-        // Ghostty uses XDG_CONFIG_HOME on every platform (including macOS),
-        // with ~/.config as its fallback. Platform-native config_dir() would
-        // incorrectly resolve this to ~/Library/Application Support on macOS.
-        let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME")
-            .filter(|value| !value.is_empty())
-            .map_or_else(|| home.join(".config"), PathBuf::from);
-        let xdg_root = xdg_config_home.join("ghostty");
-        let roots = vec![macos_root.clone(), xdg_root.clone()];
-        // Ghostty loads XDG files first and macOS-specific files afterwards;
-        // later values override earlier ones. Support both the current and
-        // pre-1.2.3 filenames.
-        let configs = [
-            xdg_root.join("config.ghostty"),
-            xdg_root.join("config"),
-            macos_root.join("config.ghostty"),
-            macos_root.join("config"),
-        ]
-        .into_iter()
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
         if configs.is_empty() {
             return Ok(Self::default());
         }
@@ -87,9 +107,34 @@ impl GhosttyTheme {
     }
 }
 
+fn user_config_paths() -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
+    let base = BaseDirs::new()?;
+    let home = base.home_dir();
+    let macos_root = home.join("Library/Application Support/com.mitchellh.ghostty");
+    // Ghostty uses XDG_CONFIG_HOME on every platform (including macOS), with
+    // ~/.config as its fallback. Platform config_dir() is different on macOS.
+    let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| home.join(".config"), PathBuf::from);
+    let xdg_root = xdg_config_home.join("ghostty");
+    let roots = vec![macos_root.clone(), xdg_root.clone()];
+    // Ghostty loads XDG first and macOS-specific files afterwards. Support
+    // both the current and pre-1.2.3 filenames.
+    let configs = [
+        xdg_root.join("config.ghostty"),
+        xdg_root.join("config"),
+        macos_root.join("config.ghostty"),
+        macos_root.join("config"),
+    ]
+    .into_iter()
+    .filter(|path| path.is_file())
+    .collect();
+    Some((roots, configs))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ThemeError {
-    #[error("could not read Ghostty colour configuration {path}: {source}")]
+    #[error("could not read Ghostty configuration {path}: {source}")]
     Read {
         path: PathBuf,
         #[source]
@@ -107,10 +152,7 @@ fn parse_theme_file(
     if !visited.insert(identity) {
         return Ok(());
     }
-    let contents = fs::read_to_string(path).map_err(|source| ThemeError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let contents = read_config(path)?;
     let entries = contents
         .lines()
         .filter_map(parse_config_entry)
@@ -140,6 +182,29 @@ fn parse_theme_file(
         }
     }
     Ok(())
+}
+
+fn read_config(path: &Path) -> Result<String, ThemeError> {
+    fs::read_to_string(path).map_err(|source| ThemeError::Read {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn parse_font_config(contents: &str, families: &mut Vec<String>, size: &mut Option<f32>) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        match key.as_str() {
+            "font-family" if value.is_empty() => families.clear(),
+            "font-family" => families.push(value),
+            "font-size" => {
+                *size = value
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|value| value.is_finite() && *value > 0.0);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn parse_config_entry(line: &str) -> Option<(String, String)> {
@@ -2155,5 +2220,20 @@ mod theme_tests {
             dark_theme_name("light:day.conf,dark:night.conf").as_deref(),
             Some("night.conf"),
         );
+    }
+
+    #[test]
+    fn primary_font_and_size_follow_ghostty_reset_semantics() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let config = directory.path().join("config");
+        fs::write(
+            &config,
+            "font-family = Old Primary\nfont-family = Old Fallback\nfont-family = \"\"\nfont-family = \"Jetbrains Mono\"\nfont-family = Symbols\nfont-size = \"16\"\n",
+        )
+        .expect("config");
+
+        let font = GhosttyFont::load_from_path(&config).expect("load font");
+        assert_eq!(font.family.as_deref(), Some("Jetbrains Mono"));
+        assert_eq!(font.size, Some(16.0));
     }
 }
