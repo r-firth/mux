@@ -34,6 +34,7 @@ use wgpu::{
     RenderPipelineDescriptor, RequestAdapterOptions, StoreOp, Surface, SurfaceConfiguration,
     TextureFormat, TextureUsages, TextureViewDescriptor, VertexState,
 };
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::window::Window;
 
 use crate::layout::{
@@ -95,6 +96,7 @@ pub struct UiState<'a> {
     pub message: Option<&'a str>,
     pub session_switcher: Option<SessionSwitcherView<'a>>,
     pub agent_surface: Option<AgentSurfaceView<'a>>,
+    pub ime_preedit: Option<&'a str>,
 }
 
 #[repr(C)]
@@ -155,6 +157,7 @@ pub struct Renderer {
 
 impl Renderer {
     pub async fn new(window: Arc<Window>) -> Result<Self> {
+        window.set_ime_allowed(true);
         let size = window.inner_size();
         let instance = Instance::new(&InstanceDescriptor::default());
         let surface = instance
@@ -481,7 +484,124 @@ impl Renderer {
             self.add_agent_surface(agent);
         }
 
+        self.update_ime(geometry, frames, ui.agent_surface, ui.ime_preedit);
+
         let _ = session;
+    }
+
+    fn update_ime(
+        &mut self,
+        geometry: &WorkspaceGeometry,
+        frames: &HashMap<PaneId, &RenderFrame>,
+        agent_surface: Option<AgentSurfaceView<'_>>,
+        preedit: Option<&str>,
+    ) {
+        let cursor = agent_surface.map_or_else(
+            || self.focused_terminal_cursor_rect(geometry, frames),
+            |surface| Some(self.agent_composer_cursor_rect(surface)),
+        );
+        let Some(cursor) = cursor else {
+            return;
+        };
+        self.window.set_ime_cursor_area(
+            PhysicalPosition::new(f64::from(cursor.x), f64::from(cursor.y)),
+            PhysicalSize::new(
+                cursor.width.max(1.0).round() as u32,
+                cursor.height.max(1.0).round() as u32,
+            ),
+        );
+        if let Some(preedit) = preedit.filter(|value| !value.is_empty()) {
+            self.add_ime_preedit(cursor, preedit);
+        }
+    }
+
+    fn focused_terminal_cursor_rect(
+        &self,
+        geometry: &WorkspaceGeometry,
+        frames: &HashMap<PaneId, &RenderFrame>,
+    ) -> Option<Rect> {
+        let pane = geometry.panes.iter().find(|pane| pane.focused)?;
+        let cursor = frames.get(&pane.pane_id)?.cursor?;
+        let pane = scale_rect(pane.rect, self.scale_factor);
+        Some(Rect {
+            x: pane.x
+                + PANE_PADDING_X * self.scale_factor
+                + f32::from(cursor.x) * self.cell_width(),
+            y: pane.y
+                + PANE_PADDING_Y * self.scale_factor
+                + f32::from(cursor.y) * self.cell_height(),
+            width: self.cell_width(),
+            height: self.cell_height(),
+        })
+    }
+
+    fn agent_composer_cursor_rect(&self, surface: AgentSurfaceView<'_>) -> Rect {
+        let scale = self.scale_factor;
+        let window_width = self.config.width as f32;
+        let window_height = self.config.height as f32;
+        let progress = 1.0 - (1.0 - surface.progress.clamp(0.0, 1.0)).powi(3);
+        let panel_width = (480.0 * scale).min(window_width * 0.62);
+        Rect {
+            x: window_width - panel_width * progress + 30.0 * scale,
+            y: window_height - 54.0 * scale,
+            width: 2.0 * scale,
+            height: 20.0 * scale,
+        }
+    }
+
+    fn add_ime_preedit(&mut self, cursor: Rect, preedit: &str) {
+        let scale = self.scale_factor;
+        let font_size = self.font_size();
+        let estimated_width = (preedit.chars().count().max(1) as f32 * self.cell_width()
+            + 10.0 * scale)
+            .min(self.config.width as f32 - 16.0 * scale);
+        let height = self.cell_height().max(22.0 * scale);
+        let x = cursor
+            .x
+            .min((self.config.width as f32 - estimated_width - 8.0 * scale).max(8.0 * scale));
+        let y = if cursor.y + height <= self.config.height as f32 {
+            cursor.y
+        } else {
+            (cursor.y - height).max(TAB_BAR_HEIGHT * scale)
+        };
+        let rect = Rect {
+            x,
+            y,
+            width: estimated_width,
+            height,
+        };
+        push_rect(
+            &mut self.overlay_rect_vertices,
+            rect,
+            [0.055, 0.061, 0.074, 0.99],
+            self.config.width,
+            self.config.height,
+        );
+        push_rect(
+            &mut self.overlay_rect_vertices,
+            Rect {
+                y: rect.y + rect.height - 2.0 * scale,
+                height: 2.0 * scale,
+                ..rect
+            },
+            AGENT_ACCENT,
+            self.config.width,
+            self.config.height,
+        );
+        self.overlay_text.push(make_text(
+            &mut self.font_system,
+            preedit,
+            Rect {
+                x: rect.x + 5.0 * scale,
+                y: rect.y,
+                width: rect.width - 10.0 * scale,
+                height: rect.height - 2.0 * scale,
+            },
+            font_size,
+            Color::rgb(235, 239, 247),
+            Family::Name(TERMINAL_FONT_FAMILY),
+            Weight::NORMAL,
+        ));
     }
 
     fn add_toast(&mut self, message: &str) {

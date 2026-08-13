@@ -35,8 +35,10 @@ Unicode fallback, wide-cell placement, styled cells, cursor, colors, damage,
 checkpoints, resize, reattachment, selection/copy/paste, mode-aware keyboard and
 mouse encoding, scrollback, and sustained output all have automated or
 native-window coverage. The primary remaining terminal risks are richer
-selection gestures and autoscroll, hyperlink interaction, search, IME preedit,
-cursor/blink timing, accessibility, and broader compatibility testing.
+selection gestures and autoscroll, hyperlink interaction, search,
+cursor/blink timing, accessibility, and broader compatibility testing. Native
+IME is enabled, preedit is rendered, and candidate windows follow the active
+terminal caret or agent composer input area.
 
 The C render adapter retains and grows its row, cell, and grapheme buffers
 instead of allocating a full viewport on every frame. The Rust render boundary

@@ -139,6 +139,7 @@ struct Application {
     agent_surface_progress: f32,
     agent_surface_target: f32,
     last_animation_frame: Option<Instant>,
+    ime_preedit: String,
     ghostty_theme: GhosttyTheme,
 }
 
@@ -174,6 +175,7 @@ impl Default for Application {
             agent_surface_progress: 0.0,
             agent_surface_target: 0.0,
             last_animation_frame: None,
+            ime_preedit: String::new(),
             ghostty_theme: GhosttyTheme::load_user().unwrap_or_default(),
         }
     }
@@ -402,6 +404,7 @@ impl Application {
                     notice: self.message.as_deref(),
                     timeline_scroll: surface.timeline_scroll,
                 }),
+                ime_preedit: (!self.ime_preedit.is_empty()).then_some(self.ime_preedit.as_str()),
             },
         );
         Ok(())
@@ -1995,14 +1998,25 @@ impl ApplicationHandler<UserEvent> for Application {
             }
             WindowEvent::KeyboardInput { event, .. } => self.handle_key(&event),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::Ime(Ime::Preedit(text, _)) => {
+                self.ime_preedit = text;
+                let _ = self.refresh_view();
+            }
             WindowEvent::Ime(Ime::Commit(text)) if self.agent_surface.is_some() => {
+                self.ime_preedit.clear();
                 if let Some(surface) = &mut self.agent_surface {
                     surface.draft.push_str(&text);
                 }
                 let _ = self.refresh_view();
             }
             WindowEvent::Ime(Ime::Commit(text)) if self.mode == InputMode::Normal => {
+                self.ime_preedit.clear();
                 self.write_focused(text.into_bytes());
+                let _ = self.refresh_view();
+            }
+            WindowEvent::Ime(Ime::Commit(_) | Ime::Disabled) => {
+                self.ime_preedit.clear();
+                let _ = self.refresh_view();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.handle_cursor_moved(position.x as f32, position.y as f32);
