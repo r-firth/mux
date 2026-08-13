@@ -47,12 +47,19 @@ jobs:
       - name: Lint native product
         run: cargo clippy --workspace --all-targets --features mux/product -- -D warnings
       - name: Build app bundle
+        id: package
         env:
           # The product test already compiled the full debug app and Ghostty.
           # Release archives still use the optimized profile in the release job.
           MUX_BUILD_PROFILE: debug
           MUX_BUILD_NUMBER: ${{ github.run_number }}
-        run: scripts/package-macos.sh
+        run: |
+          package_paths="$RUNNER_TEMP/mux-package-paths"
+          scripts/package-macos.sh > "$package_paths"
+          archive=$(sed -n '1p' "$package_paths")
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+      - name: Verify app bundle
+        run: scripts/verify-macos-package.sh '${{ steps.package.outputs.archive }}' arm64 "$(cat version.txt)"
       - name: Upload app bundle
         uses: actions/upload-artifact@v7
         with:
