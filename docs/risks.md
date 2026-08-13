@@ -83,8 +83,12 @@ are pinned to versions observed in the official ACP registry so a package
 update cannot silently change a released Mux build.
 
 Authentication remains owned by each agent. Existing Codex credentials are
-inherited by its external process; richer ACP authentication-method discovery
-and installation/update UI remain the largest cross-agent lifecycle risk.
+inherited by its external process. For fresh installs, Mux now persists the
+stable methods advertised by `initialize`, surfaces an authentication-required
+state, runs the selected agent-owned method through `/login`, and retries
+`session/new`. It deliberately does not enable ACP's unstable terminal or
+environment-variable auth transports. Adapter installation/update UX remains
+the largest cross-agent lifecycle risk.
 
 ## PTY and IPC
 

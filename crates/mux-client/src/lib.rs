@@ -237,6 +237,21 @@ impl Client {
         )
     }
 
+    pub async fn authenticate_agent(
+        &mut self,
+        session_id: AgentSessionId,
+        method_id: String,
+    ) -> Result<(), ClientError> {
+        expect_acknowledgement(
+            self.request(Request::AuthenticateAgent {
+                session_id,
+                method_id,
+            })
+            .await?,
+            &Response::Ack,
+        )
+    }
+
     pub async fn set_agent_mode(
         &mut self,
         session_id: AgentSessionId,
@@ -445,4 +460,45 @@ pub enum ClientError {
     UnexpectedResponseId(u64),
     #[error("daemon sent an unexpected response: {0:?}")]
     UnexpectedResponse(Box<Response>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mux_protocol::{ClientMessage, ServerHello, ServerMessage, read_frame, write_frame};
+    use tokio::net::UnixListener;
+
+    #[tokio::test]
+    async fn incompatible_daemon_is_rejected_during_the_hello_exchange() {
+        let directory = tempfile::tempdir().expect("temporary state directory");
+        let socket = directory.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept client");
+            let hello: ClientMessage = read_frame(&mut stream).await.expect("read client hello");
+            assert!(matches!(hello, ClientMessage::Hello(_)));
+            write_frame(
+                &mut stream,
+                &ServerMessage::Hello(ServerHello {
+                    protocol_version: PROTOCOL_VERSION - 1,
+                    daemon_pid: 42,
+                }),
+            )
+            .await
+            .expect("write server hello");
+        });
+
+        let error = match Client::connect(&socket, "version-test").await {
+            Ok(_) => panic!("old daemon must not be decoded by the new client"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            ClientError::ProtocolMismatch {
+                client: PROTOCOL_VERSION,
+                server,
+            } if server == PROTOCOL_VERSION - 1
+        ));
+        server.await.expect("fake daemon task");
+    }
 }

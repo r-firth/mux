@@ -1281,6 +1281,10 @@ impl Renderer {
         let scale = self.scale_factor;
         let (status, color) = match agent.status {
             AgentSessionStatus::Starting => ("connecting", Color::rgb(213, 176, 102)),
+            AgentSessionStatus::WaitingForAuthentication => {
+                ("sign in required", Color::rgb(245, 192, 102))
+            }
+            AgentSessionStatus::Authenticating => ("signing in", Color::rgb(107, 181, 245)),
             AgentSessionStatus::Idle => ("ready", Color::rgb(115, 207, 151)),
             AgentSessionStatus::Working => ("working", Color::rgb(107, 181, 245)),
             AgentSessionStatus::WaitingForPermission => {
@@ -1374,10 +1378,13 @@ impl Renderer {
             self.config.height,
         );
         let (text, color) = if draft.is_empty() {
-            let placeholder = if status == AgentSessionStatus::Working {
-                "Agent is working…  Ctrl+C to stop"
-            } else {
-                "Ask the agent…"
+            let placeholder = match status {
+                AgentSessionStatus::Working => "Agent is working…  Ctrl+C to stop",
+                AgentSessionStatus::WaitingForAuthentication => {
+                    "Run /login to sign in with this agent"
+                }
+                AgentSessionStatus::Authenticating => "Complete sign in to continue…",
+                _ => "Ask the agent…",
             };
             (placeholder, Color::rgb(126, 137, 157))
         } else {
@@ -1412,7 +1419,12 @@ impl Renderer {
             Family::SansSerif,
             Weight::NORMAL,
         ));
-        if status != AgentSessionStatus::Starting && status != AgentSessionStatus::Closed {
+        if !matches!(
+            status,
+            AgentSessionStatus::Starting
+                | AgentSessionStatus::Authenticating
+                | AgentSessionStatus::Closed
+        ) {
             let button = Rect {
                 x: rect.x + rect.width - 62.0 * scale,
                 y: rect.y + 26.0 * scale,

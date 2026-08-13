@@ -79,6 +79,7 @@ The composer accepts normal ACP prompts and a small local command layer:
 | `/agents` | Return to existing sessions |
 | `/cwd [path]` | Inspect or override the next session's directory |
 | `/context none\|selection\|pane` | Choose explicit terminal context |
+| `/login [method]` | Run an agent-advertised ACP sign-in method |
 | `/model [value]` | Inspect or change the ACP model option |
 | `/effort [value]` | Inspect or change reasoning effort |
 | `/mode [value]` | Inspect or change the ACP session mode |
@@ -92,6 +93,12 @@ agent, preserving its native command vocabulary. Page Up/Down or the mouse
 wheel navigates conversation history. Permission choices work with number keys
 or the mouse. `Shift+Enter` inserts a newline, `Command+V` pastes, and
 `Ctrl+U` or `Command+Backspace` clears the composer.
+
+If an agent rejects session creation with ACP `auth_required`, the surface
+keeps the process alive, presents a sign-in-required state, and lets `/login`
+run one of the stable agent-owned methods advertised during initialization.
+Mux never asks for or stores the credential in this flow; the external agent
+owns its browser or other sign-in interaction.
 
 ## Diagnostic CLI
 

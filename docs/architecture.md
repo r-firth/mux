@@ -21,7 +21,9 @@ workspace daemon
 - `mux-workspace` owns stable product concepts: sessions, tabs, split trees,
   focus, actions, modes, and keymaps. It has no windowing or process code.
 - `mux-protocol` owns the versioned GUI/daemon wire contract. Terminal payloads
-  are binary rather than JSON/base64. Every output event is sequenced.
+  are binary rather than JSON/base64. Every output event is sequenced. Its epoch
+  changes with incompatible serialized types so a long-lived older daemon is
+  rejected at the hello exchange instead of corrupting a new GUI's decoder.
 - `mux-terminal` owns the terminal-engine contract. The product implementation
   wraps a pinned `libghostty-vt` ABI and produces opaque checkpoints plus replay
   data. A small replay engine remains available for protocol tests.
@@ -104,6 +106,11 @@ agent's advertised configuration, so the GUI never assumes Codex-specific IDs.
 Agent-native slash commands likewise come from ACP's live
 `available_commands_update` snapshot and are combined with Mux's small local
 lifecycle command set in the composer.
+
+Authentication remains agent-owned. Mux stores the stable auth methods from
+`initialize`; when `session/new` returns `auth_required`, it exposes `/login`,
+sends ACP `authenticate` with the selected method ID, and retries
+`session/new`. Credentials never enter Mux IPC or durable agent snapshots.
 
 Terminal context is off by default. If requested, the GUI adds selected text or
 the focused viewport as a separate, size-bounded ACP content block marked as

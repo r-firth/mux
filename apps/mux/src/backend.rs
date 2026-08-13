@@ -52,6 +52,10 @@ pub enum CommandMessage {
         session_id: AgentSessionId,
         prompt: AgentPrompt,
     },
+    AuthenticateAgent {
+        session_id: AgentSessionId,
+        method_id: String,
+    },
     ResolveAgentPermission {
         session_id: AgentSessionId,
         request_id: String,
@@ -261,6 +265,14 @@ async fn run(
                             report_backend_error(proxy, error);
                         }
                     }
+                    CommandMessage::AuthenticateAgent {
+                        session_id,
+                        method_id,
+                    } => {
+                        if let Err(error) = client.authenticate_agent(session_id, method_id).await {
+                            report_backend_error(proxy, error);
+                        }
+                    }
                     CommandMessage::ResolveAgentPermission {
                         session_id,
                         request_id,
@@ -372,8 +384,14 @@ async fn connect_or_start_daemon(
     state_dir: &std::path::Path,
     socket: &std::path::Path,
 ) -> Result<Client> {
-    if let Ok(client) = Client::connect(socket, "mux-gui").await {
-        return Ok(client);
+    match Client::connect(socket, "mux-gui").await {
+        Ok(client) => return Ok(client),
+        Err(ClientError::ProtocolMismatch { client, server }) => {
+            return Err(anyhow!(
+                "A different Mux build owns this workspace (daemon protocol {server}, this app {client}). Its shells are still running. Reopen the matching Mux build, or deliberately stop that daemon before starting this update."
+            ));
+        }
+        Err(_) => {}
     }
 
     let executable = std::env::current_exe().context("resolve mux executable")?;

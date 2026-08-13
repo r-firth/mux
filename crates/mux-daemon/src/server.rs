@@ -266,6 +266,12 @@ where
         Request::KillSession { session_id } => {
             state.kill_session(session_id).map(|()| Response::Ack)
         }
+        Request::AuthenticateAgent {
+            session_id,
+            method_id,
+        } => state
+            .authenticate_agent(session_id, method_id)
+            .map(|()| Response::Ack),
     };
 
     write_frame(

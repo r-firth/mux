@@ -72,6 +72,11 @@ enum Command {
     },
     /// Cancel the active turn in an ACP agent session.
     AgentCancel { session: AgentSessionId },
+    /// Run an agent-advertised ACP authentication method.
+    AgentLogin {
+        session: AgentSessionId,
+        method: String,
+    },
     /// Set an ACP session mode.
     AgentMode {
         session: AgentSessionId,
@@ -197,6 +202,10 @@ async fn main() -> Result<()> {
         Command::AgentCancel { session } => {
             client.cancel_agent(session).await?;
             println!("cancel requested");
+        }
+        Command::AgentLogin { session, method } => {
+            client.authenticate_agent(session, method).await?;
+            println!("authentication started");
         }
         Command::AgentMode { session, mode } => {
             client.set_agent_mode(session, mode).await?;
