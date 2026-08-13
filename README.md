@@ -67,24 +67,31 @@ GUI binary or set `MUX_STATE_DIR`. See
 
 ## Agents
 
-Press `Shift+Command+A` or the agent button to open the agent sheet. With no
-existing sessions, choose an agent. Working directory defaults to the focused
-pane's live directory and can be overridden before launch. Built-in adapters are exact-version ACP
-packages downloaded and cached by `npx` on first use, so Node.js must be
-available in the daemon's `PATH`. If it is not, the launcher stays retryable
-and shows the required fix instead of leaving a half-created agent session.
+Press `Ctrl+p`, then `a` (or `Shift+Command+A`) to open the agent pane. The
+prompt receives focus immediately: Return sends and Shift+Return inserts a
+newline. Typing a message with no active agent starts Codex automatically.
+Working directory defaults to the focused pane's live directory. Built-in
+adapters are exact-version ACP packages downloaded and cached by `npx` on first
+use, so Node.js must be available in the daemon's `PATH`. If it is not, the
+agent pane stays retryable and shows the required fix instead of leaving a
+half-created agent session.
 
 The composer accepts normal ACP prompts and a small local command layer:
 
 | Command | Action |
 | --- | --- |
-| `/new [agent]` | Start a new ACP session (Codex by default) |
+| `/new [agent] [cwd]` | Start a new ACP session (Codex and focused-pane cwd by default) |
+| `/next`, `/prev` | Switch agent sessions |
+| `/use <number\|name>` | Select an agent session |
 | `/context none\|pane` | Choose explicit terminal context |
 | `/model [value]` | Inspect or change the ACP model option |
 | `/effort [value]` | Inspect or change reasoning effort |
 | `/mode [value]` | Inspect or change the ACP session mode |
 | `/cancel` | Cancel the active turn |
 | `/end` | End the selected session |
+| `/login [method]` | Run an agent-advertised authentication method |
+| `/allow [always]` | Approve the waiting permission request |
+| `/deny [always]` | Reject the waiting permission request |
 | `/help` | Show the local command summary |
 
 Unknown slash commands are sent to the agent, preserving its native command
