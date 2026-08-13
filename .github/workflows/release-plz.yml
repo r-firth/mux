@@ -57,7 +57,5 @@ jobs:
       - name: Create or update release PR
         uses: googleapis/release-please-action@v4
         with:
-          release-type: rust
           skip-github-release: true
-          include-component-in-tag: false
           token: ${{ secrets.GITHUB_TOKEN }}

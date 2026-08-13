@@ -1,0 +1,70 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "rust",
+  "include-component-in-tag": false,
+  "group-pull-request-title-pattern": "chore: release Mux ${version}",
+  "packages": {
+    ".": {
+      "release-type": "simple",
+      "component": "mux-product"
+    },
+    "apps/mux": {
+      "component": "mux-app",
+      "skip-changelog": true
+    },
+    "apps/muxctl": {
+      "component": "muxctl",
+      "skip-changelog": true
+    },
+    "crates/mux-acp": {
+      "component": "mux-acp",
+      "skip-changelog": true
+    },
+    "crates/mux-client": {
+      "component": "mux-client",
+      "skip-changelog": true
+    },
+    "crates/mux-daemon": {
+      "component": "mux-daemon",
+      "skip-changelog": true
+    },
+    "crates/mux-protocol": {
+      "component": "mux-protocol",
+      "skip-changelog": true
+    },
+    "crates/mux-terminal": {
+      "component": "mux-terminal",
+      "skip-changelog": true
+    },
+    "crates/mux-terminal-ghostty": {
+      "component": "mux-terminal-ghostty",
+      "skip-changelog": true
+    },
+    "crates/mux-workspace": {
+      "component": "mux-workspace",
+      "skip-changelog": true
+    }
+  },
+  "plugins": [
+    {
+      "type": "cargo-workspace",
+      "merge": false
+    },
+    {
+      "type": "linked-versions",
+      "groupName": "Mux",
+      "components": [
+        "mux-product",
+        "mux-app",
+        "muxctl",
+        "mux-acp",
+        "mux-client",
+        "mux-daemon",
+        "mux-protocol",
+        "mux-terminal",
+        "mux-terminal-ghostty",
+        "mux-workspace"
+      ]
+    }
+  ]
+}
