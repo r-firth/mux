@@ -24,7 +24,12 @@ archive_name=$(basename -- "$archive")
 (cd "$archive_directory" && shasum -a 256 -c "$(basename -- "$checksum_file")")
 
 verification_directory=$(mktemp -d "${TMPDIR:-/tmp}/mux-package-verify.XXXXXX")
+daemon_pid=
 cleanup() {
+  if [ -n "$daemon_pid" ] && kill -0 "$daemon_pid" 2>/dev/null; then
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+  fi
   if [ -d "$verification_directory" ]; then
     rm -rf -- "$verification_directory"
   fi
@@ -68,5 +73,51 @@ otool -L "$executable" | grep -Fq '@rpath/libghostty-vt.dylib' ||
 otool -l "$executable" | grep -Fq '@executable_path/../Frameworks' ||
   fail "Mux does not carry the app Frameworks runtime search path"
 codesign --verify --deep --strict --verbose=2 "$app"
+
+if [ -n "${MUXCTL:-}" ]; then
+  [ -x "$MUXCTL" ] || fail "MUXCTL is not executable: $MUXCTL"
+  state_directory="$verification_directory/state"
+  daemon_log="$verification_directory/daemon.log"
+  "$executable" --daemon --state-dir "$state_directory" >"$daemon_log" 2>&1 &
+  daemon_pid=$!
+
+  ready=false
+  attempts=0
+  while [ "$attempts" -lt 50 ]; do
+    if "$MUXCTL" --state-dir "$state_directory" health >/dev/null 2>&1; then
+      ready=true
+      break
+    fi
+    if ! kill -0 "$daemon_pid" 2>/dev/null; then
+      cat "$daemon_log" >&2
+      fail "packaged daemon exited during startup"
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.1
+  done
+  [ "$ready" = true ] || {
+    cat "$daemon_log" >&2
+    fail "packaged daemon did not become healthy"
+  }
+
+  session=$(
+    "$MUXCTL" --state-dir "$state_directory" new \
+      --name package-smoke --panes 2 --program /bin/sh
+  )
+  session_id=$(printf '%s\n' "$session" | awk 'NR == 1 { print $1 }')
+  [ -n "$session_id" ] || fail "runtime smoke did not return a session id"
+  {
+    printf '%s\n' "printf 'MUX_PACKAGE_SMOKE\\n'"
+    sleep 0.5
+  } |
+    "$MUXCTL" --state-dir "$state_directory" attach "$session_id" \
+      >"$verification_directory/attach.log"
+  grep -Fq 'MUX_PACKAGE_SMOKE' "$verification_directory/attach.log" || {
+    cat "$verification_directory/attach.log" >&2
+    fail "packaged PTY did not return expected output"
+  }
+  "$MUXCTL" --state-dir "$state_directory" inspect "$session_id" >/dev/null
+  "$MUXCTL" --state-dir "$state_directory" kill "$session_id" >/dev/null
+fi
 
 echo "verified $archive_name ($expected_architecture, Mux $expected_version, build $build_number)"

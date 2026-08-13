@@ -59,7 +59,11 @@ jobs:
           archive=$(sed -n '1p' "$package_paths")
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
       - name: Verify app bundle
-        run: scripts/verify-macos-package.sh '${{ steps.package.outputs.archive }}' arm64 "$(cat version.txt)"
+        env:
+          MUXCTL: target/debug/muxctl
+        run: |
+          cargo build -p muxctl
+          scripts/verify-macos-package.sh '${{ steps.package.outputs.archive }}' arm64 "$(cat version.txt)"
       - name: Upload app bundle
         uses: actions/upload-artifact@v7
         with:
