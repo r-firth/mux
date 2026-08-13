@@ -7,8 +7,9 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
@@ -99,6 +100,38 @@ impl AgentSpec {
             args: vec!["--acp".to_owned(), "--stdio".to_owned()],
             environment: Vec::new(),
         }
+    }
+
+    /// Return a launch spec that can see command-line tools installed by the
+    /// user's login shell. macOS applications opened from Finder inherit a
+    /// deliberately small PATH, while Node version managers and user-local
+    /// tools are normally configured from shell startup files.
+    ///
+    /// An explicit PATH in the spec remains authoritative. This keeps custom
+    /// ACP launchers deterministic and makes it possible to deliberately
+    /// sandbox an agent process.
+    #[must_use]
+    pub fn resolve_runtime_environment(&self) -> Self {
+        if self
+            .environment
+            .iter()
+            .any(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+        {
+            return self.clone();
+        }
+
+        // The spec often crosses into a persistent daemon whose environment
+        // is not the GUI's environment. Always make the effective PATH
+        // explicit, even when this process can already resolve the command.
+        let process_path = std::env::var("PATH")
+            .ok()
+            .filter(|_| find_agent_command(&self.command, &self.environment).is_some());
+        let Some(path) = process_path.or_else(login_shell_path) else {
+            return self.clone();
+        };
+        let mut resolved = self.clone();
+        resolved.environment.push(("PATH".to_owned(), path));
+        resolved
     }
 
     pub fn prepare(&self) -> Result<PreparedAgent, AgentError> {
@@ -678,8 +711,9 @@ impl AgentManager {
                 cwd.display()
             )));
         }
-        let prepared = spec.prepare()?;
-        ensure_agent_command_available(spec)?;
+        let runtime_spec = spec.resolve_runtime_environment();
+        ensure_agent_command_available(&runtime_spec)?;
+        let prepared = runtime_spec.prepare()?;
         let session_id = AgentSessionId::new();
         let snapshot = AgentSessionSnapshot {
             id: session_id,
@@ -1764,15 +1798,63 @@ fn ensure_agent_command_available(spec: &AgentSpec) -> Result<(), AgentError> {
     let command = spec.command.display();
     let message = if spec.command == Path::new("npx") {
         format!(
-            "could not find `{command}` in PATH; install Node.js (which includes npx), then start {} again",
+            "could not find `{command}` in the app or login-shell PATH; install Node.js (which includes npx), then start {} again",
             spec.name
         )
     } else {
         format!(
-            "could not find executable `{command}` in PATH; install it or update this agent's command"
+            "could not find executable `{command}` in the app or login-shell PATH; install it or update this agent's command"
         )
     };
     Err(AgentError::RuntimeUnavailable(message))
+}
+
+static LOGIN_SHELL_PATH: OnceLock<Option<String>> = OnceLock::new();
+
+fn login_shell_path() -> Option<String> {
+    LOGIN_SHELL_PATH
+        .get_or_init(discover_login_shell_path)
+        .clone()
+}
+
+#[cfg(unix)]
+fn discover_login_shell_path() -> Option<String> {
+    let shell = std::env::var_os("SHELL")
+        .filter(|shell| !shell.is_empty())
+        .map(PathBuf::from)
+        .filter(|shell| executable_file(shell))
+        .unwrap_or_else(|| {
+            PathBuf::from(if cfg!(target_os = "macos") {
+                "/bin/zsh"
+            } else {
+                "/bin/sh"
+            })
+        });
+    let output = Command::new(shell)
+        .args(["-l", "-i", "-c", "/usr/bin/env"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| parse_path_from_env_output(&output.stdout))
+        .flatten()
+}
+
+#[cfg(not(unix))]
+fn discover_login_shell_path() -> Option<String> {
+    None
+}
+
+fn parse_path_from_env_output(output: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix("PATH="))
+        .filter(|path| !path.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn find_agent_command(command: &Path, environment: &[(String, String)]) -> Option<PathBuf> {
@@ -1931,6 +2013,26 @@ mod tests {
             .start(&spec, std::env::current_dir().expect("current directory"))
             .expect_err("session start must fail synchronously");
         assert!(manager.list().is_empty());
+    }
+
+    #[test]
+    fn login_shell_path_parser_ignores_shell_startup_noise() {
+        let output = b"startup banner\nIGNORED=value\nPATH=/user/bin:/usr/bin:/bin\n";
+        assert_eq!(
+            parse_path_from_env_output(output).as_deref(),
+            Some("/user/bin:/usr/bin:/bin")
+        );
+    }
+
+    #[test]
+    fn explicit_agent_path_is_never_replaced() {
+        let spec = AgentSpec {
+            name: "Sandboxed agent".to_owned(),
+            command: PathBuf::from("sandbox-agent"),
+            args: Vec::new(),
+            environment: vec![("PATH".to_owned(), "/sandbox/bin".to_owned())],
+        };
+        assert_eq!(spec.resolve_runtime_environment(), spec);
     }
 
     #[test]
