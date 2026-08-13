@@ -6,7 +6,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use mux_acp::{AgentConfigValueSelection, AgentPrompt, AgentSpec};
 use mux_client::{Client, ClientError, default_state_dir, socket_path};
-use mux_protocol::{CreateSession, ErrorCode, ServerEvent, SessionSelector, SpawnCommand};
+use mux_protocol::{
+    CreateSession, ErrorCode, PROTOCOL_VERSION, ServerEvent, SessionSelector, SpawnCommand,
+};
 use mux_terminal::TerminalSize;
 use mux_workspace::{AgentSessionId, Direction, PaneId, Session, SessionId, WorkspaceCommand};
 use tokio::sync::mpsc;
@@ -115,6 +117,15 @@ async fn run(
         .ok_or_else(|| anyhow!("no application data directory"))?;
     let socket = socket_path(&state_dir);
     let mut client = connect_or_start_daemon(&state_dir, &socket).await?;
+    if client.protocol_version() != PROTOCOL_VERSION {
+        send_event(
+            events,
+            UserEvent::CompatibilityMode {
+                daemon_protocol: client.protocol_version(),
+                app_protocol: PROTOCOL_VERSION,
+            },
+        )?;
+    }
     let sessions = client.list_sessions().await?;
     send_event(events, UserEvent::Sessions(sessions.clone()))?;
     let session_id = if let Some(session) = sessions.first() {
@@ -237,9 +248,13 @@ async fn run(
                         }
                     }
                     CommandMessage::ListAgents => {
-                        match client.list_agent_sessions().await {
-                            Ok(agents) => send_event(events, UserEvent::Agents(agents))?,
-                            Err(error) => report_backend_error(events, error),
+                        if client.supports_agents() {
+                            match client.list_agent_sessions().await {
+                                Ok(agents) => send_event(events, UserEvent::Agents(agents))?,
+                                Err(error) => report_backend_error(events, error),
+                            }
+                        } else {
+                            send_event(events, UserEvent::Agents(Vec::new()))?;
                         }
                     }
                     CommandMessage::StartAgent {
