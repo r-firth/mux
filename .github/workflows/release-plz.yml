@@ -11,6 +11,7 @@ jobs:
     name: Publish approved release
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
       pull-requests: read
     steps:
@@ -24,11 +25,16 @@ jobs:
         name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@1.88.0
       - name: Publish GitHub release
-        uses: release-plz/action@v0.5
-        with:
-          command: release
+        id: publish
+        run: scripts/publish-github-release.sh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build release artifacts
+        if: steps.publish.outputs.artifacts_needed == 'true'
+        run: gh workflow run release-artifacts.yml --ref main -f tag='${{ steps.publish.outputs.tag }}'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   release-pr:
     name: Prepare release PR
