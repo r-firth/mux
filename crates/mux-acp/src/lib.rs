@@ -90,6 +90,17 @@ impl AgentSpec {
         }
     }
 
+    /// GitHub Copilot CLI's native stdio ACP server.
+    #[must_use]
+    pub fn copilot() -> Self {
+        Self {
+            name: "GitHub Copilot".to_owned(),
+            command: PathBuf::from("copilot"),
+            args: vec!["--acp".to_owned(), "--stdio".to_owned()],
+            environment: Vec::new(),
+        }
+    }
+
     pub fn prepare(&self) -> Result<PreparedAgent, AgentError> {
         if self.name.trim().is_empty() {
             return Err(AgentError::InvalidSpec(
@@ -145,6 +156,12 @@ pub fn built_in_agent_profiles() -> Vec<AgentProfile> {
             description: "Gemini CLI native ACP mode · downloaded and cached on first use"
                 .to_owned(),
             spec: AgentSpec::gemini(),
+        },
+        AgentProfile {
+            id: "github-copilot".to_owned(),
+            name: "GitHub Copilot".to_owned(),
+            description: "Copilot CLI native ACP mode · uses installed copilot".to_owned(),
+            spec: AgentSpec::copilot(),
         },
     ]
 }
@@ -1803,6 +1820,13 @@ mod tests {
             prepared.arguments(),
             ["-y", "@agentclientprotocol/codex-acp@1.2.0"]
         );
+    }
+
+    #[test]
+    fn copilot_uses_the_native_documented_stdio_acp_server() {
+        let prepared = AgentSpec::copilot().prepare().expect("valid Copilot agent");
+        assert_eq!(prepared.command(), Path::new("copilot"));
+        assert_eq!(prepared.arguments(), ["--acp", "--stdio"]);
     }
 
     #[test]

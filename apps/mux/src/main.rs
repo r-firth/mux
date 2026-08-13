@@ -5,6 +5,7 @@
 mod backend;
 mod layout;
 mod render;
+mod settings;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -33,9 +34,10 @@ use mux_workspace::{
     WorkspaceCommand,
 };
 use render::{
-    AgentLauncherView, AgentSurfaceView, Renderer, SessionSwitcherView, TextPromptView, UiState,
-    agent_composer_height,
+    AgentLauncherView, AgentSurfaceView, Renderer, SessionSwitcherView, SettingsAgentView,
+    SettingsView, TextPromptView, UiState, agent_composer_height,
 };
+use settings::AppSettings;
 use tracing::{error, info};
 use unicode_segmentation::UnicodeSegmentation;
 use winit::application::ApplicationHandler;
@@ -61,6 +63,10 @@ struct SessionSwitcher {
     entries: Vec<SessionSummary>,
     selected: usize,
     pending_kill: Option<mux_workspace::SessionId>,
+}
+
+struct SettingsSurface {
+    selected: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -193,8 +199,11 @@ struct Application {
     session_switcher: Option<SessionSwitcher>,
     text_prompt: Option<TextPrompt>,
     agents: Vec<AgentSessionSnapshot>,
+    available_agent_profiles: Vec<AgentProfile>,
     agent_profiles: Vec<AgentProfile>,
     agent_surface: Option<AgentSurface>,
+    settings: AppSettings,
+    settings_surface: Option<SettingsSurface>,
     agent_surface_progress: f32,
     agent_surface_target: f32,
     last_animation_frame: Option<Instant>,
@@ -237,8 +246,11 @@ impl Default for Application {
             session_switcher: None,
             text_prompt: None,
             agents: Vec::new(),
+            available_agent_profiles: built_in_agent_profiles(),
             agent_profiles: built_in_agent_profiles(),
             agent_surface: None,
+            settings: AppSettings::default(),
+            settings_surface: None,
             agent_surface_progress: 0.0,
             agent_surface_target: 0.0,
             last_animation_frame: None,
@@ -432,6 +444,7 @@ impl Application {
         self.schedule_view_refresh();
     }
 
+    #[allow(clippy::too_many_lines)]
     fn sync_view(&mut self, changed_panes: &HashSet<PaneId>) -> Result<()> {
         let Some(renderer) = &self.renderer else {
             return Ok(());
@@ -468,6 +481,14 @@ impl Application {
         }
 
         let command_suggestions = self.agent_command_suggestions();
+        let settings_agents = self
+            .available_agent_profiles
+            .iter()
+            .map(|profile| SettingsAgentView {
+                profile,
+                enabled: self.settings.agent_enabled(&profile.id),
+            })
+            .collect::<Vec<_>>();
         let frames = self
             .panes
             .iter()
@@ -498,6 +519,10 @@ impl Application {
                         TextPromptKind::RenameSession(_) => "Rename session",
                     },
                     draft: &prompt.draft,
+                }),
+                settings: self.settings_surface.as_ref().map(|settings| SettingsView {
+                    agents: &settings_agents,
+                    selected: settings.selected,
                 }),
                 agent_surface: self.agent_surface.as_ref().map(|surface| AgentSurfaceView {
                     entries: &self.agents,
@@ -621,6 +646,20 @@ impl Application {
             return;
         }
 
+        if event.state == ElementState::Pressed && is_settings_shortcut(event, self.modifiers) {
+            self.suppress_key_release(event);
+            self.execute_action(Action::OpenSettings);
+            return;
+        }
+
+        if self.settings_surface.is_some() {
+            if event.state == ElementState::Pressed {
+                self.suppress_key_release(event);
+                self.handle_settings_key(event);
+            }
+            return;
+        }
+
         if self.text_prompt.is_some() {
             if event.state == ElementState::Pressed {
                 self.suppress_key_release(event);
@@ -675,6 +714,105 @@ impl Application {
             let _ = self.refresh_view();
         }
         self.write_terminal_key(event);
+    }
+
+    fn handle_settings_key(&mut self, event: &KeyEvent) {
+        let key = event.key_without_modifiers();
+        let profile_count = self.available_agent_profiles.len();
+        match key {
+            Key::Named(NamedKey::Escape) => self.settings_surface = None,
+            Key::Named(NamedKey::ArrowUp) => {
+                if let Some(surface) = &mut self.settings_surface
+                    && profile_count > 0
+                {
+                    surface.selected = (surface.selected + profile_count - 1) % profile_count;
+                }
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                if let Some(surface) = &mut self.settings_surface
+                    && profile_count > 0
+                {
+                    surface.selected = (surface.selected + 1) % profile_count;
+                }
+            }
+            Key::Named(NamedKey::Enter | NamedKey::Space) => self.toggle_selected_integration(),
+            _ => {}
+        }
+        let _ = self.refresh_view();
+    }
+
+    fn toggle_settings_surface(&mut self) {
+        if self.settings_surface.take().is_some() {
+            let _ = self.refresh_view();
+            return;
+        }
+        self.mode = InputMode::Normal;
+        self.session_switcher = None;
+        self.text_prompt = None;
+        self.agent_surface = None;
+        self.agent_surface_progress = 0.0;
+        self.agent_surface_target = 0.0;
+        self.last_animation_frame = None;
+        self.clear_hyperlink_hover();
+        self.settings_surface = Some(SettingsSurface { selected: 0 });
+        let _ = self.refresh_view();
+    }
+
+    fn toggle_selected_integration(&mut self) {
+        let Some(index) = self
+            .settings_surface
+            .as_ref()
+            .map(|surface| surface.selected)
+        else {
+            return;
+        };
+        let Some(profile) = self.available_agent_profiles.get(index) else {
+            return;
+        };
+        let profile_id = profile.id.clone();
+        let profile_name = profile.name.clone();
+        let enabled = !self.settings.agent_enabled(&profile_id);
+        self.settings.set_agent_enabled(&profile_id, enabled);
+        self.refresh_enabled_agent_profiles();
+        match self.persist_settings() {
+            Ok(()) => {
+                self.message = Some(format!(
+                    "{profile_name} integration {}",
+                    if enabled { "enabled" } else { "disabled" }
+                ));
+            }
+            Err(error) => {
+                self.settings.set_agent_enabled(&profile_id, !enabled);
+                self.refresh_enabled_agent_profiles();
+                self.message = Some(format!("save settings: {error:#}"));
+            }
+        }
+    }
+
+    fn refresh_enabled_agent_profiles(&mut self) {
+        self.agent_profiles = self
+            .available_agent_profiles
+            .iter()
+            .filter(|profile| self.settings.agent_enabled(&profile.id))
+            .cloned()
+            .collect();
+        if let Some(launcher) = self
+            .agent_surface
+            .as_mut()
+            .and_then(|surface| surface.launcher.as_mut())
+        {
+            launcher.selected_profile = launcher
+                .selected_profile
+                .min(self.agent_profiles.len().saturating_sub(1));
+        }
+    }
+
+    fn persist_settings(&self) -> Result<()> {
+        let state_dir = self
+            .state_dir
+            .as_deref()
+            .ok_or_else(|| anyhow!("no application data directory"))?;
+        self.settings.save(state_dir)
     }
 
     fn handle_text_prompt_key(&mut self, event: &KeyEvent) {
@@ -1122,6 +1260,9 @@ impl Application {
                 return;
             }
             let Some(profile) = self.agent_profiles.get(selected_profile).cloned() else {
+                self.message =
+                    Some("No agent integration is enabled · open Settings with ⌘,".to_owned());
+                let _ = self.refresh_view();
                 return;
             };
             let Some(pane_id) = self.focused_pane_id() else {
@@ -1709,6 +1850,9 @@ impl Application {
     }
 
     fn handle_mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        if self.settings_surface.is_some() {
+            return;
+        }
         if self.agent_surface.is_some() {
             let direction = match delta {
                 MouseScrollDelta::LineDelta(_, vertical) => vertical.signum(),
@@ -1754,6 +1898,9 @@ impl Application {
     }
 
     fn handle_mouse_button(&mut self, state: ElementState, button: MouseButton) {
+        if self.handle_settings_mouse_button(state, button) {
+            return;
+        }
         if self.handle_agent_surface_mouse_button(state, button) {
             return;
         }
@@ -1832,6 +1979,48 @@ impl Application {
             (ElementState::Released, MouseButton::Left) => self.mouse_released(),
             _ => {}
         }
+    }
+
+    fn handle_settings_mouse_button(&mut self, state: ElementState, button: MouseButton) -> bool {
+        if self.settings_surface.is_none() {
+            return false;
+        }
+        if state != ElementState::Pressed || button != MouseButton::Left {
+            return true;
+        }
+        let Some(renderer) = &self.renderer else {
+            return true;
+        };
+        let scale = renderer.window_scale_factor();
+        let window_width = renderer.width() as f32;
+        let window_height = renderer.height() as f32;
+        let panel_width = (580.0 * scale).min(window_width - 32.0 * scale);
+        let row_height = 62.0 * scale;
+        let panel_height =
+            126.0 * scale + row_height * self.available_agent_profiles.len().max(1) as f32;
+        let panel_x = ((window_width - panel_width) / 2.0).round();
+        let panel_y = ((window_height - panel_height) / 2.0).round();
+        let (x, y) = self.cursor_position;
+        if x < panel_x || x >= panel_x + panel_width || y < panel_y || y >= panel_y + panel_height {
+            self.settings_surface = None;
+            let _ = self.refresh_view();
+            return true;
+        }
+        let list_top = panel_y + 82.0 * scale;
+        if x >= panel_x + 12.0 * scale && x < panel_x + panel_width - 12.0 * scale {
+            for index in 0..self.available_agent_profiles.len() {
+                let item_top = list_top + index as f32 * row_height;
+                if y >= item_top && y < item_top + 54.0 * scale {
+                    if let Some(surface) = &mut self.settings_surface {
+                        surface.selected = index;
+                    }
+                    self.toggle_selected_integration();
+                    let _ = self.refresh_view();
+                    return true;
+                }
+            }
+        }
+        true
     }
 
     fn scroll_agent_timeline(&mut self, delta: isize) {
@@ -1980,6 +2169,9 @@ impl Application {
 
     fn handle_cursor_moved(&mut self, physical_x: f32, physical_y: f32) {
         self.cursor_position = (physical_x, physical_y);
+        if self.settings_surface.is_some() {
+            return;
+        }
         let pane_id = self
             .mouse_reporting_pane
             .or_else(|| self.pane_at_cursor().map(|pane| pane.pane_id));
@@ -2119,6 +2311,7 @@ impl Application {
             || self.text_prompt.is_some()
             || self.session_switcher.is_some()
             || self.agent_surface.is_some()
+            || self.settings_surface.is_some()
             || !self.pressed_mouse_buttons.is_empty()
         {
             return None;
@@ -2327,6 +2520,7 @@ impl Application {
                 }
             }
             Action::OpenAgentSurface => self.toggle_agent_surface(),
+            Action::OpenSettings => self.toggle_settings_surface(),
             Action::RenameTab => {
                 self.clear_hyperlink_hover();
                 self.text_prompt = Some(TextPrompt {
@@ -2755,6 +2949,7 @@ impl ApplicationHandler<UserEvent> for Application {
         event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
+    #[allow(clippy::too_many_lines)]
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -2814,6 +3009,7 @@ impl ApplicationHandler<UserEvent> for Application {
                 if !text.is_empty()
                     && self.text_prompt.is_none()
                     && self.agent_surface.is_none()
+                    && self.settings_surface.is_none()
                     && self.mode == InputMode::Normal
                 {
                     self.prepare_terminal_input();
@@ -2836,7 +3032,9 @@ impl ApplicationHandler<UserEvent> for Application {
                 }
                 let _ = self.refresh_view();
             }
-            WindowEvent::Ime(Ime::Commit(text)) if self.mode == InputMode::Normal => {
+            WindowEvent::Ime(Ime::Commit(text))
+                if self.settings_surface.is_none() && self.mode == InputMode::Normal =>
+            {
                 self.ime_preedit.clear();
                 self.prepare_terminal_input();
                 self.write_focused(text.into_bytes());
@@ -2995,6 +3193,13 @@ fn is_agent_surface_shortcut(event: &KeyEvent, modifiers: ModifiersState) -> boo
             event.key_without_modifiers(),
             Key::Character(value) if value.eq_ignore_ascii_case("a")
         )
+}
+
+fn is_settings_shortcut(event: &KeyEvent, modifiers: ModifiersState) -> bool {
+    modifiers.super_key()
+        && !modifiers.control_key()
+        && !modifiers.alt_key()
+        && matches!(event.key_without_modifiers(), Key::Character(value) if value == ",")
 }
 
 fn key_chord(event: &KeyEvent, modifiers: ModifiersState) -> Option<KeyChord> {
@@ -3298,11 +3503,30 @@ fn main() -> Result<()> {
     }
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
+    let state_dir = application_state_dir();
+    let (settings, settings_error) = state_dir.as_deref().map_or_else(
+        || {
+            (
+                AppSettings::default(),
+                Some("No application data directory for settings".to_owned()),
+            )
+        },
+        |state_dir| match AppSettings::load(state_dir) {
+            Ok(settings) => (settings, None),
+            Err(error) => (
+                AppSettings::default(),
+                Some(format!("Could not load settings: {error:#}")),
+            ),
+        },
+    );
     let mut application = Application {
         event_proxy: Some(event_loop.create_proxy()),
-        state_dir: application_state_dir(),
+        state_dir,
+        settings,
+        message: settings_error,
         ..Application::default()
     };
+    application.refresh_enabled_agent_profiles();
     event_loop.run_app(&mut application)?;
     Ok(())
 }

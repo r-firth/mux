@@ -547,6 +547,7 @@ pub enum Action {
     DetachSession,
     OpenCommandPalette,
     OpenAgentSurface,
+    OpenSettings,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -676,6 +677,14 @@ impl Keymap {
                 modifiers: Modifiers::SUPER.union(Modifiers::SHIFT),
             },
             Action::OpenSessionSwitcher,
+        );
+        keymap.bind(
+            InputMode::Normal,
+            KeyChord {
+                key: Key::Character(','),
+                modifiers: Modifiers::SUPER,
+            },
+            Action::OpenSettings,
         );
         keymap
     }
@@ -971,6 +980,16 @@ mod tests {
         assert_eq!(
             keymap.resolve(InputMode::Normal, KeyChord::control('n')),
             None
+        );
+        assert_eq!(
+            keymap.resolve(
+                InputMode::Normal,
+                KeyChord {
+                    key: Key::Character(','),
+                    modifiers: Modifiers::SUPER,
+                },
+            ),
+            Some(&Action::OpenSettings),
         );
         assert_eq!(
             keymap.resolve(InputMode::Pane, KeyChord::control('n')),
