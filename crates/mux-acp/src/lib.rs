@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    BooleanConfigOptionCapabilities, CancelNotification, ClientCapabilities,
+    AvailableCommand, BooleanConfigOptionCapabilities, CancelNotification, ClientCapabilities,
     ClientSessionCapabilities, ContentBlock, ContentChunk, Implementation, InitializeRequest,
     NewSessionRequest, PermissionOptionKind, PromptRequest, PromptResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
@@ -326,6 +326,15 @@ pub struct AgentConfigOption {
     pub value: AgentConfigValue,
 }
 
+/// A slash command advertised by the active ACP agent for this session.
+///
+/// Names intentionally omit the leading slash, matching ACP's wire format.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentSlashCommand {
+    pub name: String,
+    pub description: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum AgentTimelineItem {
     Message {
@@ -357,6 +366,7 @@ pub struct AgentSessionSnapshot {
     pub current_mode: Option<String>,
     pub modes: Vec<AgentSessionMode>,
     pub config_options: Vec<AgentConfigOption>,
+    pub available_commands: Vec<AgentSlashCommand>,
 }
 
 impl AgentSessionSnapshot {
@@ -424,6 +434,10 @@ pub enum AgentEvent {
         session_id: AgentSessionId,
         options: Vec<AgentConfigOption>,
     },
+    AvailableCommandsUpdated {
+        session_id: AgentSessionId,
+        commands: Vec<AgentSlashCommand>,
+    },
     PermissionRequested {
         session_id: AgentSessionId,
         permission: AgentPermission,
@@ -459,6 +473,7 @@ impl AgentEvent {
             | Self::UsageUpdated { session_id, .. }
             | Self::ModeUpdated { session_id, .. }
             | Self::ConfigUpdated { session_id, .. }
+            | Self::AvailableCommandsUpdated { session_id, .. }
             | Self::PermissionRequested { session_id, .. }
             | Self::PermissionResolved { session_id, .. }
             | Self::Completed { session_id, .. }
@@ -571,6 +586,7 @@ impl AgentManager {
             current_mode: None,
             modes: Vec::new(),
             config_options: Vec::new(),
+            available_commands: Vec::new(),
         };
         let snapshot_state = Arc::new(RwLock::new(snapshot.clone()));
         let (commands, command_rx) = mpsc::unbounded_channel();
@@ -682,6 +698,7 @@ async fn run_agent(
     sink: EventSink,
 ) -> Result<(), AgentError> {
     let session_id = sink.session_id;
+    let configured_name = prepared.name().to_owned();
     let waiters: PermissionWaiters = Arc::new(Mutex::new(HashMap::new()));
     let busy = Arc::new(AtomicBool::new(false));
     let notification_sink = sink.clone();
@@ -779,7 +796,13 @@ async fn run_agent(
             let remote_session_id = remote.session_id;
             sink.emit(AgentEvent::Ready {
                 session_id,
-                agent_name: initialized.agent_info.as_ref().map(|info| info.name.clone()),
+                agent_name: Some(
+                    initialized
+                        .agent_info
+                        .as_ref()
+                        .and_then(|info| info.title.clone())
+                        .unwrap_or_else(|| configured_name.clone()),
+                ),
                 agent_version: initialized
                     .agent_info
                     .as_ref()
@@ -1058,6 +1081,19 @@ fn normalize_config_option(option: &SessionConfigOption) -> Option<AgentConfigOp
     })
 }
 
+fn normalize_available_commands(commands: Vec<AvailableCommand>) -> Vec<AgentSlashCommand> {
+    commands
+        .into_iter()
+        .filter_map(|command| {
+            let name = command.name.trim().trim_start_matches('/').to_owned();
+            (!name.is_empty()).then_some(AgentSlashCommand {
+                name,
+                description: command.description,
+            })
+        })
+        .collect()
+}
+
 fn emit_session_update(sink: &EventSink, update: SessionUpdate) {
     match update {
         SessionUpdate::AgentMessageChunk(chunk) => {
@@ -1144,6 +1180,12 @@ fn emit_session_update(sink: &EventSink, update: SessionUpdate) {
             session_id: sink.session_id,
             options: normalize_config_options(&update.config_options),
         }),
+        SessionUpdate::AvailableCommandsUpdate(update) => {
+            sink.emit(AgentEvent::AvailableCommandsUpdated {
+                session_id: sink.session_id,
+                commands: normalize_available_commands(update.available_commands),
+            });
+        }
         _ => {}
     }
 }
@@ -1298,6 +1340,9 @@ fn apply_event(snapshot: &mut AgentSessionSnapshot, event: &AgentEvent) {
         AgentEvent::ConfigUpdated { options, .. } => {
             snapshot.config_options.clone_from(options);
         }
+        AgentEvent::AvailableCommandsUpdated { commands, .. } => {
+            snapshot.available_commands.clone_from(commands);
+        }
         AgentEvent::PermissionRequested { permission, .. } => {
             snapshot.status = AgentSessionStatus::WaitingForPermission;
             snapshot
@@ -1402,6 +1447,7 @@ mod tests {
             current_mode: None,
             modes: Vec::new(),
             config_options: Vec::new(),
+            available_commands: Vec::new(),
         };
         append_message(
             &mut snapshot,
@@ -1441,6 +1487,7 @@ mod tests {
             current_mode: None,
             modes: Vec::new(),
             config_options: Vec::new(),
+            available_commands: Vec::new(),
         };
         apply_event(
             &mut snapshot,
@@ -1460,5 +1507,40 @@ mod tests {
             snapshot.timeline.last(),
             Some(AgentTimelineItem::Permission(permission)) if permission.request_id == "request"
         ));
+    }
+
+    #[test]
+    fn an_agent_command_catalog_replaces_the_previous_snapshot() {
+        let id = AgentSessionId::new();
+        let mut snapshot = AgentSessionSnapshot {
+            id,
+            name: "test".to_owned(),
+            cwd: PathBuf::from("/"),
+            status: AgentSessionStatus::Idle,
+            agent_name: None,
+            agent_version: None,
+            timeline: Vec::new(),
+            context_used: None,
+            context_size: None,
+            current_mode: None,
+            modes: Vec::new(),
+            config_options: Vec::new(),
+            available_commands: vec![AgentSlashCommand {
+                name: "old".to_owned(),
+                description: "stale".to_owned(),
+            }],
+        };
+        let commands = vec![AgentSlashCommand {
+            name: "review".to_owned(),
+            description: "Review the current workspace".to_owned(),
+        }];
+        apply_event(
+            &mut snapshot,
+            &AgentEvent::AvailableCommandsUpdated {
+                session_id: id,
+                commands: commands.clone(),
+            },
+        );
+        assert_eq!(snapshot.available_commands, commands);
     }
 }

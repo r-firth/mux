@@ -18,7 +18,7 @@ use glyphon::{
 };
 use mux_acp::{
     AgentConfigCategory, AgentConfigValue, AgentMessageRole, AgentProfile, AgentSessionSnapshot,
-    AgentSessionStatus, AgentTimelineItem, PlanStatus, ToolStatus,
+    AgentSessionStatus, AgentSlashCommand, AgentTimelineItem, PlanStatus, ToolStatus,
 };
 use mux_protocol::SessionSummary;
 use mux_terminal::{
@@ -91,6 +91,8 @@ pub struct AgentSurfaceView<'a> {
     pub context_label: &'a str,
     pub notice: Option<&'a str>,
     pub timeline_scroll: usize,
+    pub command_suggestions: &'a [AgentSlashCommand],
+    pub command_selection: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -116,6 +118,17 @@ pub struct UiState<'a> {
     pub ime_preedit: Option<&'a str>,
     pub hovered_hyperlink: Option<(PaneId, &'a str)>,
     pub cursor_blink_visible: bool,
+}
+
+/// Logical composer height for up to five visible wrapped input lines.
+#[must_use]
+pub fn agent_composer_height(draft: &str) -> f32 {
+    let lines = draft
+        .split('\n')
+        .map(|line| UnicodeWidthStr::width(line).div_ceil(52).max(1))
+        .sum::<usize>()
+        .clamp(1, 5);
+    64.0 + (lines.saturating_sub(1) as f32 * 18.0)
 }
 
 #[repr(C)]
@@ -827,9 +840,10 @@ impl Renderer {
         };
 
         let permission = agent.pending_permission();
-        let composer_height = permission.map_or(64.0, |value| {
-            58.0 + value.options.len().min(4) as f32 * 26.0
-        }) * scale;
+        let composer_height = permission.map_or_else(
+            || agent_composer_height(view.draft),
+            |value| 58.0 + value.options.len().min(4) as f32 * 26.0,
+        ) * scale;
         let composer = Rect {
             x: content_x,
             y: panel.y + panel.height - composer_height - 16.0 * scale,
@@ -847,16 +861,118 @@ impl Renderer {
                 composer,
             );
         }
+        let command_height = if view.command_suggestions.is_empty() {
+            0.0
+        } else {
+            (28.0 + view.command_suggestions.len() as f32 * 30.0) * scale
+        };
+        let command_gap = if command_height > 0.0 {
+            8.0 * scale
+        } else {
+            0.0
+        };
         self.add_agent_timeline(
             agent,
             Rect {
                 x: content_x,
                 y: panel.y + body_top * scale,
                 width: content_width,
-                height: (composer.y - panel.y - (body_top + 12.0) * scale).max(1.0),
+                height: (composer.y
+                    - command_height
+                    - command_gap
+                    - panel.y
+                    - (body_top + 12.0) * scale)
+                    .max(1.0),
             },
             view.timeline_scroll,
         );
+        if command_height > 0.0 {
+            self.add_agent_command_palette(
+                view.command_suggestions,
+                view.command_selection,
+                Rect {
+                    x: content_x,
+                    y: composer.y - command_height - command_gap,
+                    width: content_width,
+                    height: command_height,
+                },
+            );
+        }
+    }
+
+    fn add_agent_command_palette(
+        &mut self,
+        commands: &[AgentSlashCommand],
+        selected: usize,
+        rect: Rect,
+    ) {
+        let scale = self.scale_factor;
+        push_rect(
+            &mut self.overlay_rect_vertices,
+            rect,
+            [0.040, 0.047, 0.061, 1.0],
+            self.config.width,
+            self.config.height,
+        );
+        self.overlay_text.push(make_text(
+            &mut self.font_system,
+            "Commands  ·  ↑↓ choose  ·  Tab complete",
+            Rect {
+                x: rect.x + 10.0 * scale,
+                y: rect.y + 5.0 * scale,
+                width: rect.width - 20.0 * scale,
+                height: 18.0 * scale,
+            },
+            9.5 * scale,
+            Color::rgb(126, 143, 167),
+            Family::SansSerif,
+            Weight::MEDIUM,
+        ));
+        for (index, command) in commands.iter().enumerate() {
+            let row = Rect {
+                x: rect.x + 5.0 * scale,
+                y: rect.y + (25.0 + index as f32 * 30.0) * scale,
+                width: rect.width - 10.0 * scale,
+                height: 27.0 * scale,
+            };
+            if index == selected {
+                push_rect(
+                    &mut self.overlay_rect_vertices,
+                    row,
+                    [0.080, 0.133, 0.198, 1.0],
+                    self.config.width,
+                    self.config.height,
+                );
+            }
+            self.overlay_text.push(make_text(
+                &mut self.font_system,
+                &format!("/{}", command.name),
+                Rect {
+                    x: row.x + 8.0 * scale,
+                    y: row.y + 4.0 * scale,
+                    width: 122.0 * scale,
+                    height: 19.0 * scale,
+                },
+                10.8 * scale,
+                Color::rgb(189, 216, 244),
+                Family::Monospace,
+                Weight::MEDIUM,
+            ));
+            self.overlay_text.push(make_text(
+                &mut self.font_system,
+                &head_chars(&command.description, 48),
+                Rect {
+                    x: row.x + 132.0 * scale,
+                    y: row.y + 4.0 * scale,
+                    width: row.width - 140.0 * scale,
+                    height: 19.0 * scale,
+                },
+                10.3 * scale,
+                Color::rgb(150, 162, 181),
+                Family::SansSerif,
+                Weight::NORMAL,
+            ));
+        }
     }
 
     fn add_empty_agent_surface(&mut self, panel: Rect, loading: bool) {
@@ -2455,6 +2571,14 @@ fn tail_chars(text: &str, maximum: usize) -> String {
     )
 }
 
+fn head_chars(text: &str, maximum: usize) -> String {
+    if text.chars().count() <= maximum {
+        return text.to_owned();
+    }
+    let visible = maximum.saturating_sub(1);
+    format!("{}…", text.chars().take(visible).collect::<String>())
+}
+
 fn create_rect_pipeline(device: &wgpu::Device, format: TextureFormat) -> RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("mux rectangle shader"),
@@ -2914,6 +3038,18 @@ mod tests {
         assert!((color[1] - 0.215_861).abs() < 0.000_001);
         assert!((color[2] - 1.0).abs() < f32::EPSILON);
         assert!((color[3] - 0.75).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn agent_composer_expands_for_wrapped_and_explicit_lines() {
+        for (draft, expected) in [
+            (String::new(), 64.0),
+            ("first\nsecond".to_owned(), 82.0),
+            ("x".repeat(53), 82.0),
+            ("x\n".repeat(12), 136.0),
+        ] {
+            assert!((agent_composer_height(&draft) - expected).abs() < f32::EPSILON);
+        }
     }
 
     #[test]

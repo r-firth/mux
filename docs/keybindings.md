@@ -54,4 +54,6 @@ This keeps foreground Control-key input untouched except for `Ctrl+p` and
 The agent surface is an application-level overlay rather than a terminal mode.
 While open, Escape or `Shift+Command+A` closes it, `Ctrl+c` cancels the active
 turn, Page Up/Down navigates history, and number keys answer a visible
-permission request. Its composer commands are documented in the README.
+permission request. `Shift+Enter` inserts a newline, `Command+V` pastes, and
+`Ctrl+U` or `Command+Backspace` clears the composer. Its slash commands and
+agent-advertised command palette are documented in the README.

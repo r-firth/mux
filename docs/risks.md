@@ -78,9 +78,9 @@ permission prompts in `mux-acp`, with raw ACP schema objects at the adapter
 edge. That boundary now runs real Codex sessions through the maintained adapter
 and has been exercised for prompt streaming, tool calls, mode and reasoning
 configuration, permission rejection, explicit context, GUI detach/reattach,
-and process termination. Launch recipes are pinned to versions observed in the
-official ACP registry so a package update cannot silently change a released
-Mux build.
+process termination, and live agent-advertised slash commands. Launch recipes
+are pinned to versions observed in the official ACP registry so a package
+update cannot silently change a released Mux build.
 
 Authentication remains owned by each agent. Existing Codex credentials are
 inherited by its external process; richer ACP authentication-method discovery

@@ -101,6 +101,9 @@ are launch profiles, not bespoke integrations. After initialization, the
 adapter stores an application-facing snapshot and translates ACP notifications
 into durable timeline events. Model, reasoning effort, and modes come from the
 agent's advertised configuration, so the GUI never assumes Codex-specific IDs.
+Agent-native slash commands likewise come from ACP's live
+`available_commands_update` snapshot and are combined with Mux's small local
+lifecycle command set in the composer.
 
 Terminal context is off by default. If requested, the GUI adds selected text or
 the focused viewport as a separate, size-bounded ACP content block marked as
