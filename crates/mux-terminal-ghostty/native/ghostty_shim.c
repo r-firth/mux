@@ -14,6 +14,7 @@ typedef void *mux_ghostty_renderer_t;
 typedef void *mux_ghostty_response_collector_t;
 typedef void *mux_ghostty_key_encoder_t;
 typedef void *mux_ghostty_mouse_encoder_t;
+typedef void *mux_ghostty_selection_gesture_t;
 
 typedef struct {
   GhosttyKeyEncoder encoder;
@@ -24,6 +25,21 @@ typedef struct {
   GhosttyMouseEncoder encoder;
   GhosttyMouseEvent event;
 } mux_ghostty_mouse_encoder_impl_t;
+
+typedef struct {
+  GhosttySelectionGesture gesture;
+  GhosttySelectionGestureEvent press;
+  GhosttySelectionGestureEvent drag;
+  GhosttySelectionGestureEvent release;
+  GhosttySelectionGestureEvent autoscroll_tick;
+} mux_ghostty_selection_gesture_impl_t;
+
+typedef struct {
+  uint8_t has_selection;
+  uint8_t dragged;
+  uint8_t click_count;
+  uint8_t autoscroll;
+} mux_ghostty_selection_gesture_status_t;
 
 typedef struct {
   uint8_t *bytes;
@@ -526,6 +542,346 @@ int32_t mux_ghostty_terminal_clear_selection(
     mux_ghostty_terminal_t terminal) {
   return (int32_t)ghostty_terminal_set(
       (GhosttyTerminal)terminal, GHOSTTY_TERMINAL_OPT_SELECTION, NULL);
+}
+
+static void selection_gesture_impl_free(
+    mux_ghostty_selection_gesture_impl_t *controller,
+    GhosttyTerminal terminal) {
+  if (controller == NULL) return;
+  ghostty_selection_gesture_event_free(controller->autoscroll_tick);
+  ghostty_selection_gesture_event_free(controller->release);
+  ghostty_selection_gesture_event_free(controller->drag);
+  ghostty_selection_gesture_event_free(controller->press);
+  ghostty_selection_gesture_free(controller->gesture, terminal);
+  free(controller);
+}
+
+int32_t mux_ghostty_selection_gesture_new(
+    mux_ghostty_selection_gesture_t *out_gesture) {
+  if (out_gesture == NULL) return (int32_t)GHOSTTY_INVALID_VALUE;
+  *out_gesture = NULL;
+  mux_ghostty_selection_gesture_impl_t *controller =
+      calloc(1, sizeof(*controller));
+  if (controller == NULL) return (int32_t)GHOSTTY_OUT_OF_MEMORY;
+
+  GhosttyResult result =
+      ghostty_selection_gesture_new(NULL, &controller->gesture);
+  if (result == GHOSTTY_SUCCESS) {
+    result = ghostty_selection_gesture_event_new(
+        NULL,
+        &controller->press,
+        GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_PRESS);
+  }
+  if (result == GHOSTTY_SUCCESS) {
+    result = ghostty_selection_gesture_event_new(
+        NULL,
+        &controller->drag,
+        GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DRAG);
+  }
+  if (result == GHOSTTY_SUCCESS) {
+    result = ghostty_selection_gesture_event_new(
+        NULL,
+        &controller->release,
+        GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_RELEASE);
+  }
+  if (result == GHOSTTY_SUCCESS) {
+    result = ghostty_selection_gesture_event_new(
+        NULL,
+        &controller->autoscroll_tick,
+        GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_AUTOSCROLL_TICK);
+  }
+  if (result != GHOSTTY_SUCCESS) {
+    selection_gesture_impl_free(controller, NULL);
+    return (int32_t)result;
+  }
+  *out_gesture = controller;
+  return (int32_t)GHOSTTY_SUCCESS;
+}
+
+void mux_ghostty_selection_gesture_free(
+    mux_ghostty_selection_gesture_t raw_controller,
+    mux_ghostty_terminal_t raw_terminal) {
+  selection_gesture_impl_free(
+      (mux_ghostty_selection_gesture_impl_t *)raw_controller,
+      (GhosttyTerminal)raw_terminal);
+}
+
+int32_t mux_ghostty_selection_gesture_reset(
+    mux_ghostty_selection_gesture_t raw_controller,
+    mux_ghostty_terminal_t raw_terminal) {
+  mux_ghostty_selection_gesture_impl_t *controller = raw_controller;
+  GhosttyTerminal terminal = (GhosttyTerminal)raw_terminal;
+  if (controller == NULL || terminal == NULL) {
+    return (int32_t)GHOSTTY_INVALID_VALUE;
+  }
+  ghostty_selection_gesture_reset(controller->gesture, terminal);
+  return (int32_t)GHOSTTY_SUCCESS;
+}
+
+static GhosttyResult selection_gesture_status(
+    mux_ghostty_selection_gesture_impl_t *controller,
+    GhosttyTerminal terminal,
+    mux_ghostty_selection_gesture_status_t *out_status) {
+  if (out_status == NULL) return GHOSTTY_INVALID_VALUE;
+  memset(out_status, 0, sizeof(*out_status));
+
+  bool dragged = false;
+  GhosttySelectionGestureAutoscroll autoscroll =
+      GHOSTTY_SELECTION_GESTURE_AUTOSCROLL_NONE;
+  GhosttyResult result = ghostty_selection_gesture_get(
+      controller->gesture,
+      terminal,
+      GHOSTTY_SELECTION_GESTURE_DATA_CLICK_COUNT,
+      &out_status->click_count);
+  if (result != GHOSTTY_SUCCESS) return result;
+  result = ghostty_selection_gesture_get(
+      controller->gesture,
+      terminal,
+      GHOSTTY_SELECTION_GESTURE_DATA_DRAGGED,
+      &dragged);
+  if (result != GHOSTTY_SUCCESS) return result;
+  result = ghostty_selection_gesture_get(
+      controller->gesture,
+      terminal,
+      GHOSTTY_SELECTION_GESTURE_DATA_AUTOSCROLL,
+      &autoscroll);
+  if (result != GHOSTTY_SUCCESS) return result;
+
+  GhosttySelection selection = GHOSTTY_INIT_SIZED(GhosttySelection);
+  result = ghostty_terminal_get(
+      terminal, GHOSTTY_TERMINAL_DATA_SELECTION, &selection);
+  if (result == GHOSTTY_SUCCESS) {
+    out_status->has_selection = 1;
+  } else if (result != GHOSTTY_NO_VALUE) {
+    return result;
+  }
+  out_status->dragged = dragged ? 1 : 0;
+  out_status->autoscroll = (uint8_t)autoscroll;
+  return GHOSTTY_SUCCESS;
+}
+
+static GhosttyResult set_viewport_ref(
+    GhosttyTerminal terminal,
+    GhosttySelectionGestureEvent event,
+    uint16_t x,
+    uint16_t y) {
+  GhosttyPoint point = {
+      .tag = GHOSTTY_POINT_TAG_VIEWPORT,
+      .value = {.coordinate = {.x = x, .y = y}},
+  };
+  GhosttyGridRef ref = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+  GhosttyResult result = ghostty_terminal_grid_ref(terminal, point, &ref);
+  if (result != GHOSTTY_SUCCESS) return result;
+  return ghostty_selection_gesture_event_set(
+      event, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF, &ref);
+}
+
+static GhosttyResult install_gesture_selection(
+    GhosttyTerminal terminal,
+    GhosttySelectionGesture gesture,
+    GhosttySelectionGestureEvent event,
+    bool clear_when_empty) {
+  GhosttySelection selection = GHOSTTY_INIT_SIZED(GhosttySelection);
+  GhosttyResult result = ghostty_selection_gesture_event(
+      gesture, terminal, event, &selection);
+  if (result == GHOSTTY_NO_VALUE) {
+    if (!clear_when_empty) return GHOSTTY_SUCCESS;
+    return ghostty_terminal_set(
+        terminal, GHOSTTY_TERMINAL_OPT_SELECTION, NULL);
+  }
+  if (result != GHOSTTY_SUCCESS) return result;
+  return ghostty_terminal_set(
+      terminal, GHOSTTY_TERMINAL_OPT_SELECTION, &selection);
+}
+
+int32_t mux_ghostty_selection_gesture_press(
+    mux_ghostty_selection_gesture_t raw_controller,
+    mux_ghostty_terminal_t raw_terminal,
+    uint16_t x,
+    uint16_t y,
+    double surface_x,
+    double surface_y,
+    uint64_t time_ns,
+    double repeat_distance,
+    uint64_t repeat_interval_ns,
+    mux_ghostty_selection_gesture_status_t *out_status) {
+  mux_ghostty_selection_gesture_impl_t *controller = raw_controller;
+  GhosttyTerminal terminal = (GhosttyTerminal)raw_terminal;
+  if (controller == NULL || terminal == NULL) {
+    return (int32_t)GHOSTTY_INVALID_VALUE;
+  }
+  GhosttyResult result = set_viewport_ref(terminal, controller->press, x, y);
+  GhosttySurfacePosition position = {.x = surface_x, .y = surface_y};
+  if (result == GHOSTTY_SUCCESS) {
+    result = ghostty_selection_gesture_event_set(
+        controller->press, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_POSITION, &position);
+  }
+  if (result == GHOSTTY_SUCCESS) {
+    result = ghostty_selection_gesture_event_set(
+        controller->press, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_TIME_NS, &time_ns);
+  }
+  if (result == GHOSTTY_SUCCESS) {
+    result = ghostty_selection_gesture_event_set(
+        controller->press,
+        GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_DISTANCE,
+        &repeat_distance);
+  }
+  if (result == GHOSTTY_SUCCESS) {
+    result = ghostty_selection_gesture_event_set(
+        controller->press,
+        GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_INTERVAL_NS,
+        &repeat_interval_ns);
+  }
+  if (result == GHOSTTY_SUCCESS) {
+    result = install_gesture_selection(
+        terminal, controller->gesture, controller->press, true);
+  }
+  if (result == GHOSTTY_SUCCESS) {
+    result = selection_gesture_status(controller, terminal, out_status);
+  }
+  return (int32_t)result;
+}
+
+static GhosttyResult set_drag_options(
+    GhosttySelectionGestureEvent event,
+    double surface_x,
+    double surface_y,
+    bool rectangular,
+    uint32_t columns,
+    uint32_t cell_width,
+    uint32_t padding_left,
+    uint32_t screen_height) {
+  GhosttySurfacePosition position = {.x = surface_x, .y = surface_y};
+  GhosttySelectionGestureGeometry geometry = {
+      .columns = columns,
+      .cell_width = cell_width,
+      .padding_left = padding_left,
+      .screen_height = screen_height,
+  };
+  GhosttyResult result = ghostty_selection_gesture_event_set(
+      event, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_POSITION, &position);
+  if (result == GHOSTTY_SUCCESS) {
+    result = ghostty_selection_gesture_event_set(
+        event, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_RECTANGLE, &rectangular);
+  }
+  if (result == GHOSTTY_SUCCESS) {
+    result = ghostty_selection_gesture_event_set(
+        event, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_GEOMETRY, &geometry);
+  }
+  return result;
+}
+
+int32_t mux_ghostty_selection_gesture_drag(
+    mux_ghostty_selection_gesture_t raw_controller,
+    mux_ghostty_terminal_t raw_terminal,
+    uint16_t x,
+    uint16_t y,
+    double surface_x,
+    double surface_y,
+    bool rectangular,
+    uint32_t columns,
+    uint32_t cell_width,
+    uint32_t padding_left,
+    uint32_t screen_height,
+    mux_ghostty_selection_gesture_status_t *out_status) {
+  mux_ghostty_selection_gesture_impl_t *controller = raw_controller;
+  GhosttyTerminal terminal = (GhosttyTerminal)raw_terminal;
+  if (controller == NULL || terminal == NULL) {
+    return (int32_t)GHOSTTY_INVALID_VALUE;
+  }
+  GhosttyResult result = set_viewport_ref(terminal, controller->drag, x, y);
+  if (result == GHOSTTY_SUCCESS) {
+    result = set_drag_options(
+        controller->drag,
+        surface_x,
+        surface_y,
+        rectangular,
+        columns,
+        cell_width,
+        padding_left,
+        screen_height);
+  }
+  if (result == GHOSTTY_SUCCESS) {
+    result = install_gesture_selection(
+        terminal, controller->gesture, controller->drag, true);
+  }
+  if (result == GHOSTTY_SUCCESS) {
+    result = selection_gesture_status(controller, terminal, out_status);
+  }
+  return (int32_t)result;
+}
+
+int32_t mux_ghostty_selection_gesture_release(
+    mux_ghostty_selection_gesture_t raw_controller,
+    mux_ghostty_terminal_t raw_terminal,
+    bool has_point,
+    uint16_t x,
+    uint16_t y,
+    mux_ghostty_selection_gesture_status_t *out_status) {
+  mux_ghostty_selection_gesture_impl_t *controller = raw_controller;
+  GhosttyTerminal terminal = (GhosttyTerminal)raw_terminal;
+  if (controller == NULL || terminal == NULL) {
+    return (int32_t)GHOSTTY_INVALID_VALUE;
+  }
+  GhosttyResult result = has_point
+      ? set_viewport_ref(terminal, controller->release, x, y)
+      : ghostty_selection_gesture_event_set(
+            controller->release,
+            GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF,
+            NULL);
+  if (result == GHOSTTY_SUCCESS) {
+    result = ghostty_selection_gesture_event(
+        controller->gesture, terminal, controller->release, NULL);
+    if (result == GHOSTTY_NO_VALUE) result = GHOSTTY_SUCCESS;
+  }
+  if (result == GHOSTTY_SUCCESS) {
+    result = selection_gesture_status(controller, terminal, out_status);
+  }
+  return (int32_t)result;
+}
+
+int32_t mux_ghostty_selection_gesture_autoscroll_tick(
+    mux_ghostty_selection_gesture_t raw_controller,
+    mux_ghostty_terminal_t raw_terminal,
+    uint16_t viewport_x,
+    uint16_t viewport_y,
+    double surface_x,
+    double surface_y,
+    bool rectangular,
+    uint32_t columns,
+    uint32_t cell_width,
+    uint32_t padding_left,
+    uint32_t screen_height,
+    mux_ghostty_selection_gesture_status_t *out_status) {
+  mux_ghostty_selection_gesture_impl_t *controller = raw_controller;
+  GhosttyTerminal terminal = (GhosttyTerminal)raw_terminal;
+  if (controller == NULL || terminal == NULL) {
+    return (int32_t)GHOSTTY_INVALID_VALUE;
+  }
+  GhosttyPointCoordinate viewport = {.x = viewport_x, .y = viewport_y};
+  GhosttyResult result = ghostty_selection_gesture_event_set(
+      controller->autoscroll_tick,
+      GHOSTTY_SELECTION_GESTURE_EVENT_OPT_VIEWPORT,
+      &viewport);
+  if (result == GHOSTTY_SUCCESS) {
+    result = set_drag_options(
+        controller->autoscroll_tick,
+        surface_x,
+        surface_y,
+        rectangular,
+        columns,
+        cell_width,
+        padding_left,
+        screen_height);
+  }
+  if (result == GHOSTTY_SUCCESS) {
+    result = install_gesture_selection(
+        terminal, controller->gesture, controller->autoscroll_tick, false);
+  }
+  if (result == GHOSTTY_SUCCESS) {
+    result = selection_gesture_status(controller, terminal, out_status);
+  }
+  return (int32_t)result;
 }
 
 int32_t mux_ghostty_terminal_selected_text(

@@ -21,8 +21,10 @@ sessions through the same stable Agent Client Protocol used by Zed.
   other application shortcuts, so Vim keybindings pass through unchanged.
 - A bundled JetBrains Mono Nerd Font and system fallback cover shell glyphs,
   Unicode, CJK, emoji, bold, italic, faint, and terminal decorations.
-- Ghostty owns mode-aware key, paste, selection, scrollback, and mouse-protocol
-  semantics; the GUI supplies native keyboard, clipboard, pointer, and wheel input.
+- Ghostty owns mode-aware key, paste, scrollback, mouse-protocol, and selection
+  gesture semantics—including word/line clicks, directional dragging, block
+  selection, and autoscroll. The GUI supplies native input and scheduling; Shift
+  temporarily releases mouse-reporting applications for local selection/scroll.
 - OSC 8 hyperlinks come directly from Ghostty cell state. Hold Command to reveal
   a link with native pointer feedback and Command-click it without interfering
   with ordinary terminal mouse input.

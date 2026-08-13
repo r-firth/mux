@@ -217,8 +217,9 @@ mod linked {
         RenderFrame, RenderRow, Rgb, SemanticContent, TerminalAttachment, TerminalCheckpoint,
         TerminalEngine, TerminalError, TerminalInteraction, TerminalKey, TerminalKeyAction,
         TerminalKeyEvent, TerminalModifiers, TerminalMouseAction, TerminalMouseButton,
-        TerminalMouseEvent, TerminalRenderer, TerminalScrollState, TerminalSelection, TerminalSize,
-        TerminalViewportScroll,
+        TerminalMouseEvent, TerminalRenderer, TerminalScrollState, TerminalSelection,
+        TerminalSelectionAutoscroll, TerminalSelectionGestureEvent, TerminalSelectionGestureStatus,
+        TerminalSize, TerminalViewportScroll,
     };
     use thiserror::Error;
 
@@ -242,6 +243,15 @@ mod linked {
         r: u8,
         g: u8,
         b: u8,
+    }
+
+    #[derive(Clone, Copy, Default)]
+    #[repr(C)]
+    struct CSelectionGestureStatus {
+        has_selection: u8,
+        dragged: u8,
+        click_count: u8,
+        autoscroll: u8,
     }
 
     #[derive(Clone, Copy)]
@@ -352,6 +362,57 @@ mod linked {
             rectangular: bool,
         ) -> i32;
         fn mux_ghostty_terminal_clear_selection(terminal: *mut c_void) -> i32;
+        fn mux_ghostty_selection_gesture_new(out_gesture: *mut *mut c_void) -> i32;
+        fn mux_ghostty_selection_gesture_free(gesture: *mut c_void, terminal: *mut c_void);
+        fn mux_ghostty_selection_gesture_reset(gesture: *mut c_void, terminal: *mut c_void) -> i32;
+        fn mux_ghostty_selection_gesture_press(
+            gesture: *mut c_void,
+            terminal: *mut c_void,
+            x: u16,
+            y: u16,
+            surface_x: f64,
+            surface_y: f64,
+            time_ns: u64,
+            repeat_distance: f64,
+            repeat_interval_ns: u64,
+            out_status: *mut CSelectionGestureStatus,
+        ) -> i32;
+        fn mux_ghostty_selection_gesture_drag(
+            gesture: *mut c_void,
+            terminal: *mut c_void,
+            x: u16,
+            y: u16,
+            surface_x: f64,
+            surface_y: f64,
+            rectangular: bool,
+            columns: u32,
+            cell_width: u32,
+            padding_left: u32,
+            screen_height: u32,
+            out_status: *mut CSelectionGestureStatus,
+        ) -> i32;
+        fn mux_ghostty_selection_gesture_release(
+            gesture: *mut c_void,
+            terminal: *mut c_void,
+            has_point: bool,
+            x: u16,
+            y: u16,
+            out_status: *mut CSelectionGestureStatus,
+        ) -> i32;
+        fn mux_ghostty_selection_gesture_autoscroll_tick(
+            gesture: *mut c_void,
+            terminal: *mut c_void,
+            viewport_x: u16,
+            viewport_y: u16,
+            surface_x: f64,
+            surface_y: f64,
+            rectangular: bool,
+            columns: u32,
+            cell_width: u32,
+            padding_left: u32,
+            screen_height: u32,
+            out_status: *mut CSelectionGestureStatus,
+        ) -> i32;
         fn mux_ghostty_terminal_selected_text(
             terminal: *mut c_void,
             out_bytes: *mut *mut u8,
@@ -453,6 +514,7 @@ mod linked {
         responses: NonNull<c_void>,
         key_encoder: NonNull<c_void>,
         mouse_encoder: NonNull<c_void>,
+        selection_gesture: NonNull<c_void>,
         descriptor: EngineDescriptor,
         next_sequence: u64,
     }
@@ -515,12 +577,27 @@ mod linked {
                     return Err(error);
                 }
             };
+            let selection_gesture = match create_selection_gesture() {
+                Ok(selection_gesture) => selection_gesture,
+                Err(error) => {
+                    // SAFETY: all handles are solely owned here.
+                    unsafe {
+                        mux_ghostty_mouse_encoder_free(mouse_encoder.as_ptr());
+                        mux_ghostty_key_encoder_free(key_encoder.as_ptr());
+                        mux_ghostty_response_collector_free(responses.as_ptr());
+                        mux_ghostty_renderer_free(renderer.as_ptr());
+                        mux_ghostty_terminal_free(terminal.as_ptr());
+                    }
+                    return Err(error);
+                }
+            };
             Ok(Self {
                 terminal,
                 renderer,
                 responses,
                 key_encoder,
                 mouse_encoder,
+                selection_gesture,
                 descriptor: descriptor(),
                 next_sequence: 1,
             })
@@ -626,12 +703,27 @@ mod linked {
                     return Err(error);
                 }
             };
+            let selection_gesture = match create_selection_gesture() {
+                Ok(selection_gesture) => selection_gesture,
+                Err(error) => {
+                    // SAFETY: all handles are solely owned here.
+                    unsafe {
+                        mux_ghostty_mouse_encoder_free(mouse_encoder.as_ptr());
+                        mux_ghostty_key_encoder_free(key_encoder.as_ptr());
+                        mux_ghostty_response_collector_free(responses.as_ptr());
+                        mux_ghostty_renderer_free(renderer.as_ptr());
+                        mux_ghostty_terminal_free(terminal.as_ptr());
+                    }
+                    return Err(error);
+                }
+            };
             Ok(Self {
                 terminal,
                 renderer,
                 responses,
                 key_encoder,
                 mouse_encoder,
+                selection_gesture,
                 descriptor: descriptor(),
                 next_sequence: checkpoint.next_sequence,
             })
@@ -771,6 +863,16 @@ mod linked {
             &mut self,
             selection: Option<TerminalSelection>,
         ) -> Result<(), TerminalError> {
+            // A programmatic selection replaces any in-progress pointer
+            // sequence so a later click cannot accidentally continue it as a
+            // double- or triple-click.
+            let reset = unsafe {
+                mux_ghostty_selection_gesture_reset(
+                    self.selection_gesture.as_ptr(),
+                    self.terminal.as_ptr(),
+                )
+            };
+            check(reset).map_err(|error| TerminalError::Engine(error.to_string()))?;
             // SAFETY: the terminal is exclusively borrowed. The shim resolves
             // and copies viewport points during this synchronous call.
             let result = unsafe {
@@ -786,6 +888,113 @@ mod linked {
                             selection.rectangular,
                         )
                     },
+                )
+            };
+            check(result).map_err(|error| TerminalError::Engine(error.to_string()))
+        }
+
+        fn selection_gesture(
+            &mut self,
+            event: TerminalSelectionGestureEvent,
+        ) -> Result<TerminalSelectionGestureStatus, TerminalError> {
+            let mut status = CSelectionGestureStatus::default();
+            // SAFETY: the controller and terminal are exclusively owned by
+            // this engine. All event data is copied during the call.
+            let result = unsafe {
+                match event {
+                    TerminalSelectionGestureEvent::Press {
+                        point,
+                        position,
+                        time_ns,
+                        repeat_distance,
+                        repeat_interval_ns,
+                    } => mux_ghostty_selection_gesture_press(
+                        self.selection_gesture.as_ptr(),
+                        self.terminal.as_ptr(),
+                        point.column,
+                        point.row,
+                        position.x,
+                        position.y,
+                        time_ns,
+                        repeat_distance,
+                        repeat_interval_ns,
+                        &raw mut status,
+                    ),
+                    TerminalSelectionGestureEvent::Drag {
+                        point,
+                        position,
+                        rectangular,
+                        geometry,
+                    } => mux_ghostty_selection_gesture_drag(
+                        self.selection_gesture.as_ptr(),
+                        self.terminal.as_ptr(),
+                        point.column,
+                        point.row,
+                        position.x,
+                        position.y,
+                        rectangular,
+                        geometry.columns,
+                        geometry.cell_width,
+                        geometry.padding_left,
+                        geometry.screen_height,
+                        &raw mut status,
+                    ),
+                    TerminalSelectionGestureEvent::Release { point } => {
+                        mux_ghostty_selection_gesture_release(
+                            self.selection_gesture.as_ptr(),
+                            self.terminal.as_ptr(),
+                            point.is_some(),
+                            point.map_or(0, |point| point.column),
+                            point.map_or(0, |point| point.row),
+                            &raw mut status,
+                        )
+                    }
+                    TerminalSelectionGestureEvent::AutoscrollTick {
+                        viewport,
+                        position,
+                        rectangular,
+                        geometry,
+                    } => mux_ghostty_selection_gesture_autoscroll_tick(
+                        self.selection_gesture.as_ptr(),
+                        self.terminal.as_ptr(),
+                        viewport.column,
+                        viewport.row,
+                        position.x,
+                        position.y,
+                        rectangular,
+                        geometry.columns,
+                        geometry.cell_width,
+                        geometry.padding_left,
+                        geometry.screen_height,
+                        &raw mut status,
+                    ),
+                }
+            };
+            check(result).map_err(|error| TerminalError::Engine(error.to_string()))?;
+            let autoscroll = match status.autoscroll {
+                0 => TerminalSelectionAutoscroll::None,
+                1 => TerminalSelectionAutoscroll::Up,
+                2 => TerminalSelectionAutoscroll::Down,
+                value => {
+                    return Err(TerminalError::Engine(format!(
+                        "libghostty returned invalid selection autoscroll state {value}"
+                    )));
+                }
+            };
+            Ok(TerminalSelectionGestureStatus {
+                has_selection: status.has_selection != 0,
+                dragged: status.dragged != 0,
+                click_count: status.click_count,
+                autoscroll,
+            })
+        }
+
+        fn reset_selection_gesture(&mut self) -> Result<(), TerminalError> {
+            // SAFETY: both handles are valid and exclusively borrowed.
+            let result = unsafe {
+                mux_ghostty_selection_gesture_reset(
+                    self.selection_gesture.as_ptr(),
+                    self.terminal.as_ptr(),
                 )
             };
             check(result).map_err(|error| TerminalError::Engine(error.to_string()))
@@ -931,6 +1140,10 @@ mod linked {
         fn drop(&mut self) {
             // SAFETY: these are the sole owned handles and Drop runs once.
             unsafe {
+                mux_ghostty_selection_gesture_free(
+                    self.selection_gesture.as_ptr(),
+                    self.terminal.as_ptr(),
+                );
                 mux_ghostty_key_encoder_free(self.key_encoder.as_ptr());
                 mux_ghostty_mouse_encoder_free(self.mouse_encoder.as_ptr());
                 mux_ghostty_renderer_free(self.renderer.as_ptr());
@@ -966,6 +1179,8 @@ mod linked {
         NullKeyEncoder,
         #[error("libghostty-vt returned a null mouse encoder")]
         NullMouseEncoder,
+        #[error("libghostty-vt returned a null selection gesture")]
+        NullSelectionGesture,
         #[error("terminal checkpoint belongs to a different engine build")]
         IncompatibleCheckpoint,
         #[error(transparent)]
@@ -1023,6 +1238,14 @@ mod linked {
         let result = unsafe { mux_ghostty_mouse_encoder_new(&raw mut encoder) };
         check(result)?;
         NonNull::new(encoder).ok_or(GhosttyError::NullMouseEncoder)
+    }
+
+    fn create_selection_gesture() -> Result<NonNull<c_void>, GhosttyError> {
+        let mut gesture = ptr::null_mut();
+        // SAFETY: `gesture` is a valid out pointer.
+        let result = unsafe { mux_ghostty_selection_gesture_new(&raw mut gesture) };
+        check(result)?;
+        NonNull::new(gesture).ok_or(GhosttyError::NullSelectionGesture)
     }
 
     const fn key_action(action: TerminalKeyAction) -> u8 {
@@ -1462,6 +1685,90 @@ mod linked {
 
             engine.set_selection(None).expect("clear selection");
             assert_eq!(engine.selected_text().expect("no copy text"), None);
+        }
+
+        #[test]
+        fn ghostty_gesture_owns_click_count_word_line_drag_and_autoscroll() {
+            let mut engine = GhosttyEngine::new(TerminalSize {
+                cols: 20,
+                rows: 4,
+                cell_width_px: 10,
+                cell_height_px: 20,
+            })
+            .expect("new terminal");
+            engine
+                .apply_output(1, b"hello world")
+                .expect("terminal output");
+            let geometry = mux_terminal::TerminalSelectionGeometry {
+                columns: 20,
+                cell_width: 10,
+                padding_left: 2,
+                screen_height: 80,
+            };
+            let position = mux_terminal::TerminalSurfacePosition { x: 16.0, y: 10.0 };
+            let point = mux_terminal::TerminalPoint { column: 1, row: 0 };
+            let press = |time_ns| TerminalSelectionGestureEvent::Press {
+                point,
+                position,
+                time_ns,
+                repeat_distance: 10.0,
+                repeat_interval_ns: 500_000_000,
+            };
+
+            let first = engine.selection_gesture(press(1)).expect("single press");
+            assert_eq!(first.click_count, 1);
+            assert!(!first.has_selection);
+            engine
+                .selection_gesture(TerminalSelectionGestureEvent::Release { point: Some(point) })
+                .expect("single release");
+
+            let second = engine
+                .selection_gesture(press(100_000_000))
+                .expect("double press");
+            assert_eq!(second.click_count, 2);
+            assert!(second.has_selection);
+            assert_eq!(
+                engine.selected_text().expect("word selection").as_deref(),
+                Some("hello")
+            );
+            engine
+                .selection_gesture(TerminalSelectionGestureEvent::Release { point: Some(point) })
+                .expect("double release");
+
+            let third = engine
+                .selection_gesture(press(200_000_000))
+                .expect("triple press");
+            assert_eq!(third.click_count, 3);
+            assert_eq!(
+                engine.selected_text().expect("line selection").as_deref(),
+                Some("hello world")
+            );
+
+            engine.reset_selection_gesture().expect("reset sequence");
+            engine
+                .selection_gesture(TerminalSelectionGestureEvent::Press {
+                    point: mux_terminal::TerminalPoint { column: 0, row: 0 },
+                    position: mux_terminal::TerminalSurfacePosition { x: 4.0, y: 10.0 },
+                    time_ns: 1_000_000_000,
+                    repeat_distance: 10.0,
+                    repeat_interval_ns: 500_000_000,
+                })
+                .expect("drag press");
+            let drag = engine
+                .selection_gesture(TerminalSelectionGestureEvent::Drag {
+                    point: mux_terminal::TerminalPoint { column: 4, row: 0 },
+                    position: mux_terminal::TerminalSurfacePosition { x: 49.0, y: 80.0 },
+                    rectangular: false,
+                    geometry,
+                })
+                .expect("cell drag");
+            assert!(drag.dragged);
+            assert!(drag.has_selection);
+            assert_eq!(drag.autoscroll, TerminalSelectionAutoscroll::Down);
+            assert_eq!(
+                engine.selected_text().expect("drag selection").as_deref(),
+                Some("hello")
+            );
         }
 
         #[test]

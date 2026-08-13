@@ -23,7 +23,7 @@ use mux_acp::{
 use mux_protocol::SessionSummary;
 use mux_terminal::{
     CellStyle, CellWidth, RenderCell, RenderDirty, RenderFrame, Rgb, TerminalMouseGeometry,
-    TerminalPoint,
+    TerminalPoint, TerminalSelectionGeometry, TerminalSurfacePosition,
 };
 use mux_workspace::{InputMode, PaneId, Session};
 use unicode_width::UnicodeWidthStr;
@@ -63,6 +63,14 @@ const OVERLAY_SELECTED: [f32; 4] = [0.13, 0.22, 0.34, 1.0];
 const AGENT_BACKGROUND: [f32; 4] = [0.018, 0.021, 0.028, 0.995];
 const AGENT_COMPOSER: [f32; 4] = [0.032, 0.037, 0.048, 1.0];
 const AGENT_ACCENT: [f32; 4] = [0.40, 0.72, 0.98, 1.0];
+
+#[derive(Clone, Copy, Debug)]
+pub struct TerminalSelectionPointer {
+    pub point: Option<TerminalPoint>,
+    pub clamped_point: TerminalPoint,
+    pub position: TerminalSurfacePosition,
+    pub geometry: TerminalSelectionGeometry,
+}
 const AGENT_PERMISSION: [f32; 4] = [0.075, 0.053, 0.022, 1.0];
 
 #[derive(Clone, Copy)]
@@ -327,6 +335,53 @@ impl Renderer {
             physical_x - rect.x,
             physical_y - rect.y,
         )
+    }
+
+    #[must_use]
+    pub fn terminal_selection_pointer(
+        &self,
+        geometry: PaneGeometry,
+        physical_x: f32,
+        physical_y: f32,
+    ) -> TerminalSelectionPointer {
+        let size = self.terminal_size(geometry);
+        let rect = scale_rect(geometry.rect, self.scale_factor);
+        let cell_width = self.cell_width();
+        let cell_height = self.cell_height();
+        let padding_left = PANE_PADDING_X * self.scale_factor;
+        let padding_top = PANE_PADDING_Y * self.scale_factor;
+        let relative_grid_x = physical_x - rect.x - padding_left;
+        let relative_grid_y = physical_y - rect.y - padding_top;
+        let clamped_column = (relative_grid_x / cell_width)
+            .floor()
+            .clamp(0.0, f32::from(size.cols.saturating_sub(1))) as u16;
+        let clamped_row = (relative_grid_y / cell_height)
+            .floor()
+            .clamp(0.0, f32::from(size.rows.saturating_sub(1))) as u16;
+        TerminalSelectionPointer {
+            point: terminal_point_in_grid(
+                physical_x,
+                physical_y,
+                (rect.x + padding_left, rect.y + padding_top),
+                (cell_width, cell_height),
+                size.cols,
+                size.rows,
+            ),
+            clamped_point: TerminalPoint {
+                column: clamped_column,
+                row: clamped_row,
+            },
+            position: TerminalSurfacePosition {
+                x: f64::from(physical_x - rect.x),
+                y: f64::from(physical_y - rect.y),
+            },
+            geometry: TerminalSelectionGeometry {
+                columns: u32::from(size.cols),
+                cell_width: cell_width.round().max(1.0) as u32,
+                padding_left: padding_left.round().max(0.0) as u32,
+                screen_height: rect.height.round().max(1.0) as u32,
+            },
+        }
     }
 
     #[allow(clippy::too_many_lines)]

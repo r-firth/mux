@@ -140,6 +140,62 @@ pub struct TerminalSelection {
     pub rectangular: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TerminalSurfacePosition {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalSelectionGeometry {
+    pub columns: u32,
+    pub cell_width: u32,
+    pub padding_left: u32,
+    pub screen_height: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TerminalSelectionGestureEvent {
+    Press {
+        point: TerminalPoint,
+        position: TerminalSurfacePosition,
+        time_ns: u64,
+        repeat_distance: f64,
+        repeat_interval_ns: u64,
+    },
+    Drag {
+        point: TerminalPoint,
+        position: TerminalSurfacePosition,
+        rectangular: bool,
+        geometry: TerminalSelectionGeometry,
+    },
+    Release {
+        point: Option<TerminalPoint>,
+    },
+    AutoscrollTick {
+        viewport: TerminalPoint,
+        position: TerminalSurfacePosition,
+        rectangular: bool,
+        geometry: TerminalSelectionGeometry,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TerminalSelectionAutoscroll {
+    #[default]
+    None,
+    Up,
+    Down,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TerminalSelectionGestureStatus {
+    pub has_selection: bool,
+    pub dragged: bool,
+    pub click_count: u8,
+    pub autoscroll: TerminalSelectionAutoscroll,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalKeyAction {
     Release,
@@ -266,6 +322,17 @@ pub struct TerminalMouseEvent {
 /// decides selection boundaries and bracketed-paste encoding.
 pub trait TerminalInteraction {
     fn set_selection(&mut self, selection: Option<TerminalSelection>) -> Result<(), TerminalError>;
+
+    /// Applies one pointer-selection event using the terminal engine's native
+    /// word, line, drag-threshold, and autoscroll semantics.
+    fn selection_gesture(
+        &mut self,
+        event: TerminalSelectionGestureEvent,
+    ) -> Result<TerminalSelectionGestureStatus, TerminalError>;
+
+    /// Cancels the active click sequence without changing the installed
+    /// selection. Use this when another subsystem takes ownership of input.
+    fn reset_selection_gesture(&mut self) -> Result<(), TerminalError>;
 
     fn selected_text(&self) -> Result<Option<String>, TerminalError>;
 
