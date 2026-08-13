@@ -115,6 +115,7 @@ pub struct UiState<'a> {
     pub agent_surface: Option<AgentSurfaceView<'a>>,
     pub ime_preedit: Option<&'a str>,
     pub hovered_hyperlink: Option<(PaneId, &'a str)>,
+    pub cursor_blink_visible: bool,
 }
 
 #[repr(C)]
@@ -467,7 +468,12 @@ impl Renderer {
                 let hovered_hyperlink = ui
                     .hovered_hyperlink
                     .and_then(|(pane_id, uri)| (pane_id == pane.pane_id).then_some(uri));
-                self.add_terminal_rectangles(scaled_geometry, frame, hovered_hyperlink);
+                self.add_terminal_rectangles(
+                    scaled_geometry,
+                    frame,
+                    hovered_hyperlink,
+                    ui.cursor_blink_visible,
+                );
                 let previous = self.pane_text.remove(&pane.pane_id);
                 let rebuild_all = previous.as_ref().is_none_or(|text| {
                     text.geometry.rect != scaled_geometry.rect
@@ -1737,6 +1743,7 @@ impl Renderer {
         geometry: PaneGeometry,
         frame: &RenderFrame,
         hovered_hyperlink: Option<&str>,
+        cursor_blink_visible: bool,
     ) {
         let cell_width = self.cell_width();
         let cell_height = self.cell_height();
@@ -1805,7 +1812,10 @@ impl Renderer {
             self.config.height,
         );
         if geometry.focused {
-            if let Some(cursor) = frame.cursor.filter(|cursor| cursor.visible) {
+            if let Some(cursor) = frame
+                .cursor
+                .filter(|cursor| cursor.visible && (!cursor.blinking || cursor_blink_visible))
+            {
                 let width = match cursor.style {
                     mux_terminal::CursorStyle::Bar => 2.0 * self.scale_factor,
                     _ => cell_width,

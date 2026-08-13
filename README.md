@@ -30,7 +30,8 @@ sessions through the same stable Agent Client Protocol used by Zed.
   with ordinary terminal mouse input.
 - Ghostty-compatible background, foreground, cursor, and palette values are
   loaded from the current user theme; terminal RGB is rendered in the correct
-  sRGB colour space.
+  sRGB colour space. Cursor visibility and DECSCUSR/DEC blink policy come from
+  Ghostty, with its 600 ms cadence and activity/focus resets scheduled natively.
 - Terminal and ACP integrations have explicit internal boundaries.
 - New panes and tabs start in the focused shell's live working directory; a
   brand-new workspace starts in the user's home directory.
