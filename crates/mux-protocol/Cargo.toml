@@ -1,0 +1,18 @@
+[package]
+name = "mux-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+mux-acp = { path = "../mux-acp" }
+mux-terminal = { path = "../mux-terminal" }
+mux-workspace = { path = "../mux-workspace" }
+postcard.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,32 @@
+[package]
+name = "mux-terminal-ghostty"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[features]
+default = []
+link = []
+vendored = ["link"]
+
+[dependencies]
+directories.workspace = true
+mux-terminal = { path = "../mux-terminal" }
+thiserror.workspace = true
+
+[build-dependencies]
+cc.workspace = true
+
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[dev-dependencies]
+tempfile.workspace = true

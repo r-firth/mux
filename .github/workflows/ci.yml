@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: clippy,rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test workspace
+        run: cargo test --workspace --all-targets
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  macos-product:
+    name: Native macOS product
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: clippy
+      - name: Install verified Zig toolchain
+        run: echo "MUX_ZIG=$(scripts/install-zig-macos.sh arm64)" >> "$GITHUB_ENV"
+      - name: Test native product
+        run: cargo test -p mux --features product --all-targets
+      - name: Lint native product
+        run: cargo clippy --workspace --all-targets --features mux/product -- -D warnings
+      - name: Build app bundle
+        env:
+          MUX_BUILD_NUMBER: ${{ github.run_number }}
+        run: scripts/package-macos.sh
+      - name: Upload app bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: Mux-macos-arm64
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
