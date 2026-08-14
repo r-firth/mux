@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0](https://github.com/r-firth/mux/compare/v0.5.2...v0.6.0) (2026-08-14)
+
+### Features
+
+* add keyboard-first slash command discovery and argument completion
+* add project-aware `@` file references as distinct ACP context
+* support Zed-compatible custom ACP agent configuration
+* make multiple tab-local agent sessions discoverable and pane-navigable
+
+### Bug Fixes
+
+* insert composer newlines with Shift-Enter without submitting
+* keep streaming agent conversations pinned to the latest content
+* preserve terminal focus when navigating across agent and terminal panes
+
+### Performance Improvements
+
+* keep file indexing off the UI thread and avoid cloning full conversations while rendering
+
 ## [0.5.2](https://github.com/r-firth/mux/compare/v0.5.1...v0.5.2) (2026-08-14)
 
 ### Bug Fixes
