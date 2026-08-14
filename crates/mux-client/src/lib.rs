@@ -46,6 +46,7 @@ impl Client {
             return Err(ClientError::ProtocolMismatch {
                 client: PROTOCOL_VERSION,
                 server: hello.protocol_version,
+                daemon_pid: hello.daemon_pid,
             });
         }
 
@@ -222,6 +223,19 @@ impl Client {
             .await?
         {
             Response::AgentStarted(session) => Ok(*session),
+            response => Err(ClientError::UnexpectedResponse(Box::new(response))),
+        }
+    }
+
+    pub async fn pane_working_directory(
+        &mut self,
+        pane_id: PaneId,
+    ) -> Result<PathBuf, ClientError> {
+        match self
+            .request(Request::PaneWorkingDirectory { pane_id })
+            .await?
+        {
+            Response::WorkingDirectory(cwd) => Ok(cwd),
             response => Err(ClientError::UnexpectedResponse(Box::new(response))),
         }
     }
@@ -487,7 +501,11 @@ pub enum ClientError {
     #[error("daemon connection closed")]
     ConnectionClosed,
     #[error("protocol mismatch: client={client}, server={server}")]
-    ProtocolMismatch { client: u16, server: u16 },
+    ProtocolMismatch {
+        client: u16,
+        server: u16,
+        daemon_pid: u32,
+    },
     #[error("daemon sent an unexpected response id: {0}")]
     UnexpectedResponseId(u64),
     #[error("daemon sent an unexpected response: {0:?}")]
@@ -538,6 +556,7 @@ mod tests {
             ClientError::ProtocolMismatch {
                 client: PROTOCOL_VERSION,
                 server,
+                daemon_pid: 42,
             } if server == PROTOCOL_VERSION - 1
         ));
         server.await.expect("fake daemon task");
@@ -578,7 +597,7 @@ mod tests {
             wait_for_release
                 .await
                 .expect("release delayed acknowledgement");
-            // A protocol-v4 daemon may still acknowledge request zero. New
+            // An older daemon may still acknowledge request zero. New
             // clients discard that compatibility response without disturbing
             // the event stream.
             write_frame(

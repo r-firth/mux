@@ -3961,6 +3961,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-component-assets",
+ "ignore",
  "mux-acp",
  "mux-client",
  "mux-daemon",
@@ -3982,6 +3983,7 @@ name = "mux-acp"
 version = "0.5.2"
 dependencies = [
  "agent-client-protocol",
+ "indexmap 2.14.0",
  "mux-workspace",
  "parking_lot",
  "serde",

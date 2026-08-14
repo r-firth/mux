@@ -194,6 +194,7 @@ async fn main() -> Result<()> {
                     AgentPrompt {
                         text: prompt,
                         context,
+                        files: Vec::new(),
                     },
                 )
                 .await?;

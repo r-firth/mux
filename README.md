@@ -82,6 +82,42 @@ Everything else reaches the foreground program normally. See the
 [complete keybinding reference](docs/keybindings.md) for pane, resize, tab,
 session, and agent controls.
 
+## Native agents
+
+Press `Ctrl+p`, then `a` to turn the focused terminal pane into its tab-local
+agent surface. The composer is keyboard-first: Return sends, Shift+Return adds
+a line, `/` opens local and agent-advertised command completion, and `@` finds
+files from the pane's live working directory. Prompts include bounded snapshots
+of the other terminal panes in that tab by default; `/context none` disables
+that for subsequent prompts.
+
+`/new` starts another agent session in the same tab. Option+Left/Right moves
+through those sessions, then continues into neighboring terminal panes or tabs
+at the edge. `Ctrl+a` returns the pane to its terminal without ending the agent,
+Escape cancels a running turn, and `/end` ends the selected agent session.
+
+Mux includes launch profiles for Codex, Claude Agent, Gemini CLI, and GitHub
+Copilot CLI. Custom ACP agents use the same `agent_servers` shape as Zed. Add an
+entry to `~/Library/Application Support/io.mux.Mux/settings.json`, then restart
+Mux:
+
+```json
+{
+  "agent_servers": {
+    "my-agent": {
+      "type": "custom",
+      "command": "/absolute/path/to/my-agent",
+      "args": ["--acp"],
+      "env": { "OPTIONAL_VARIABLE": "value" }
+    }
+  }
+}
+```
+
+The command must be an ACP server that communicates over standard input and
+output. Custom profiles appear alongside the built-ins in Settings and work
+with `/new my-agent [cwd]`.
+
 ## Development
 
 The workspace uses the Rust toolchain pinned in `rust-toolchain.toml`.

@@ -104,17 +104,22 @@ into durable timeline events. Model, reasoning effort, and modes come from the
 agent's advertised configuration, so the GUI never assumes Codex-specific IDs.
 Agent-native slash commands likewise come from ACP's live
 `available_commands_update` snapshot and are combined with Mux's small local
-lifecycle command set in the composer.
+lifecycle command set in the composer's keyboard completion overlay. Custom
+agents are ordinary `AgentSpec` launch recipes loaded from Zed-compatible
+`agent_servers` settings; they use the same ACP adapter and UI as built-ins.
 
 Authentication remains agent-owned. Mux stores the stable auth methods from
 `initialize`; when `session/new` returns `auth_required`, it presents those
 methods in the agent sheet, sends ACP `authenticate` with the selected method ID, and retries
 `session/new`. Credentials never enter Mux IPC or durable agent snapshots.
 
-Terminal context is off by default. If requested, the GUI adds selected text or
-the focused viewport as a separate, size-bounded ACP content block marked as
-untrusted terminal data. The client advertises only capabilities it actually
-implements; agents cannot silently acquire a filesystem or terminal proxy.
+Tab terminal context is on by default. The GUI adds selected text or visible
+viewport text from the other panes as separate, size-bounded ACP content blocks
+marked as untrusted terminal data. `@` completion indexes the live working
+directory off the render thread; chosen files are read asynchronously under
+per-file and total size limits and sent as distinct, explicitly untrusted ACP
+content blocks. The client advertises only capabilities it actually implements;
+agents cannot silently acquire a filesystem or terminal proxy.
 
 See [validated risks and decisions](risks.md) for the pinned Ghostty and ACP
 assumptions that need deliberate revalidation during dependency upgrades.

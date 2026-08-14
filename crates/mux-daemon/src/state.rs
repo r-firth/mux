@@ -87,6 +87,16 @@ impl DaemonState {
             .map_err(|error| agent_error(&error))
     }
 
+    pub fn pane_working_directory(&self, pane_id: PaneId) -> Result<PathBuf, RemoteError> {
+        self.sessions
+            .read()
+            .values()
+            .find_map(|session| session.cwd_for_pane(pane_id))
+            .ok_or_else(|| {
+                RemoteError::new(ErrorCode::NotFound, format!("pane not found: {pane_id}"))
+            })
+    }
+
     pub fn prompt_agent(
         &self,
         session_id: AgentSessionId,

@@ -12,10 +12,13 @@ use mux_protocol::{
 use mux_terminal::TerminalSize;
 use mux_workspace::{AgentSessionId, Direction, PaneId, Session, SessionId, WorkspaceCommand};
 use tokio::sync::mpsc;
+use tracing::info;
 
 use crate::UserEvent;
 
 type EventSender = async_channel::Sender<UserEvent>;
+const MAX_AGENT_REFERENCE_BYTES: u64 = 256 * 1024;
+const MAX_AGENT_REFERENCES_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug)]
 pub enum CommandMessage {
@@ -74,6 +77,9 @@ pub enum CommandMessage {
         session_id: AgentSessionId,
         config_id: String,
         value: AgentConfigValueSelection,
+    },
+    RefreshAgentFiles {
+        pane_id: PaneId,
     },
 }
 
@@ -313,7 +319,14 @@ impl BackendConnection {
                     Err(error) => report_backend_error(events, error),
                 }
             }
-            CommandMessage::PromptAgent { session_id, prompt } => {
+            CommandMessage::PromptAgent {
+                session_id,
+                mut prompt,
+            } => {
+                if let Err(error) = hydrate_agent_references(&mut prompt).await {
+                    report_backend_error(events, error);
+                    return Ok(());
+                }
                 report_client_result(
                     events,
                     self.client
@@ -369,6 +382,27 @@ impl BackendConnection {
                         .await,
                 );
             }
+            CommandMessage::RefreshAgentFiles { pane_id } => {
+                match self.client.pane_working_directory(pane_id).await {
+                    Ok(cwd) => {
+                        let scan_root = cwd.clone();
+                        let files = tokio::task::spawn_blocking(move || {
+                            crate::agent_completion::index_files(&scan_root)
+                        })
+                        .await
+                        .context("index agent reference files")?;
+                        send_event(
+                            events,
+                            UserEvent::AgentFiles {
+                                pane_id,
+                                cwd,
+                                files,
+                            },
+                        )?;
+                    }
+                    Err(error) => report_backend_error(events, error),
+                }
+            }
         }
         Ok(())
     }
@@ -394,6 +428,42 @@ impl BackendConnection {
             }
         }
     }
+}
+
+async fn hydrate_agent_references(prompt: &mut AgentPrompt) -> Result<()> {
+    let mut total = 0_u64;
+    for reference in &mut prompt.files {
+        let metadata = tokio::fs::metadata(&reference.path)
+            .await
+            .with_context(|| format!("read referenced file {}", reference.path.display()))?;
+        if !metadata.is_file() {
+            return Err(anyhow!(
+                "referenced path is not a file: {}",
+                reference.path.display()
+            ));
+        }
+        if metadata.len() > MAX_AGENT_REFERENCE_BYTES {
+            return Err(anyhow!(
+                "referenced file is larger than 256 KiB: {}",
+                reference.path.display()
+            ));
+        }
+        total = total.saturating_add(metadata.len());
+        if total > MAX_AGENT_REFERENCES_BYTES {
+            return Err(anyhow!("referenced files exceed the 1 MiB prompt limit"));
+        }
+        let bytes = tokio::fs::read(&reference.path)
+            .await
+            .with_context(|| format!("read referenced file {}", reference.path.display()))?;
+        if bytes.contains(&0) {
+            return Err(anyhow!(
+                "binary files cannot be attached to an agent prompt: {}",
+                reference.path.display()
+            ));
+        }
+        reference.text = String::from_utf8_lossy(&bytes).into_owned();
+    }
+    Ok(())
 }
 
 fn translate_workspace_command(session: &Session, command: WorkspaceCommand) -> WorkspaceCommand {
@@ -455,10 +525,16 @@ async fn connect_or_start_daemon(
 ) -> Result<Client> {
     match Client::connect(socket, "mux-gui").await {
         Ok(client) => return Ok(client),
-        Err(ClientError::ProtocolMismatch { client, server }) => {
-            return Err(anyhow!(
-                "A different Mux build owns this workspace (daemon protocol {server}, this app {client}). Its shells are still running. Reopen the matching Mux build, or deliberately stop that daemon before starting this update."
-            ));
+        Err(ClientError::ProtocolMismatch {
+            client,
+            server,
+            daemon_pid,
+        }) => {
+            info!(
+                client,
+                server, daemon_pid, "replacing incompatible workspace daemon"
+            );
+            stop_incompatible_daemon(daemon_pid).await?;
         }
         Err(_) => {}
     }
@@ -485,6 +561,48 @@ async fn connect_or_start_daemon(
             Err(error) => return Err(error).context("workspace daemon did not become ready"),
         }
     }
+}
+
+async fn stop_incompatible_daemon(daemon_pid: u32) -> Result<()> {
+    let status = Command::new("/bin/kill")
+        .arg("-TERM")
+        .arg(daemon_pid.to_string())
+        .status()
+        .context("stop incompatible workspace daemon")?;
+    if !status.success() {
+        return Err(anyhow!(
+            "could not stop incompatible workspace daemon {daemon_pid}"
+        ));
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while process_is_alive(daemon_pid) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    if !process_is_alive(daemon_pid) {
+        return Ok(());
+    }
+
+    info!(daemon_pid, "forcing incompatible workspace daemon to stop");
+    let status = Command::new("/bin/kill")
+        .arg("-KILL")
+        .arg(daemon_pid.to_string())
+        .status()
+        .context("force-stop incompatible workspace daemon")?;
+    if !status.success() {
+        return Err(anyhow!(
+            "could not force-stop incompatible workspace daemon {daemon_pid}"
+        ));
+    }
+    Ok(())
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    Command::new("/bin/kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 async fn create_default_session(client: &mut Client) -> Result<mux_protocol::SessionSummary> {

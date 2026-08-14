@@ -14,8 +14,7 @@ the GUI and daemon do not hardcode key behavior into workspace mutations.
 | `Option+l` / `Option+Right` | Focus right pane, or next tab at the edge |
 | `Option+j` / `Option+Down` | Focus pane below |
 | `Option+k` / `Option+Up` | Focus pane above |
-| `Shift+Command+A` | Open the native ACP agent surface |
-| `Shift+Command+S` | Open the native session switcher |
+| `Ctrl+p`, `a` | Turn the focused pane into its native ACP agent surface |
 
 `Alt` is the same modifier as `Option` on macOS. Shared bindings remain active
 inside the supported modes, matching Zellij. Enter or Escape returns from a
@@ -58,7 +57,25 @@ Zellij's `Ctrl+o` session prefix intentionally has no Normal-mode binding yet.
 This keeps foreground Control-key input untouched except for `Ctrl+p` and
 `Ctrl+t`.
 
-The agent pane opens with its prompt focused. Return sends, Shift+Return inserts
-a newline, and Escape dismisses the pane without ending the agent session. All
-agent operations are available as slash commands; native controls remain as an
-optional mouse path.
+## Agent surface
+
+The focused pane becomes a native, tab-local agent surface; it is not a fixed
+sidebar and the PTY behind it remains alive. The same pane-navigation model is
+used throughout.
+
+| Keys | Action |
+| --- | --- |
+| `Ctrl+a` | Return this pane to its terminal without ending the agent |
+| Return | Send the draft or accept the selected completion |
+| Shift+Return | Insert a newline |
+| `/` | Complete Mux commands and live commands advertised by the ACP agent |
+| `@` | Complete a file from the focused pane's working directory |
+| Up / Down | Move through an open completion menu |
+| Tab | Accept the selected completion |
+| Escape | Close completion first; otherwise cancel the active agent turn |
+| Option+Left / Right | Move through tab-local agent sessions, then panes/tabs at the edge |
+| Option+Up / Down | Focus the terminal pane above or below |
+
+`/new [agent] [cwd]` starts another session, `/end` ends the selected session,
+and `/help` renders the full local and agent-advertised command reference in the
+conversation. Native controls remain an optional mouse path.

@@ -280,6 +280,9 @@ where
         } => state
             .authenticate_agent(session_id, method_id)
             .map(|()| Response::Ack),
+        Request::PaneWorkingDirectory { pane_id } => state
+            .pane_working_directory(pane_id)
+            .map(Response::WorkingDirectory),
     };
 
     if unacknowledged_input && response == Ok(Response::Ack) {

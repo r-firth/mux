@@ -4,6 +4,7 @@
     clippy::cast_sign_loss
 )]
 
+mod agent_completion;
 mod backend;
 mod gpui_terminal;
 mod layout;
@@ -12,10 +13,15 @@ mod settings;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use agent_completion::{
+    AgentCommandArgument, AgentCompletion, AgentCompletionKind, AgentCompletionMenu,
+    AgentCompletionProvider,
+};
 use anyhow::{Context as _, Result, anyhow};
 use backend::{BackendHandle, CommandMessage};
 use gpui::prelude::FluentBuilder as _;
@@ -27,12 +33,12 @@ use gpui::{
     WindowBounds, WindowOptions, div, px, rgb, size,
 };
 use gpui_component::{
-    Icon, IconName, InteractiveElementExt as _, Selectable as _, Sizable as _, StyledExt as _,
-    Theme, ThemeMode, TitleBar, WindowExt as _,
+    Disableable as _, Icon, IconName, InteractiveElementExt as _, Selectable as _, Sizable as _,
+    StyledExt as _, Theme, ThemeMode, TitleBar, WindowExt as _,
     animation::cubic_bezier,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Enter, Input, InputEvent, InputState},
+    input::{Enter, Input, InputEvent, InputState, Position},
     notification::Notification,
     scroll::ScrollableElement as _,
     switch::Switch,
@@ -90,13 +96,17 @@ gpui::actions!(
     mux_agent,
     [
         CancelAgentTurn,
+        DismissAgentCompletion,
         ForwardTerminalBacktab,
         ForwardTerminalTab,
+        InsertAgentCompletion,
         NavigateAgentDown,
         NavigateAgentLeft,
         NavigateAgentRight,
         NavigateAgentUp,
         QuitMux,
+        SelectNextAgentCompletion,
+        SelectPreviousAgentCompletion,
         ToggleAgentPane
     ]
 );
@@ -108,6 +118,11 @@ enum UserEvent {
     Agents(Vec<AgentSessionSnapshot>),
     AgentStarted(AgentSessionSnapshot),
     Agent(AgentEvent),
+    AgentFiles {
+        pane_id: PaneId,
+        cwd: PathBuf,
+        files: agent_completion::AgentFileIndex,
+    },
     BackendError(String),
 }
 
@@ -198,6 +213,10 @@ struct MuxApp {
     /// stored value deliberately selects the new-session composer.
     selected_agents: HashMap<TabId, Option<AgentSessionId>>,
     agent_input: Entity<InputState>,
+    agent_input_tab: Option<TabId>,
+    agent_drafts: HashMap<TabId, String>,
+    agent_completion: Rc<AgentCompletionProvider>,
+    agent_completion_menu: Option<AgentCompletionMenu>,
     _agent_input_subscription: gpui::Subscription,
     pending_agent_prompt: Option<AgentPrompt>,
     agent_panes: HashMap<TabId, PaneId>,
@@ -222,6 +241,35 @@ struct MuxApp {
 
 struct MuxLayerHost {
     view: Entity<MuxApp>,
+}
+
+fn create_agent_input(
+    window: &mut Window,
+    cx: &mut Context<MuxApp>,
+) -> (Entity<InputState>, gpui::Subscription) {
+    let input = cx.new(|cx| {
+        InputState::new(window, cx)
+            .auto_grow(1, 6)
+            .placeholder("Message an agent · / for commands · @ for files…")
+    });
+    let subscription = cx.subscribe_in(
+        &input,
+        window,
+        |this, _, event: &InputEvent, window, cx| match event {
+            InputEvent::Change => {
+                if let Some(tab_id) = this.agent_input_tab {
+                    let value = this.agent_input.read(cx).value().to_string();
+                    this.agent_drafts.insert(tab_id, value);
+                }
+                this.refresh_agent_completion_menu(cx);
+            }
+            InputEvent::PressEnter { secondary: false } if this.agent_completion_menu.is_none() => {
+                this.submit_agent_prompt(window, cx);
+            }
+            InputEvent::PressEnter { .. } | InputEvent::Focus | InputEvent::Blur => {}
+        },
+    );
+    (input, subscription)
 }
 
 impl MuxApp {
@@ -262,18 +310,8 @@ impl MuxApp {
         } else {
             MotionPreference::Full
         };
-        let agent_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Message an agent · /help for commands…")
-        });
-        let agent_input_subscription = cx.subscribe_in(
-            &agent_input,
-            window,
-            |this, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { secondary: false }) {
-                    this.submit_agent_prompt(window, cx);
-                }
-            },
-        );
+        let agent_completion = Rc::new(AgentCompletionProvider::default());
+        let (agent_input, agent_input_subscription) = create_agent_input(window, cx);
         let (events, receiver) = async_channel::unbounded();
         let backend = backend::spawn(events, state_dir.clone());
         backend.send(CommandMessage::ListAgents);
@@ -284,12 +322,13 @@ impl MuxApp {
             window.push_notification(Notification::warning(message), cx);
         }
 
+        let profiles = merge_agent_profiles(&settings);
         Self {
             focus_handle,
             backend,
             state_dir,
             settings,
-            profiles: built_in_agent_profiles(),
+            profiles,
             session: None,
             panes: HashMap::new(),
             pane_scrolls: HashMap::new(),
@@ -298,6 +337,10 @@ impl MuxApp {
             agents: Vec::new(),
             selected_agents: HashMap::new(),
             agent_input,
+            agent_input_tab: None,
+            agent_drafts: HashMap::new(),
+            agent_completion,
+            agent_completion_menu: None,
             _agent_input_subscription: agent_input_subscription,
             pending_agent_prompt: None,
             agent_panes: HashMap::new(),
@@ -423,7 +466,15 @@ impl MuxApp {
         let result = match event {
             UserEvent::Attached(attachment) => {
                 let attached = self.attach(attachment);
-                if attached.is_ok() && self.active_agent_pane() == self.focused_pane_id() {
+                if attached.is_ok() {
+                    self.sync_agent_draft_for_active_tab(window, cx);
+                }
+                if attached.is_ok()
+                    && let Some(pane_id) = self.active_agent_pane()
+                    && Some(pane_id) == self.focused_pane_id()
+                {
+                    self.backend
+                        .send(CommandMessage::RefreshAgentFiles { pane_id });
                     self.focus_agent_composer(window);
                 }
                 attached
@@ -485,6 +536,17 @@ impl MuxApp {
                     && self.agent_follow_tail.contains(&tab_id)
                 {
                     self.agent_scroll_for(tab_id).scroll_to_bottom();
+                }
+                Ok(())
+            }
+            UserEvent::AgentFiles {
+                pane_id,
+                cwd,
+                files,
+            } => {
+                if self.active_agent_pane() == Some(pane_id) {
+                    self.agent_completion.set_file_index(cwd, files);
+                    self.refresh_agent_completion_menu(cx);
                 }
                 Ok(())
             }
@@ -620,6 +682,102 @@ impl MuxApp {
         });
     }
 
+    fn sync_agent_draft_for_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let active_tab = self.active_tab_id();
+        if self.agent_input_tab == active_tab {
+            return;
+        }
+        if let Some(previous_tab) = self.agent_input_tab {
+            let value = self.agent_input.read(cx).value().to_string();
+            self.agent_drafts.insert(previous_tab, value);
+        }
+        self.agent_input_tab = active_tab;
+        self.agent_completion_menu = None;
+        self.agent_completion.clear_file_index();
+        let value = active_tab
+            .and_then(|tab_id| self.agent_drafts.get(&tab_id).cloned())
+            .unwrap_or_default();
+        self.agent_input.update(cx, |input, cx| {
+            input.set_value(value, window, cx);
+        });
+    }
+
+    fn refresh_agent_completion_menu(&mut self, cx: &App) {
+        let input = self.agent_input.read(cx);
+        let items = self
+            .agent_completion
+            .completions(input.value().as_ref(), input.cursor());
+        if items.is_empty() {
+            self.agent_completion_menu = None;
+            return;
+        }
+        let previous = self
+            .agent_completion_menu
+            .as_ref()
+            .and_then(|menu| menu.items.get(menu.selected))
+            .map(|item| item.label.as_str());
+        let selected = previous
+            .and_then(|label| items.iter().position(|item| item.label == label))
+            .unwrap_or_default();
+        self.agent_completion_menu = Some(AgentCompletionMenu { items, selected });
+    }
+
+    fn select_agent_completion(&mut self, delta: isize, cx: &mut Context<Self>) -> bool {
+        let Some(menu) = self.agent_completion_menu.as_mut() else {
+            return false;
+        };
+        menu.select_relative(delta);
+        cx.notify();
+        true
+    }
+
+    fn dismiss_agent_completion(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.agent_completion_menu.take().is_none() {
+            return false;
+        }
+        cx.notify();
+        true
+    }
+
+    fn accept_agent_completion(
+        &mut self,
+        index: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(menu) = self.agent_completion_menu.as_ref() else {
+            return false;
+        };
+        let index = index.unwrap_or(menu.selected);
+        let Some(completion) = menu.items.get(index).cloned() else {
+            return false;
+        };
+        let value = self.agent_input.read(cx).value().to_string();
+        if completion.start > completion.end
+            || completion.end > value.len()
+            || !value.is_char_boundary(completion.start)
+            || !value.is_char_boundary(completion.end)
+        {
+            self.agent_completion_menu = None;
+            return false;
+        }
+        let mut updated = String::with_capacity(
+            value.len() - (completion.end - completion.start) + completion.replacement.len(),
+        );
+        updated.push_str(&value[..completion.start]);
+        updated.push_str(&completion.replacement);
+        let cursor = updated.len();
+        updated.push_str(&value[completion.end..]);
+        let position = input_position_at(&updated, cursor);
+        self.agent_completion_menu = None;
+        self.agent_input.update(cx, |input, cx| {
+            input.set_value(updated, window, cx);
+            input.set_cursor_position(position, window, cx);
+        });
+        cx.notify();
+        true
+    }
+
     fn toggle_agent_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab_id) = self.active_tab_id() else {
             return;
@@ -643,6 +801,8 @@ impl MuxApp {
             self.agent_scroll_needs_settle.insert(tab_id);
             self.agent_scroll_for(tab_id).scroll_to_bottom();
             self.backend.send(CommandMessage::ListAgents);
+            self.backend
+                .send(CommandMessage::RefreshAgentFiles { pane_id });
             self.focus_agent_composer(window);
         }
         self.mode = InputMode::Normal;
@@ -672,6 +832,14 @@ impl MuxApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if matches!(direction, Direction::Left | Direction::Right)
+            && self.select_adjacent_agent(direction)
+        {
+            self.follow_active_agent_tail();
+            self.focus_agent_composer(window);
+            cx.notify();
+            return;
+        }
         let command = if matches!(direction, Direction::Left | Direction::Right) {
             WorkspaceCommand::FocusPaneOrTab(direction)
         } else {
@@ -680,6 +848,33 @@ impl MuxApp {
         self.send_workspace(command);
         self.focus_handle.focus(window);
         cx.notify();
+    }
+
+    /// Treat the tab-local agent sessions as neighboring surfaces within the
+    /// agent pane. At either edge, returning `false` lets the same Option-arrow
+    /// continue into the terminal pane or tab in that direction.
+    fn select_adjacent_agent(&mut self, direction: Direction) -> bool {
+        let agents = self
+            .agents_for_active_tab()
+            .map(|agent| agent.id)
+            .collect::<Vec<_>>();
+        if agents.is_empty() {
+            return false;
+        }
+        let selected = self.active_agent().map(|agent| agent.id);
+        let index = selected
+            .and_then(|selected| agents.iter().position(|agent| *agent == selected))
+            .unwrap_or(agents.len());
+        let next = match direction {
+            Direction::Left => index.checked_sub(1),
+            Direction::Right if index + 1 < agents.len() => Some(index + 1),
+            Direction::Right | Direction::Up | Direction::Down => None,
+        };
+        let Some(next) = next else {
+            return false;
+        };
+        self.select_active_tab_agent(Some(agents[next]));
+        true
     }
 
     fn agents_for_active_tab(&self) -> impl Iterator<Item = &AgentSessionSnapshot> {
@@ -887,6 +1082,10 @@ impl MuxApp {
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         info!("opening GPUI settings dialog");
         let profiles = self.profiles.clone();
+        let settings_path = self
+            .state_dir
+            .as_ref()
+            .map(|path| path.join("settings.json"));
         let app = cx.weak_entity();
         window.open_dialog(cx, move |dialog, _window, cx| {
             let mut content = v_flex().gap_3();
@@ -894,8 +1093,11 @@ impl MuxApp {
                 div()
                     .text_sm()
                     .text_color(rgb(MUTED_TEXT))
-                    .child("ACP agents run out of process. Disable integrations you do not use."),
+                    .child("ACP agents run out of process. Custom agents use Zed-compatible agent_servers entries; restart Mux after editing the file."),
             );
+            if let Some(settings_path) = settings_path.clone() {
+                content = content.child(agent_settings_file_row(&app, &settings_path));
+            }
             for profile in &profiles {
                 let profile_id = profile.id.clone();
                 let enabled = app
@@ -1140,6 +1342,15 @@ impl MuxApp {
             let prompt = AgentPrompt {
                 text: draft.to_owned(),
                 context: self.agent_prompt_context().unwrap_or_default(),
+                files: self
+                    .agent_completion
+                    .reference_paths(draft)
+                    .into_iter()
+                    .map(|path| mux_acp::AgentFileReference {
+                        path,
+                        text: String::new(),
+                    })
+                    .collect(),
             };
             self.pending_agent_prompt = Some(prompt);
             self.follow_active_agent_tail();
@@ -1156,6 +1367,15 @@ impl MuxApp {
             prompt: AgentPrompt {
                 text: draft.to_owned(),
                 context,
+                files: self
+                    .agent_completion
+                    .reference_paths(draft)
+                    .into_iter()
+                    .map(|path| mux_acp::AgentFileReference {
+                        path,
+                        text: String::new(),
+                    })
+                    .collect(),
             },
         });
         self.agent_input.update(cx, |input, cx| {
@@ -1490,6 +1710,92 @@ impl MuxApp {
         self.profiles
             .iter()
             .filter(|profile| self.settings.agent_enabled(&profile.id))
+    }
+
+    fn agent_command_arguments(&self) -> Vec<AgentCommandArgument> {
+        let mut arguments = self
+            .enabled_profiles()
+            .map(|profile| AgentCommandArgument {
+                command: "new".to_owned(),
+                value: profile.id.clone(),
+                detail: "Agent".to_owned(),
+                description: profile.description.clone(),
+            })
+            .collect::<Vec<_>>();
+        arguments.extend(["tab", "none"].into_iter().map(|value| {
+            AgentCommandArgument {
+                command: "context".to_owned(),
+                value: value.to_owned(),
+                detail: "Context".to_owned(),
+                description: if value == "tab" {
+                    "Attach terminal context from the other panes in this tab"
+                } else {
+                    "Do not attach terminal context"
+                }
+                .to_owned(),
+            }
+        }));
+        arguments.extend(
+            self.agents_for_active_tab()
+                .enumerate()
+                .map(|(index, agent)| AgentCommandArgument {
+                    command: "use".to_owned(),
+                    value: (index + 1).to_string(),
+                    detail: "Session".to_owned(),
+                    description: agent
+                        .agent_name
+                        .clone()
+                        .unwrap_or_else(|| agent.name.clone()),
+                }),
+        );
+        if let Some(agent) = self.active_agent() {
+            arguments.extend(agent.modes.iter().map(|mode| {
+                AgentCommandArgument {
+                    command: "mode".to_owned(),
+                    value: mode.id.clone(),
+                    detail: "Mode".to_owned(),
+                    description: mode
+                        .description
+                        .clone()
+                        .unwrap_or_else(|| mode.name.clone()),
+                }
+            }));
+            for option in &agent.config_options {
+                let command = match option.category {
+                    AgentConfigCategory::Model => "model",
+                    AgentConfigCategory::ThoughtLevel => "effort",
+                    AgentConfigCategory::Mode
+                    | AgentConfigCategory::ModelConfig
+                    | AgentConfigCategory::Other => continue,
+                };
+                let AgentConfigValue::Select { choices, .. } = &option.value else {
+                    continue;
+                };
+                arguments.extend(choices.iter().map(|choice| {
+                    AgentCommandArgument {
+                        command: command.to_owned(),
+                        value: choice.id.clone(),
+                        detail: option.name.clone(),
+                        description: choice
+                            .description
+                            .clone()
+                            .unwrap_or_else(|| choice.name.clone()),
+                    }
+                }));
+            }
+            arguments.extend(agent.auth_methods.iter().map(|method| {
+                AgentCommandArgument {
+                    command: "login".to_owned(),
+                    value: method.id.clone(),
+                    detail: "Auth".to_owned(),
+                    description: method
+                        .description
+                        .clone()
+                        .unwrap_or_else(|| method.name.clone()),
+                }
+            }));
+        }
+        arguments
     }
 
     fn start_agent(&self, profile: AgentProfile, cwd_override: Option<PathBuf>) {
@@ -1876,7 +2182,15 @@ impl MuxApp {
         let scroll = self.agent_scroll_for(tab_id);
         let follow_tail = self.agent_follow_tail.contains(&tab_id);
         let settle_scroll = self.agent_scroll_needs_settle.remove(&tab_id);
-        let agent = self.active_agent().cloned();
+        let active_agent_id = self.active_agent().map(|agent| agent.id);
+        let command_arguments = self.agent_command_arguments();
+        self.agent_completion.set_agent_commands(
+            active_agent_id
+                .and_then(|id| self.agents.iter().find(|agent| agent.id == id))
+                .map_or_else(Vec::new, |agent| agent.available_commands.clone()),
+        );
+        self.agent_completion
+            .set_command_arguments(command_arguments);
         let show_help = self.agent_help_tabs.contains(&tab_id);
         let other_panes = self
             .session
@@ -1891,6 +2205,11 @@ impl MuxApp {
         let expanded_items = self.expanded_agent_items.clone();
         let picker = (self.agents_for_active_tab().count() > 1)
             .then(|| agent_session_picker(&app, self).into_any_element());
+        let completion_menu = self.agent_completion_menu.clone();
+        let completion_open = completion_menu.is_some();
+        let composer_bottom =
+            agent_composer_height(self.agent_input.read(cx).value().as_ref(), rect.width);
+        let agent = active_agent_id.and_then(|id| self.agents.iter().find(|agent| agent.id == id));
 
         let keyboard_app = app.clone();
         let cancel_app = app.clone();
@@ -1925,6 +2244,52 @@ impl MuxApp {
             })
             .on_action({
                 let app = app.clone();
+                move |_: &SelectPreviousAgentCompletion, _, cx| {
+                    let handled = app
+                        .update(cx, |this, cx| this.select_agent_completion(-1, cx))
+                        .unwrap_or(false);
+                    if handled {
+                        cx.stop_propagation();
+                    }
+                }
+            })
+            .on_action({
+                let app = app.clone();
+                move |_: &SelectNextAgentCompletion, _, cx| {
+                    let handled = app
+                        .update(cx, |this, cx| this.select_agent_completion(1, cx))
+                        .unwrap_or(false);
+                    if handled {
+                        cx.stop_propagation();
+                    }
+                }
+            })
+            .on_action({
+                let app = app.clone();
+                move |_: &InsertAgentCompletion, window, cx| {
+                    let handled = app
+                        .update(cx, |this, cx| {
+                            this.accept_agent_completion(None, window, cx)
+                        })
+                        .unwrap_or(false);
+                    if handled {
+                        cx.stop_propagation();
+                    }
+                }
+            })
+            .on_action({
+                let app = app.clone();
+                move |_: &DismissAgentCompletion, _, cx| {
+                    let handled = app
+                        .update(cx, MuxApp::dismiss_agent_completion)
+                        .unwrap_or(false);
+                    if handled {
+                        cx.stop_propagation();
+                    }
+                }
+            })
+            .on_action({
+                let app = app.clone();
                 move |_: &ToggleAgentPane, window, cx| {
                     return_agent_pane(&app, window, cx);
                     cx.stop_propagation();
@@ -1954,7 +2319,7 @@ impl MuxApp {
                     .gap_2()
                     .border_b_1()
                     .border_color(rgb(BORDER))
-                    .child(agent_pane_title(agent.as_ref()))
+                    .child(agent_pane_title(agent))
                     .child(
                         div()
                             .flex_none()
@@ -1962,7 +2327,11 @@ impl MuxApp {
                             .truncate()
                             .text_xs()
                             .text_color(rgb(MUTED_TEXT))
-                            .child(format!("{other_panes} panes · ⌃A")),
+                            .child(if other_panes == 0 {
+                                "⌃A close".to_owned()
+                            } else {
+                                format!("{other_panes} context panes · ⌃A")
+                            }),
                     ),
             );
         if let Some(picker) = picker {
@@ -1977,7 +2346,7 @@ impl MuxApp {
                     .child(picker),
             );
         }
-        if let Some(agent) = agent.as_ref() {
+        if let Some(agent) = agent {
             body = body.child(agent_timeline(
                 &app,
                 tab_id,
@@ -2007,8 +2376,16 @@ impl MuxApp {
                 .border_t_1()
                 .border_color(rgb(BORDER))
                 .p_2()
-                .child(agent_composer(&app, self)),
+                .child(agent_composer(&app, self, completion_open)),
         );
+        if let Some(menu) = completion_menu.as_ref() {
+            body = body.child(agent_completion_overlay(
+                &app,
+                menu,
+                composer_bottom,
+                self.motion,
+            ));
+        }
 
         let pane = div()
             .id(SharedString::from(format!("agent-pane-{pane_id}")))
@@ -2141,6 +2518,7 @@ impl UserEvent {
             Self::Agents(_) => "agents",
             Self::AgentStarted(_) => "agent-started",
             Self::Agent(_) => "agent",
+            Self::AgentFiles { .. } => "agent-files",
             Self::BackendError(_) => "backend-error",
         }
     }
@@ -2479,44 +2857,174 @@ fn cancel_agent_turn(app: &gpui::WeakEntity<MuxApp>, _window: &mut Window, cx: &
     cx.stop_propagation();
 }
 
-fn agent_session_picker(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl IntoElement {
-    let mut picker = h_flex().w_full().min_w_0().gap_1().pb_1().flex_wrap();
-    let selected = this.active_agent().map(|agent| agent.id);
-    for agent in this.agents_for_active_tab() {
-        let session_id = agent.id;
-        let select_app = app.clone();
-        picker = picker.child(
-            Button::new(SharedString::from(format!("agent-session-{}", agent.id)))
-                .label(agent.name.clone())
+fn agent_settings_file_row(
+    app: &gpui::WeakEntity<MuxApp>,
+    settings_path: &Path,
+) -> gpui::AnyElement {
+    let reveal_app = app.clone();
+    let reveal_path = settings_path.to_path_buf();
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .gap_2()
+        .p_2()
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(BORDER))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .truncate()
+                .font_family(EMBEDDED_TERMINAL_FONT)
+                .text_xs()
+                .text_color(rgb(MUTED_TEXT))
+                .child(settings_path.display().to_string()),
+        )
+        .child(
+            Button::new("reveal-agent-settings")
+                .label("Reveal")
                 .ghost()
                 .small()
                 .compact()
-                .selected(selected == Some(session_id))
                 .on_click(move |_, window, cx| {
-                    let _ = select_app.update(cx, |this, cx| {
+                    let saved = reveal_app
+                        .update(cx, |this, _| {
+                            let Some(state_dir) = this.state_dir.as_ref() else {
+                                return Err(anyhow!("settings directory unavailable"));
+                            };
+                            this.settings.save(state_dir)
+                        })
+                        .unwrap_or_else(|error| Err(anyhow!(error)));
+                    if let Err(error) = saved {
+                        window.push_notification(
+                            Notification::error(format!(
+                                "Could not create settings.json: {error:#}"
+                            )),
+                            cx,
+                        );
+                        return;
+                    }
+                    if let Err(error) = Command::new("/usr/bin/open")
+                        .arg("-R")
+                        .arg(&reveal_path)
+                        .spawn()
+                    {
+                        window.push_notification(
+                            Notification::error(format!("Could not reveal settings.json: {error}")),
+                            cx,
+                        );
+                    }
+                }),
+        )
+        .into_any_element()
+}
+
+fn agent_session_picker(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl IntoElement {
+    let agents = this.agents_for_active_tab().collect::<Vec<_>>();
+    let selected_id = this.active_agent().map(|agent| agent.id);
+    let selected_index = selected_id
+        .and_then(|selected| agents.iter().position(|agent| agent.id == selected))
+        .unwrap_or(agents.len().saturating_sub(1));
+    let previous = selected_index
+        .checked_sub(1)
+        .and_then(|index| agents.get(index))
+        .map(|agent| agent.id);
+    let next = agents.get(selected_index + 1).map(|agent| agent.id);
+    let label = agent_session_picker_label(&agents, selected_index);
+    let previous_app = app.clone();
+    let next_app = app.clone();
+    let new_app = app.clone();
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .h(px(28.0))
+        .gap_1()
+        .pb_1()
+        .child(
+            Button::new("agent-session-previous")
+                .icon(IconName::ChevronLeft)
+                .ghost()
+                .xsmall()
+                .compact()
+                .disabled(previous.is_none())
+                .tooltip("Previous agent session · ⌥←")
+                .on_click(move |_, window, cx| {
+                    let Some(session_id) = previous else {
+                        return;
+                    };
+                    let _ = previous_app.update(cx, |this, cx| {
                         this.select_active_tab_agent(Some(session_id));
                         this.follow_active_agent_tail();
                         cx.notify();
                     });
                     window.refresh();
                 }),
-        );
-    }
-    let new_app = app.clone();
-    picker.child(
-        Button::new("agent-new")
-            .icon(IconName::Plus)
-            .ghost()
-            .small()
-            .compact()
-            .tooltip("New agent session · /new")
-            .on_click(move |_, window, cx| {
-                let _ = new_app.update(cx, |this, cx| {
-                    this.select_active_tab_agent(None);
-                    cx.notify();
-                });
-                window.refresh();
-            }),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .truncate()
+                .text_xs()
+                .text_color(rgb(MUTED_TEXT))
+                .child(label),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(9.0))
+                .text_color(rgb(MUTED_TEXT))
+                .child("⌥← →"),
+        )
+        .child(
+            Button::new("agent-session-next")
+                .icon(IconName::ChevronRight)
+                .ghost()
+                .xsmall()
+                .compact()
+                .disabled(next.is_none())
+                .tooltip("Next agent session · ⌥→")
+                .on_click(move |_, window, cx| {
+                    let Some(session_id) = next else {
+                        return;
+                    };
+                    let _ = next_app.update(cx, |this, cx| {
+                        this.select_active_tab_agent(Some(session_id));
+                        this.follow_active_agent_tail();
+                        cx.notify();
+                    });
+                    window.refresh();
+                }),
+        )
+        .child(
+            Button::new("agent-new")
+                .icon(IconName::Plus)
+                .ghost()
+                .xsmall()
+                .compact()
+                .tooltip("New agent session · /new")
+                .on_click(move |_, window, cx| {
+                    let _ = new_app.update(cx, |this, cx| {
+                        this.select_active_tab_agent(None);
+                        cx.notify();
+                    });
+                    window.refresh();
+                }),
+        )
+}
+
+fn agent_session_picker_label(agents: &[&AgentSessionSnapshot], selected_index: usize) -> String {
+    agents.get(selected_index).map_or_else(
+        || "New session".to_owned(),
+        |agent| {
+            format!(
+                "{} of {} · {}",
+                selected_index + 1,
+                agents.len(),
+                agent.agent_name.as_deref().unwrap_or(agent.name.as_str())
+            )
+        },
     )
 }
 
@@ -2659,7 +3167,14 @@ fn agent_help_card(agent: Option<&AgentSessionSnapshot>) -> gpui::AnyElement {
         )
         .child(agent_help_section(
             "KEYBOARD",
-            &["⌃A  toggle agent pane", "⌥arrows  navigate panes", "Esc  cancel run", "Return  send"],
+            &[
+                "⌃A  toggle agent pane",
+                "⌥arrows  navigate sessions and panes",
+                "Esc  cancel run",
+                "Return  send",
+                "⇧Return  newline",
+                "↑↓ + Tab  choose completion",
+            ],
         ))
         .child(agent_help_section(
             "SESSIONS",
@@ -2667,7 +3182,12 @@ fn agent_help_card(agent: Option<&AgentSessionSnapshot>) -> gpui::AnyElement {
         ))
         .child(agent_help_section(
             "CONTEXT + VIEW",
-            &["/context tab|none", "/expand [all]", "/collapse [all]"],
+            &[
+                "@path  attach a project file",
+                "/context tab|none",
+                "/expand [all]",
+                "/collapse [all]",
+            ],
         ))
         .child(agent_help_section(
             "CONFIGURE",
@@ -2728,44 +3248,15 @@ fn agent_help_owned_section(label: &'static str, commands: &[String]) -> gpui::A
         .into_any_element()
 }
 
-fn agent_composer(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl IntoElement {
+fn agent_composer(
+    app: &gpui::WeakEntity<MuxApp>,
+    this: &MuxApp,
+    completion_open: bool,
+) -> impl IntoElement {
     let prompt_app = app.clone();
-    let keyboard_app = app.clone();
-    let cancel_app = app.clone();
-    let navigate_left_app = app.clone();
-    let navigate_right_app = app.clone();
-    let navigate_up_app = app.clone();
-    let navigate_down_app = app.clone();
     v_flex()
-        .key_context("MuxAgentPane")
-        .capture_key_down(move |event, window, cx| {
-            handle_agent_pane_key_down(&keyboard_app, event, window, cx);
-        })
-        .on_action(move |_: &CancelAgentTurn, window, cx| {
-            cancel_agent_turn(&cancel_app, window, cx);
-        })
-        .on_action(move |_: &NavigateAgentLeft, window, cx| {
-            navigate_agent_pane(&navigate_left_app, Direction::Left, window, cx);
-            cx.stop_propagation();
-        })
-        .on_action(move |_: &NavigateAgentRight, window, cx| {
-            navigate_agent_pane(&navigate_right_app, Direction::Right, window, cx);
-            cx.stop_propagation();
-        })
-        .on_action(move |_: &NavigateAgentUp, window, cx| {
-            navigate_agent_pane(&navigate_up_app, Direction::Up, window, cx);
-            cx.stop_propagation();
-        })
-        .on_action(move |_: &NavigateAgentDown, window, cx| {
-            navigate_agent_pane(&navigate_down_app, Direction::Down, window, cx);
-            cx.stop_propagation();
-        })
-        .on_action({
-            let app = app.clone();
-            move |_: &ToggleAgentPane, window, cx| {
-                return_agent_pane(&app, window, cx);
-                cx.stop_propagation();
-            }
+        .when(completion_open, |composer| {
+            composer.key_context("MuxAgentCompletion")
         })
         .w_full()
         .min_w_0()
@@ -2794,6 +3285,195 @@ fn agent_composer(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl IntoEle
                         }),
                 ),
         )
+}
+
+fn input_position_at(text: &str, offset: usize) -> Position {
+    let offset = offset.min(text.len());
+    let prefix = &text[..offset];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() as u32;
+    let character = prefix
+        .rsplit_once('\n')
+        .map_or(prefix, |(_, line)| line)
+        .encode_utf16()
+        .count() as u32;
+    Position::new(line, character)
+}
+
+fn agent_composer_height(value: &str, pane_width: f32) -> f32 {
+    // InputState wraps with the same width as the composer minus padding and
+    // the send button. This deliberately rounds up: a completion popup may
+    // float a few pixels above the input, but it must never cover a wrapped
+    // draft or fall outside the pane.
+    let columns = ((pane_width - 76.0) / 8.0).floor().max(16.0) as usize;
+    let rows = value
+        .split('\n')
+        .map(|line| line.chars().count().max(1).div_ceil(columns))
+        .sum::<usize>()
+        .clamp(1, 6);
+    57.0 + (rows.saturating_sub(1) as f32 * 20.0)
+}
+
+fn agent_completion_overlay(
+    app: &gpui::WeakEntity<MuxApp>,
+    menu: &AgentCompletionMenu,
+    bottom: f32,
+    motion: MotionPreference,
+) -> gpui::AnyElement {
+    let mut items = v_flex().w_full().min_w_0().p_1().gap_0p5();
+    for (index, completion) in menu.items.iter().enumerate() {
+        items = items.child(agent_completion_row(
+            app,
+            index,
+            completion,
+            index == menu.selected,
+        ));
+    }
+
+    let popup = v_flex()
+        .id("agent-completion-menu")
+        .absolute()
+        .left(px(8.0))
+        .right(px(8.0))
+        .bottom(px(bottom))
+        .min_w_0()
+        .overflow_hidden()
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(0x0035_3d4a))
+        .bg(rgb(CHROME))
+        .shadow_lg()
+        .child(items)
+        .child(
+            h_flex()
+                .w_full()
+                .h(px(24.0))
+                .px_2()
+                .gap_3()
+                .border_t_1()
+                .border_color(rgb(BORDER))
+                .bg(rgb(SURFACE))
+                .text_size(px(9.0))
+                .text_color(rgb(MUTED_TEXT))
+                .child("↑↓ select")
+                .child("Tab complete")
+                .child("Esc close"),
+        );
+
+    if motion == MotionPreference::Reduced {
+        popup.into_any_element()
+    } else {
+        popup
+            .with_animation(
+                "agent-completion-enter",
+                interface_animation(100),
+                move |popup, delta| {
+                    popup
+                        .bottom(px(bottom - (1.0 - delta) * 3.0))
+                        .opacity(delta)
+                },
+            )
+            .into_any_element()
+    }
+}
+
+fn agent_completion_row(
+    app: &gpui::WeakEntity<MuxApp>,
+    index: usize,
+    completion: &AgentCompletion,
+    selected: bool,
+) -> gpui::AnyElement {
+    let completion_app = app.clone();
+    let icon = match completion.kind {
+        AgentCompletionKind::Command => IconName::SquareTerminal,
+        AgentCompletionKind::Value => IconName::Bot,
+        AgentCompletionKind::File => IconName::File,
+    };
+    let text = match completion.kind {
+        AgentCompletionKind::Command | AgentCompletionKind::Value => h_flex()
+            .min_w_0()
+            .flex_1()
+            .gap_3()
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(118.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .font_family(EMBEDDED_TERMINAL_FONT)
+                    .text_size(px(12.0))
+                    .font_semibold()
+                    .child(completion.label.clone()),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_size(px(10.0))
+                    .text_color(rgb(MUTED_TEXT))
+                    .child(completion.description.clone()),
+            )
+            .into_any_element(),
+        AgentCompletionKind::File => div()
+            .min_w_0()
+            .flex_1()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .font_family(EMBEDDED_TERMINAL_FONT)
+            .text_size(px(12.0))
+            .font_semibold()
+            .child(completion.label.clone())
+            .into_any_element(),
+    };
+    h_flex()
+        .id(SharedString::from(format!("agent-completion-{index}")))
+        .group(SharedString::from("agent-completion-row"))
+        .w_full()
+        .min_w_0()
+        .h(px(34.0))
+        .px_2()
+        .gap_2()
+        .rounded_md()
+        .cursor_pointer()
+        .when(selected, |row| row.bg(rgb(0x0025_2b36)))
+        .hover(|row| row.bg(rgb(CHROME_RAISED)))
+        .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            let _ = completion_app.update(cx, |this, cx| {
+                this.accept_agent_completion(Some(index), window, cx);
+            });
+        })
+        .child(
+            div()
+                .flex_none()
+                .w(px(22.0))
+                .h(px(22.0))
+                .rounded_md()
+                .bg(if selected {
+                    rgb(0x0030_3c4a)
+                } else {
+                    rgb(SURFACE)
+                })
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(if selected {
+                    rgb(SIGNAL)
+                } else {
+                    rgb(MUTED_TEXT)
+                })
+                .child(Icon::new(icon).xsmall()),
+        )
+        .child(text)
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(9.0))
+                .text_color(rgb(MUTED_TEXT))
+                .child(completion.detail.clone()),
+        )
+        .into_any_element()
 }
 
 fn agent_scroll_is_near_bottom(scroll: &ScrollHandle) -> bool {
@@ -2975,34 +3655,16 @@ fn agent_message_item(
     role: AgentMessageRole,
     text: &str,
 ) -> gpui::AnyElement {
-    let (label, accent) = match role {
-        AgentMessageRole::User => ("You", rgb(SIGNAL)),
-        AgentMessageRole::Agent => ("Agent", rgb(0x0078_d6a3)),
-        AgentMessageRole::Thought => unreachable!("thoughts have their own presentation"),
-    };
     let mut message = v_flex()
         .w_full()
         .max_w_full()
         .min_w_0()
         .flex_none()
         .overflow_hidden()
-        .gap_1()
+        .gap_0()
         .px_2()
         .py_1p5()
-        .rounded_lg()
-        .child(
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .child(div().size(px(5.0)).rounded_full().bg(accent))
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .font_semibold()
-                        .text_color(accent)
-                        .child(label),
-                ),
-        );
+        .rounded_lg();
     if role == AgentMessageRole::User {
         message = message.bg(rgb(CHROME_RAISED)).child(
             div()
@@ -3763,6 +4425,20 @@ fn describe_agent_option(option: &mux_acp::AgentConfigOption) -> String {
     }
 }
 
+fn merge_agent_profiles(settings: &AppSettings) -> Vec<AgentProfile> {
+    let custom = settings.custom_agent_profiles();
+    let custom_ids = custom
+        .iter()
+        .map(|profile| profile.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut profiles = built_in_agent_profiles()
+        .into_iter()
+        .filter(|profile| !custom_ids.contains(profile.id.as_str()))
+        .collect::<Vec<_>>();
+    profiles.extend(custom);
+    profiles
+}
+
 fn parse_cwd_override(value: &str) -> Option<PathBuf> {
     let value = value.trim();
     if value.is_empty() {
@@ -4010,6 +4686,33 @@ fn configure_application_actions(cx: &mut App) {
         ToggleAgentPane,
         Some("MuxAgentPane > Input"),
     )]);
+    cx.bind_keys([
+        KeyBinding::new(
+            "up",
+            SelectPreviousAgentCompletion,
+            Some("MuxAgentPane > MuxAgentCompletion > Input"),
+        ),
+        KeyBinding::new(
+            "down",
+            SelectNextAgentCompletion,
+            Some("MuxAgentPane > MuxAgentCompletion > Input"),
+        ),
+        KeyBinding::new(
+            "tab",
+            InsertAgentCompletion,
+            Some("MuxAgentPane > MuxAgentCompletion > Input"),
+        ),
+        KeyBinding::new(
+            "enter",
+            InsertAgentCompletion,
+            Some("MuxAgentPane > MuxAgentCompletion > Input"),
+        ),
+        KeyBinding::new(
+            "escape",
+            DismissAgentCompletion,
+            Some("MuxAgentPane > MuxAgentCompletion > Input"),
+        ),
+    ]);
     configure_application_menu(cx);
 }
 
@@ -4227,10 +4930,24 @@ mod tests {
     use mux_workspace::{PaneId, Session};
 
     use super::{
-        GridMetrics, PaneReplica, PaneScrollState, layout, pane_needs_live_frame,
-        terminal_frame_text, terminal_key_event, terminal_sizes_for_geometry,
-        terminal_tab_keystroke,
+        GridMetrics, PaneReplica, PaneScrollState, agent_composer_height, input_position_at,
+        layout, pane_needs_live_frame, terminal_frame_text, terminal_key_event,
+        terminal_sizes_for_geometry, terminal_tab_keystroke,
     };
+
+    #[test]
+    fn agent_completion_cursor_positions_use_utf16_columns() {
+        let position = input_position_at("first\n😀x", "first\n😀".len());
+        assert_eq!(position.line, 1);
+        assert_eq!(position.character, 2);
+    }
+
+    #[test]
+    fn agent_completion_overlay_stays_above_multiline_drafts() {
+        assert!((agent_composer_height("one line", 800.0) - 57.0).abs() < f32::EPSILON);
+        assert!((agent_composer_height("one\ntwo\nthree", 800.0) - 97.0).abs() < f32::EPSILON);
+        assert!((agent_composer_height("a\nb\nc\nd\ne\nf\ng", 800.0) - 157.0).abs() < f32::EPSILON);
+    }
 
     #[test]
     fn terminal_tab_actions_still_use_libghostty_encoding() {

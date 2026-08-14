@@ -20,6 +20,7 @@ directories.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
 gpui-component-assets.workspace = true
+ignore.workspace = true
 mux-acp = { path = "../../crates/mux-acp" }
 mux-client = { path = "../../crates/mux-client" }
 mux-daemon = { path = "../../crates/mux-daemon", default-features = false }

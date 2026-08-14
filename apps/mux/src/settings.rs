@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -6,12 +6,31 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use mux_acp::{AgentProfile, AgentSpec};
+
 const SETTINGS_FILE: &str = "settings.json";
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AppSettings {
     #[serde(default)]
     disabled_agent_profiles: BTreeSet<String>,
+    /// Zed-compatible custom ACP launch recipes. Keeping the same declarative
+    /// command/args/env shape makes an existing Zed agent entry portable to
+    /// Mux without introducing an application-specific agent protocol.
+    #[serde(default)]
+    agent_servers: BTreeMap<String, CustomAgentServerSettings>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CustomAgentServerSettings {
+    Custom {
+        command: PathBuf,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        args: Vec<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
+    },
 }
 
 impl AppSettings {
@@ -26,6 +45,34 @@ impl AppSettings {
         } else {
             self.disabled_agent_profiles.insert(profile_id.to_owned());
         }
+    }
+
+    #[must_use]
+    pub fn custom_agent_profiles(&self) -> Vec<AgentProfile> {
+        self.agent_servers
+            .iter()
+            .filter_map(|(id, settings)| match settings {
+                CustomAgentServerSettings::Custom { command, args, env }
+                    if !id.trim().is_empty() && !command.as_os_str().is_empty() =>
+                {
+                    Some(AgentProfile {
+                        id: id.clone(),
+                        name: id.clone(),
+                        description: "Custom ACP agent · configured in settings.json".to_owned(),
+                        spec: AgentSpec {
+                            name: id.clone(),
+                            command: expand_home(command),
+                            args: args.clone(),
+                            environment: env
+                                .iter()
+                                .map(|(name, value)| (name.clone(), value.clone()))
+                                .collect(),
+                        },
+                    })
+                }
+                CustomAgentServerSettings::Custom { .. } => None,
+            })
+            .collect()
     }
 
     pub fn load(state_dir: &Path) -> Result<Self> {
@@ -72,6 +119,21 @@ fn temporary_settings_path(state_dir: &Path) -> PathBuf {
     state_dir.join(format!(".{SETTINGS_FILE}.tmp"))
 }
 
+fn expand_home(path: &Path) -> PathBuf {
+    let Some(path) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    if path == "~" {
+        return directories::BaseDirs::new()
+            .map_or_else(|| path.into(), |dirs| dirs.home_dir().to_path_buf());
+    }
+    path.strip_prefix("~/")
+        .and_then(|relative| {
+            directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(relative))
+        })
+        .unwrap_or_else(|| path.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,5 +160,32 @@ mod tests {
                 .expect("forward-compatible settings");
         assert!(!decoded.agent_enabled("gemini"));
         assert!(decoded.agent_enabled("future-agent"));
+    }
+
+    #[test]
+    fn zed_custom_agent_entries_become_plain_acp_specs() {
+        let decoded: AppSettings = serde_json::from_str(
+            r#"{
+                "agent_servers": {
+                    "my-agent": {
+                        "type": "custom",
+                        "command": "node",
+                        "args": ["agent.js", "--acp"],
+                        "env": {"AGENT_STYLE": "quiet"}
+                    }
+                }
+            }"#,
+        )
+        .expect("Zed-compatible settings");
+
+        let profiles = decoded.custom_agent_profiles();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id, "my-agent");
+        assert_eq!(profiles[0].spec.command, PathBuf::from("node"));
+        assert_eq!(profiles[0].spec.args, ["agent.js", "--acp"]);
+        assert_eq!(
+            profiles[0].spec.environment,
+            [("AGENT_STYLE".to_owned(), "quiet".to_owned())]
+        );
     }
 }
