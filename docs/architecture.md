@@ -78,10 +78,12 @@ changing session ownership.
 
 ## Lifecycle
 
-The native app discovers or starts a detached per-user `muxd`; its local socket
-has mode 0600. Closing the GUI does not terminate the daemon or its shells. A
-daemon crash remains distinct from closing the GUI and currently ends the live
-processes it owns.
+The native app discovers or starts its executable in detached daemon mode; its
+local socket has mode 0600. The separate `muxd` binary exists for diagnostics
+and integration tests, but is not required beside the application bundle.
+Closing the GUI does not terminate the daemon or its shells. A daemon crash
+remains distinct from closing the GUI and currently ends the live processes it
+owns.
 
 Workspace mutations and focused terminal input share one ordered backend
 queue. This prevents keystrokes immediately following a pane, tab, or session
@@ -113,3 +115,6 @@ Terminal context is off by default. If requested, the GUI adds selected text or
 the focused viewport as a separate, size-bounded ACP content block marked as
 untrusted terminal data. The client advertises only capabilities it actually
 implements; agents cannot silently acquire a filesystem or terminal proxy.
+
+See [validated risks and decisions](risks.md) for the pinned Ghostty and ACP
+assumptions that need deliberate revalidation during dependency upgrades.

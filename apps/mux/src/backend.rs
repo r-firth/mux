@@ -6,7 +6,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use mux_acp::{AgentConfigValueSelection, AgentPrompt, AgentSpec};
 use mux_client::{Client, ClientError, default_state_dir, socket_path};
-use mux_protocol::{CreateSession, ErrorCode, ServerEvent, SessionSelector, SpawnCommand};
+use mux_protocol::{
+    CreateSession, ErrorCode, ServerEvent, SessionAttachment, SessionSelector, SpawnCommand,
+};
 use mux_terminal::TerminalSize;
 use mux_workspace::{AgentSessionId, Direction, PaneId, Session, SessionId, WorkspaceCommand};
 use tokio::sync::mpsc;
@@ -104,7 +106,6 @@ pub fn spawn(events: EventSender, state_dir: Option<PathBuf>) -> BackendHandle {
     BackendHandle { sender }
 }
 
-#[allow(clippy::too_many_lines)]
 async fn run(
     mut commands: mpsc::UnboundedReceiver<CommandMessage>,
     events: &EventSender,
@@ -123,220 +124,274 @@ async fn run(
         create_default_session(&mut client).await?.id
     };
     let attachment = client.attach(SessionSelector::Id(session_id)).await?;
-    let mut current_session = attachment.session.clone();
-    let mut focused_pane = attachment.session.active_tab().map(|tab| tab.focused_pane);
+    let mut connection = BackendConnection::new(client, &attachment);
     send_event(events, UserEvent::Attached(attachment))?;
 
     loop {
         tokio::select! {
             Some(command) = commands.recv() => {
-                match command {
-                    CommandMessage::WriteFocused { bytes } => {
-                        if let Some(pane_id) = focused_pane
-                            && let Err(error) = client.write_input(pane_id, bytes).await
-                            && !is_stale_pane_error(&error)
-                        {
-                            report_backend_error(events, error);
-                        }
-                    }
-                    CommandMessage::Write { pane_id, bytes } => {
-                        if let Err(error) = client.write_input(pane_id, bytes).await
-                            && !is_stale_pane_error(&error)
-                        {
-                            report_backend_error(events, error);
-                        }
-                    }
-                    CommandMessage::Resize { pane_id, size } => {
-                        if let Err(error) = client.resize_pane(pane_id, size).await
-                            && !is_stale_pane_error(&error)
-                        {
-                            report_backend_error(events, error);
-                        }
-                    }
-                    CommandMessage::Workspace { session_id, command } => {
-                        let command = translate_workspace_command(&current_session, command);
-                        match client.workspace_command(session_id, command).await {
-                            Ok(attachment) => {
-                                current_session = attachment.session.clone();
-                                focused_pane = attachment
-                                    .session
-                                    .active_tab()
-                                    .map(|tab| tab.focused_pane);
-                                send_event(events, UserEvent::Attached(attachment))?;
-                            }
-                            Err(error) => report_backend_error(events, error),
-                        }
-                    }
-                    CommandMessage::ListSessions => {
-                        match client.list_sessions().await {
-                            Ok(sessions) => send_event(events, UserEvent::Sessions(sessions))?,
-                            Err(error) => report_backend_error(events, error),
-                        }
-                    }
-                    CommandMessage::AttachSession(session_id) => {
-                        match client.attach(SessionSelector::Id(session_id)).await {
-                            Ok(attachment) => {
-                                current_session = attachment.session.clone();
-                                focused_pane = current_session
-                                    .active_tab()
-                                    .map(|tab| tab.focused_pane);
-                                send_event(events, UserEvent::Attached(attachment))?;
-                            }
-                            Err(error) => report_backend_error(events, error),
-                        }
-                    }
-                    CommandMessage::CreateSessionForPane { name, pane_id } => {
-                        match client.create_session_for_pane(name, pane_id).await {
-                            Ok(session) => match client.attach(SessionSelector::Id(session.id)).await {
-                                Ok(attachment) => {
-                                    current_session = attachment.session.clone();
-                                    focused_pane = current_session
-                                        .active_tab()
-                                        .map(|tab| tab.focused_pane);
-                                    send_event(events, UserEvent::Attached(attachment))?;
-                                    let sessions = client.list_sessions().await?;
-                                    send_event(events, UserEvent::Sessions(sessions))?;
-                                }
-                                Err(error) => report_backend_error(events, error),
-                            },
-                            Err(error) => report_backend_error(events, error),
-                        }
-                    }
-                    CommandMessage::RenameSession { session_id, name } => {
-                        match client.rename_session(session_id, name).await {
-                            Ok(()) => {
-                                let sessions = client.list_sessions().await?;
-                                send_event(events, UserEvent::Sessions(sessions))?;
-                            }
-                            Err(error) => report_backend_error(events, error),
-                        }
-                    }
-                    CommandMessage::KillSession(session_id) => {
-                        match client.kill_session(session_id).await {
-                            Ok(()) if current_session.id == session_id => {
-                                let sessions = client.list_sessions().await?;
-                                let next = if let Some(session) = sessions.first() {
-                                    session.clone()
-                                } else {
-                                    create_default_session(&mut client).await?
-                                };
-                                let attachment = client.attach(SessionSelector::Id(next.id)).await?;
-                                current_session = attachment.session.clone();
-                                focused_pane = current_session
-                                    .active_tab()
-                                    .map(|tab| tab.focused_pane);
-                                send_event(events, UserEvent::Attached(attachment))?;
-                                let sessions = client.list_sessions().await?;
-                                send_event(events, UserEvent::Sessions(sessions))?;
-                            }
-                            Ok(()) => {
-                                let sessions = client.list_sessions().await?;
-                                send_event(events, UserEvent::Sessions(sessions))?;
-                            }
-                            Err(error) => report_backend_error(events, error),
-                        }
-                    }
-                    CommandMessage::ListAgents => {
-                        match client.list_agent_sessions().await {
-                            Ok(agents) => send_event(events, UserEvent::Agents(agents))?,
-                            Err(error) => report_backend_error(events, error),
-                        }
-                    }
-                    CommandMessage::StartAgent {
-                        spec,
-                        pane_id,
-                        cwd_override,
-                    } => {
-                        // Finder-launched macOS apps do not inherit PATH from
-                        // the user's shell. Resolve it here, off the UI
-                        // thread, and include it in the existing request so a
-                        // live daemon does not need restarting.
-                        let spec = spec.resolve_runtime_environment();
-                        let result = client
-                            .start_agent_for_pane(spec, pane_id, cwd_override)
-                            .await;
-                        match result {
-                            Ok(agent) => send_event(events, UserEvent::AgentStarted(agent))?,
-                            Err(error) => report_backend_error(events, error),
-                        }
-                    }
-                    CommandMessage::PromptAgent { session_id, prompt } => {
-                        if let Err(error) = client.prompt_agent_with_context(session_id, prompt).await {
-                            report_backend_error(events, error);
-                        }
-                    }
-                    CommandMessage::AuthenticateAgent {
-                        session_id,
-                        method_id,
-                    } => {
-                        if let Err(error) = client.authenticate_agent(session_id, method_id).await {
-                            report_backend_error(events, error);
-                        }
-                    }
-                    CommandMessage::ResolveAgentPermission {
-                        session_id,
-                        request_id,
-                        option_id,
-                    } => {
-                        if let Err(error) = client
-                            .resolve_agent_permission(session_id, request_id, option_id)
-                            .await
-                        {
-                            report_backend_error(events, error);
-                        }
-                    }
-                    CommandMessage::CancelAgent(session_id) => {
-                        if let Err(error) = client.cancel_agent(session_id).await {
-                            report_backend_error(events, error);
-                        }
-                    }
-                    CommandMessage::CloseAgent(session_id) => {
-                        if let Err(error) = client.close_agent(session_id).await {
-                            report_backend_error(events, error);
-                        }
-                    }
-                    CommandMessage::SetAgentMode { session_id, mode_id } => {
-                        if let Err(error) = client.set_agent_mode(session_id, mode_id).await {
-                            report_backend_error(events, error);
-                        }
-                    }
-                    CommandMessage::SetAgentConfig {
-                        session_id,
-                        config_id,
-                        value,
-                    } => {
-                        if let Err(error) = client
-                            .set_agent_config(session_id, config_id, value)
-                            .await
-                        {
-                            report_backend_error(events, error);
-                        }
-                    }
-                }
+                connection.handle_command(command, events).await?;
             }
-            event = client.next_event() => {
-                match event? {
-                    event @ (ServerEvent::PaneOutput { .. } | ServerEvent::PaneExited { .. }) => {
-                        send_event(events, UserEvent::Server(event))?;
-                    }
-                    ServerEvent::ResyncRequired { session_id }
-                    | ServerEvent::WorkspaceChanged { session_id } => {
-                        let attachment = client.attach(SessionSelector::Id(session_id)).await?;
-                        current_session = attachment.session.clone();
-                        focused_pane = attachment
-                            .session
-                            .active_tab()
-                            .map(|tab| tab.focused_pane);
-                        send_event(events, UserEvent::Attached(attachment))?;
-                    }
-                    ServerEvent::Agent(event) => send_event(events, UserEvent::Agent(event))?,
-                    ServerEvent::AgentResyncRequired => {
-                        let agents = client.list_agent_sessions().await?;
-                        send_event(events, UserEvent::Agents(agents))?;
-                    }
-                }
+            event = connection.client.next_event() => {
+                connection.handle_server_event(event?, events).await?;
             }
             else => return Ok(()),
+        }
+    }
+}
+
+struct BackendConnection {
+    client: Client,
+    current_session: Session,
+    focused_pane: Option<PaneId>,
+}
+
+impl BackendConnection {
+    fn new(client: Client, attachment: &SessionAttachment) -> Self {
+        Self {
+            client,
+            current_session: attachment.session.clone(),
+            focused_pane: attachment.session.active_tab().map(|tab| tab.focused_pane),
+        }
+    }
+
+    fn publish_attachment(
+        &mut self,
+        events: &EventSender,
+        attachment: SessionAttachment,
+    ) -> Result<()> {
+        self.current_session = attachment.session.clone();
+        self.focused_pane = attachment.session.active_tab().map(|tab| tab.focused_pane);
+        send_event(events, UserEvent::Attached(attachment))
+    }
+
+    async fn publish_sessions(&mut self, events: &EventSender) -> Result<()> {
+        match self.client.list_sessions().await {
+            Ok(sessions) => send_event(events, UserEvent::Sessions(sessions)),
+            Err(error) => {
+                report_backend_error(events, error);
+                Ok(())
+            }
+        }
+    }
+
+    async fn attach_session(&mut self, events: &EventSender, session_id: SessionId) -> Result<()> {
+        match self.client.attach(SessionSelector::Id(session_id)).await {
+            Ok(attachment) => self.publish_attachment(events, attachment),
+            Err(error) => {
+                report_backend_error(events, error);
+                Ok(())
+            }
+        }
+    }
+
+    async fn apply_workspace_command(
+        &mut self,
+        events: &EventSender,
+        session_id: SessionId,
+        command: WorkspaceCommand,
+    ) -> Result<()> {
+        let command = translate_workspace_command(&self.current_session, command);
+        match self.client.workspace_command(session_id, command).await {
+            Ok(attachment) => self.publish_attachment(events, attachment),
+            Err(error) => {
+                report_backend_error(events, error);
+                Ok(())
+            }
+        }
+    }
+
+    async fn create_session_for_pane(
+        &mut self,
+        events: &EventSender,
+        name: String,
+        pane_id: PaneId,
+    ) -> Result<()> {
+        match self.client.create_session_for_pane(name, pane_id).await {
+            Ok(session) => {
+                self.attach_session(events, session.id).await?;
+                self.publish_sessions(events).await
+            }
+            Err(error) => {
+                report_backend_error(events, error);
+                Ok(())
+            }
+        }
+    }
+
+    async fn rename_session(
+        &mut self,
+        events: &EventSender,
+        session_id: SessionId,
+        name: String,
+    ) -> Result<()> {
+        match self.client.rename_session(session_id, name).await {
+            Ok(()) => self.publish_sessions(events).await,
+            Err(error) => {
+                report_backend_error(events, error);
+                Ok(())
+            }
+        }
+    }
+
+    async fn kill_session(&mut self, events: &EventSender, session_id: SessionId) -> Result<()> {
+        if let Err(error) = self.client.kill_session(session_id).await {
+            report_backend_error(events, error);
+            return Ok(());
+        }
+        if self.current_session.id == session_id {
+            let sessions = self.client.list_sessions().await?;
+            let next = if let Some(session) = sessions.first() {
+                session.clone()
+            } else {
+                create_default_session(&mut self.client).await?
+            };
+            let attachment = self.client.attach(SessionSelector::Id(next.id)).await?;
+            self.publish_attachment(events, attachment)?;
+        }
+        self.publish_sessions(events).await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn handle_command(
+        &mut self,
+        command: CommandMessage,
+        events: &EventSender,
+    ) -> Result<()> {
+        match command {
+            CommandMessage::WriteFocused { bytes } => {
+                let Some(pane_id) = self.focused_pane else {
+                    return Ok(());
+                };
+                report_pane_result(events, self.client.write_input(pane_id, bytes).await);
+            }
+            CommandMessage::Write { pane_id, bytes } => {
+                report_pane_result(events, self.client.write_input(pane_id, bytes).await);
+            }
+            CommandMessage::Resize { pane_id, size } => {
+                report_pane_result(events, self.client.resize_pane(pane_id, size).await);
+            }
+            CommandMessage::Workspace {
+                session_id,
+                command,
+            } => {
+                self.apply_workspace_command(events, session_id, command)
+                    .await?;
+            }
+            CommandMessage::ListSessions => self.publish_sessions(events).await?,
+            CommandMessage::AttachSession(session_id) => {
+                self.attach_session(events, session_id).await?;
+            }
+            CommandMessage::CreateSessionForPane { name, pane_id } => {
+                self.create_session_for_pane(events, name, pane_id).await?;
+            }
+            CommandMessage::RenameSession { session_id, name } => {
+                self.rename_session(events, session_id, name).await?;
+            }
+            CommandMessage::KillSession(session_id) => {
+                self.kill_session(events, session_id).await?;
+            }
+            CommandMessage::ListAgents => match self.client.list_agent_sessions().await {
+                Ok(agents) => send_event(events, UserEvent::Agents(agents))?,
+                Err(error) => report_backend_error(events, error),
+            },
+            CommandMessage::StartAgent {
+                spec,
+                pane_id,
+                cwd_override,
+            } => {
+                // Finder-launched macOS apps do not inherit PATH from the
+                // user's shell. Resolve it off the UI thread and pass it to
+                // the live daemon with the existing request.
+                let spec = spec.resolve_runtime_environment();
+                match self
+                    .client
+                    .start_agent_for_pane(spec, pane_id, cwd_override)
+                    .await
+                {
+                    Ok(agent) => send_event(events, UserEvent::AgentStarted(agent))?,
+                    Err(error) => report_backend_error(events, error),
+                }
+            }
+            CommandMessage::PromptAgent { session_id, prompt } => {
+                report_client_result(
+                    events,
+                    self.client
+                        .prompt_agent_with_context(session_id, prompt)
+                        .await,
+                );
+            }
+            CommandMessage::AuthenticateAgent {
+                session_id,
+                method_id,
+            } => {
+                report_client_result(
+                    events,
+                    self.client.authenticate_agent(session_id, method_id).await,
+                );
+            }
+            CommandMessage::ResolveAgentPermission {
+                session_id,
+                request_id,
+                option_id,
+            } => {
+                report_client_result(
+                    events,
+                    self.client
+                        .resolve_agent_permission(session_id, request_id, option_id)
+                        .await,
+                );
+            }
+            CommandMessage::CancelAgent(session_id) => {
+                report_client_result(events, self.client.cancel_agent(session_id).await);
+            }
+            CommandMessage::CloseAgent(session_id) => {
+                report_client_result(events, self.client.close_agent(session_id).await);
+            }
+            CommandMessage::SetAgentMode {
+                session_id,
+                mode_id,
+            } => {
+                report_client_result(
+                    events,
+                    self.client.set_agent_mode(session_id, mode_id).await,
+                );
+            }
+            CommandMessage::SetAgentConfig {
+                session_id,
+                config_id,
+                value,
+            } => {
+                report_client_result(
+                    events,
+                    self.client
+                        .set_agent_config(session_id, config_id, value)
+                        .await,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_server_event(
+        &mut self,
+        event: ServerEvent,
+        events: &EventSender,
+    ) -> Result<()> {
+        match event {
+            event @ (ServerEvent::PaneOutput { .. } | ServerEvent::PaneExited { .. }) => {
+                send_event(events, UserEvent::Server(event))
+            }
+            ServerEvent::ResyncRequired { session_id }
+            | ServerEvent::WorkspaceChanged { session_id } => {
+                let attachment = self.client.attach(SessionSelector::Id(session_id)).await?;
+                self.publish_attachment(events, attachment)
+            }
+            ServerEvent::Agent(event) => send_event(events, UserEvent::Agent(event)),
+            ServerEvent::AgentResyncRequired => {
+                let agents = self.client.list_agent_sessions().await?;
+                send_event(events, UserEvent::Agents(agents))
+            }
         }
     }
 }
@@ -378,6 +433,20 @@ fn send_event(events: &EventSender, event: UserEvent) -> Result<()> {
 
 fn report_backend_error(events: &EventSender, error: impl std::fmt::Display) {
     let _ = events.send_blocking(UserEvent::BackendError(error.to_string()));
+}
+
+fn report_client_result(events: &EventSender, result: Result<(), ClientError>) {
+    if let Err(error) = result {
+        report_backend_error(events, error);
+    }
+}
+
+fn report_pane_result(events: &EventSender, result: Result<(), ClientError>) {
+    if let Err(error) = result
+        && !is_stale_pane_error(&error)
+    {
+        report_backend_error(events, error);
+    }
 }
 
 async fn connect_or_start_daemon(

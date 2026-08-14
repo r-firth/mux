@@ -186,6 +186,10 @@ async fn sustained_terminal_output_is_not_backpressured() {
         output.len()
     );
     assert!(
+        event_count < 256,
+        "sustained output was fragmented across {event_count} events"
+    );
+    assert!(
         elapsed < Duration::from_secs(2),
         "{} bytes in {event_count} events took {elapsed:?}",
         output.len()

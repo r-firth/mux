@@ -3975,8 +3975,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "unicode-segmentation",
- "unicode-width",
 ]
 
 [[package]]

@@ -110,10 +110,11 @@ fully managed adapter installation remains future work.
 
 `portable-pty` owns Unix/macOS processes and keeps ConPTY possible later. Its
 read interface is blocking, so each pane uses a dedicated drain thread plus a
-bounded coalescing stage. The latter applies up to 64 KiB of output to the
-canonical Ghostty state per batch before publishing one ordered event. This
-prevents a slow GUI from stalling a busy process without adding noticeable
-interactive-output latency.
+bounded coalescing stage. The latter holds a terminal micro-burst for at most
+500 microseconds and applies up to 64 KiB of output to the canonical Ghostty
+state per batch before publishing one ordered event. This prevents a slow GUI
+from stalling a busy process without adding noticeable interactive-output
+latency.
 
 Before calling this production-ready, measure thread cost at high pane counts,
 terminal throughput, attach latency, and resize behavior. If the blocking model

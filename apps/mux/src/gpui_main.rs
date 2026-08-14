@@ -1803,37 +1803,23 @@ impl MuxApp {
             return layout::WorkspaceGeometry::default();
         };
         let geometry = layout::calculate(session, width, height);
-        for pane in &geometry.panes {
-            let usable_width = (pane.rect.width - self.metrics.padding_x * 2.0).max(1.0);
-            let usable_height = (pane.rect.height - self.metrics.padding_y * 2.0).max(1.0);
-            let size = TerminalSize {
-                cols: (usable_width / self.metrics.cell_width)
-                    .floor()
-                    .clamp(1.0, f32::from(u16::MAX)) as u16,
-                rows: (usable_height / self.metrics.cell_height)
-                    .floor()
-                    .clamp(1.0, f32::from(u16::MAX)) as u16,
-                cell_width_px: self.metrics.cell_width.round() as u32,
-                cell_height_px: self.metrics.cell_height.round() as u32,
-            };
-            if self.sent_sizes.get(&pane.pane_id) != Some(&size) {
-                let Some(replica) = self.panes.get_mut(&pane.pane_id) else {
+        let sizes = terminal_sizes_for_geometry(&geometry, self.metrics);
+        for (pane_id, size) in sizes {
+            if self.sent_sizes.get(&pane_id) != Some(&size) {
+                let Some(replica) = self.panes.get_mut(&pane_id) else {
                     continue;
                 };
                 let resized = replica.engine.resize(size);
                 if let Err(error) = resized {
-                    error!(pane_id = %pane.pane_id, %error, "could not resize terminal replica");
+                    error!(%pane_id, %error, "could not resize terminal replica");
                     continue;
                 }
                 if let Err(error) = replica.publish_frame() {
-                    error!(pane_id = %pane.pane_id, %error, "could not render resized terminal replica");
+                    error!(%pane_id, %error, "could not render resized terminal replica");
                     continue;
                 }
-                self.sent_sizes.insert(pane.pane_id, size);
-                self.backend.send(CommandMessage::Resize {
-                    pane_id: pane.pane_id,
-                    size,
-                });
+                self.sent_sizes.insert(pane_id, size);
+                self.backend.send(CommandMessage::Resize { pane_id, size });
             }
         }
         geometry
@@ -3992,6 +3978,33 @@ fn color(value: u32) -> Hsla {
     rgb(value).into()
 }
 
+fn terminal_sizes_for_geometry(
+    geometry: &layout::WorkspaceGeometry,
+    metrics: GridMetrics,
+) -> Vec<(PaneId, TerminalSize)> {
+    geometry
+        .panes
+        .iter()
+        .map(|pane| {
+            let usable_width = (pane.rect.width - metrics.padding_x * 2.0).max(1.0);
+            let usable_height = (pane.rect.height - metrics.padding_y * 2.0).max(1.0);
+            (
+                pane.pane_id,
+                TerminalSize {
+                    cols: (usable_width / metrics.cell_width)
+                        .floor()
+                        .clamp(1.0, f32::from(u16::MAX)) as u16,
+                    rows: (usable_height / metrics.cell_height)
+                        .floor()
+                        .clamp(1.0, f32::from(u16::MAX)) as u16,
+                    cell_width_px: metrics.cell_width.round() as u32,
+                    cell_height_px: metrics.cell_height.round() as u32,
+                },
+            )
+        })
+        .collect()
+}
+
 fn parse_state_dir() -> Option<PathBuf> {
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
@@ -4126,8 +4139,38 @@ mod tests {
 
     use mux_terminal::{TerminalRenderer as _, TerminalSize};
     use mux_terminal_ghostty::GhosttyEngine;
+    use mux_workspace::{PaneId, Session};
 
-    use super::{PaneReplica, PaneScrollState, pane_needs_live_frame, terminal_frame_text};
+    use super::{
+        GridMetrics, PaneReplica, PaneScrollState, layout, pane_needs_live_frame,
+        terminal_frame_text, terminal_sizes_for_geometry,
+    };
+
+    #[test]
+    fn pane_splits_get_independent_terminal_sizes() {
+        let pane = PaneId::new();
+        let mut session = Session::with_panes("release-check", &[pane]).expect("session");
+        session
+            .active_tab_mut()
+            .expect("tab")
+            .split_focused(PaneId::new(), mux_workspace::SplitAxis::Vertical)
+            .expect("split pane");
+        let geometry = layout::calculate(&session, 1_120.0, 720.0);
+        let sizes = terminal_sizes_for_geometry(
+            &geometry,
+            GridMetrics {
+                cell_width: 9.6,
+                cell_height: 22.5,
+                font_size: 16.0,
+                padding_x: 4.0,
+                padding_y: 3.0,
+            },
+        );
+
+        assert_eq!(sizes.len(), 2);
+        assert!(sizes.iter().all(|(_, size)| size.cols == 115));
+        assert!(sizes.iter().all(|(_, size)| size.rows == 15));
+    }
 
     #[test]
     fn terminal_output_is_published_as_one_immutable_snapshot() {

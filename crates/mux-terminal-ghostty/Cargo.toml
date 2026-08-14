@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 build = "build.rs"
 
+[package.metadata.cargo-machete]
+# cargo-machete does not recognize the cc::Build use in build.rs.
+ignored = ["cc"]
+
 [features]
 default = []
 link = []
