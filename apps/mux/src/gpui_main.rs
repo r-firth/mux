@@ -90,6 +90,8 @@ gpui::actions!(
     mux_agent,
     [
         CancelAgentTurn,
+        ForwardTerminalBacktab,
+        ForwardTerminalTab,
         NavigateAgentDown,
         NavigateAgentLeft,
         NavigateAgentRight,
@@ -739,7 +741,7 @@ impl MuxApp {
         }
 
         let Some(chord) = key_chord(&event.keystroke) else {
-            self.send_terminal_key(&event.keystroke, false, event.is_held);
+            self.send_terminal_key(&event.keystroke, false, event.is_held, window.capslock().on);
             cx.stop_propagation();
             return;
         };
@@ -747,7 +749,7 @@ impl MuxApp {
             self.perform_action(action, window, cx);
             cx.stop_propagation();
         } else {
-            self.send_terminal_key(&event.keystroke, false, event.is_held);
+            self.send_terminal_key(&event.keystroke, false, event.is_held, window.capslock().on);
             cx.stop_propagation();
         }
     }
@@ -761,11 +763,17 @@ impl MuxApp {
             cx.propagate();
             return;
         }
-        self.send_terminal_key(&event.keystroke, true, false);
+        self.send_terminal_key(&event.keystroke, true, false, window.capslock().on);
         cx.stop_propagation();
     }
 
-    fn send_terminal_key(&mut self, keystroke: &gpui::Keystroke, release: bool, held: bool) {
+    fn send_terminal_key(
+        &mut self,
+        keystroke: &gpui::Keystroke,
+        release: bool,
+        held: bool,
+        caps_lock: bool,
+    ) {
         if !release && keystroke.modifiers.platform && keystroke.key == "c" {
             let selected = self.selected_pane.or_else(|| self.focused_pane_id());
             if let Some(text) = selected
@@ -795,11 +803,38 @@ impl MuxApp {
         let Some(pane) = self.panes.get(&pane_id) else {
             return;
         };
-        let terminal_event = terminal_key_event(keystroke, release, held);
+        let terminal_event = terminal_key_event(keystroke, release, held, caps_lock);
         match pane.engine.encode_key(&terminal_event) {
             Ok(bytes) => self.write_focused(bytes),
             Err(error) => error!(%error, "encode terminal key"),
         }
+    }
+
+    fn forward_terminal_tab(&mut self, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_agent_pane() == self.focused_pane_id() {
+            return;
+        }
+        let keystroke = terminal_tab_keystroke(shift);
+        self.send_terminal_key(&keystroke, false, false, window.capslock().on);
+        cx.stop_propagation();
+    }
+
+    fn on_forward_terminal_tab(
+        &mut self,
+        _: &ForwardTerminalTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.forward_terminal_tab(false, window, cx);
+    }
+
+    fn on_forward_terminal_backtab(
+        &mut self,
+        _: &ForwardTerminalBacktab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.forward_terminal_tab(true, window, cx);
     }
 
     fn perform_action(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
@@ -2156,10 +2191,13 @@ impl Render for MuxApp {
         let pane_count = geometry.panes.len();
         let mut root = div()
             .id("mux-root")
+            .key_context("MuxTerminal")
             .relative()
             .size_full()
             .overflow_hidden()
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::on_forward_terminal_tab))
+            .on_action(cx.listener(Self::on_forward_terminal_backtab))
             .on_key_down(cx.listener(Self::handle_key_down))
             .on_key_up(cx.listener(Self::handle_key_up))
             .bg(rgb(SURFACE))
@@ -3797,18 +3835,26 @@ fn terminal_mouse_button(button: gpui::MouseButton) -> TerminalMouseButton {
     }
 }
 
-fn terminal_key_event(keystroke: &gpui::Keystroke, release: bool, held: bool) -> TerminalKeyEvent {
-    let text = (!release)
+fn terminal_key_event(
+    keystroke: &gpui::Keystroke,
+    release: bool,
+    held: bool,
+    caps_lock: bool,
+) -> TerminalKeyEvent {
+    let raw_text = (!release)
         .then(|| keystroke.key_char.clone())
         .flatten()
         .filter(|text| !text.is_empty());
+    let text = raw_text
+        .as_deref()
+        .map(|text| terminal_text_with_caps_lock(text, &keystroke.key, caps_lock));
     let key = terminal_key(&keystroke.key);
     let modifiers = terminal_modifiers(keystroke.modifiers);
     let consumed_modifiers = TerminalModifiers {
-        shift: text
+        shift: raw_text
             .as_ref()
             .is_some_and(|text| text != &keystroke.key && keystroke.modifiers.shift),
-        alt: text.is_some() && keystroke.modifiers.alt,
+        alt: raw_text.is_some() && keystroke.modifiers.alt,
         ..TerminalModifiers::default()
     };
     TerminalKeyEvent {
@@ -3826,6 +3872,40 @@ fn terminal_key_event(keystroke: &gpui::Keystroke, release: bool, held: bool) ->
         text,
         composing: false,
     }
+}
+
+fn terminal_tab_keystroke(shift: bool) -> gpui::Keystroke {
+    gpui::Keystroke {
+        modifiers: gpui::Modifiers {
+            shift,
+            ..gpui::Modifiers::default()
+        },
+        key: "tab".to_owned(),
+        key_char: (!shift).then(|| "\t".to_owned()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn terminal_text_with_caps_lock(text: &str, key: &str, caps_lock: bool) -> String {
+    if !caps_lock
+        || text.len() != 1
+        || !text.as_bytes()[0].is_ascii_alphabetic()
+        || key.len() != 1
+        || !key.as_bytes()[0].is_ascii_alphabetic()
+    {
+        return text.to_owned();
+    }
+    let character = char::from(text.as_bytes()[0]);
+    if character.is_ascii_lowercase() {
+        character.to_ascii_uppercase().to_string()
+    } else {
+        character.to_ascii_lowercase().to_string()
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn terminal_text_with_caps_lock(text: &str, _key: &str, _caps_lock: bool) -> String {
+    text.to_owned()
 }
 
 fn terminal_key(key: &str) -> TerminalKey {
@@ -3904,6 +3984,11 @@ fn configure_application_menu(cx: &mut App) {
 fn configure_application_actions(cx: &mut App) {
     cx.on_action(quit_mux);
     cx.bind_keys([KeyBinding::new("cmd-q", QuitMux, None)]);
+    // Terminal panes own Tab; the component root must not turn it into focus traversal.
+    cx.bind_keys([
+        KeyBinding::new("tab", ForwardTerminalTab, Some("MuxTerminal")),
+        KeyBinding::new("shift-tab", ForwardTerminalBacktab, Some("MuxTerminal")),
+    ]);
     // gpui-component's Input owns some Option-arrow combinations for text
     // navigation. Bind all four explicitly in the agent pane and composer so
     // pane navigation behaves identically regardless of which child has focus.
@@ -4137,14 +4222,61 @@ fn main() -> Result<()> {
 mod tests {
     use std::rc::Rc;
 
-    use mux_terminal::{TerminalRenderer as _, TerminalSize};
+    use mux_terminal::{TerminalInteraction as _, TerminalRenderer as _, TerminalSize};
     use mux_terminal_ghostty::GhosttyEngine;
     use mux_workspace::{PaneId, Session};
 
     use super::{
         GridMetrics, PaneReplica, PaneScrollState, layout, pane_needs_live_frame,
-        terminal_frame_text, terminal_sizes_for_geometry,
+        terminal_frame_text, terminal_key_event, terminal_sizes_for_geometry,
+        terminal_tab_keystroke,
     };
+
+    #[test]
+    fn terminal_tab_actions_still_use_libghostty_encoding() {
+        let engine = GhosttyEngine::new(TerminalSize::default()).expect("new terminal");
+        let tab = terminal_key_event(&terminal_tab_keystroke(false), false, false, false);
+        let backtab = terminal_key_event(&terminal_tab_keystroke(true), false, false, false);
+
+        assert_eq!(engine.encode_key(&tab).expect("encode Tab"), b"\t");
+        assert_eq!(
+            engine.encode_key(&backtab).expect("encode Backtab"),
+            b"\x1b[Z",
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn terminal_text_applies_macos_caps_lock_without_inventing_shift() {
+        let engine = GhosttyEngine::new(TerminalSize::default()).expect("new terminal");
+        let lower = gpui::Keystroke {
+            modifiers: gpui::Modifiers::default(),
+            key: "a".to_owned(),
+            key_char: Some("a".to_owned()),
+        };
+        let upper = gpui::Keystroke {
+            modifiers: gpui::Modifiers {
+                shift: true,
+                ..gpui::Modifiers::default()
+            },
+            key: "a".to_owned(),
+            key_char: Some("A".to_owned()),
+        };
+
+        let caps = terminal_key_event(&lower, false, false, true);
+        assert_eq!(caps.text.as_deref(), Some("A"));
+        assert!(!caps.modifiers.shift);
+        assert_eq!(engine.encode_key(&caps).expect("encode Caps+A"), b"A");
+
+        let shift_caps = terminal_key_event(&upper, false, false, true);
+        assert_eq!(shift_caps.text.as_deref(), Some("a"));
+        assert!(shift_caps.modifiers.shift);
+        assert!(shift_caps.consumed_modifiers.shift);
+        assert_eq!(
+            engine.encode_key(&shift_caps).expect("encode Shift+Caps+A"),
+            b"a",
+        );
+    }
 
     #[test]
     fn pane_splits_get_independent_terminal_sizes() {
