@@ -444,7 +444,18 @@ impl Session {
         self.tabs.iter_mut().find(|tab| tab.id == self.active_tab)
     }
 
+    /// Keep automatically numbered tabs aligned with their stable position.
+    /// Text titles are user-owned and remain unchanged.
+    pub fn normalize_numeric_tab_titles(&mut self) {
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            if tab.title.parse::<u64>().is_ok() {
+                tab.title = (index + 1).to_string();
+            }
+        }
+    }
+
     pub fn add_tab(&mut self, pane_id: PaneId) -> Result<TabId, WorkspaceError> {
+        self.normalize_numeric_tab_titles();
         let title = (self.tabs.len() + 1).to_string();
         let tab = Tab::with_panes(title, &[pane_id])?;
         let id = tab.id;
@@ -466,6 +477,7 @@ impl Session {
         let mut panes = Vec::new();
         tab.layout.pane_ids(&mut panes);
         self.active_tab = self.tabs[index.saturating_sub(1)].id;
+        self.normalize_numeric_tab_titles();
         Ok(panes)
     }
 
@@ -1067,6 +1079,42 @@ mod tests {
             .move_focus_or_tab(Direction::Right)
             .expect("fall through to next tab");
         assert_eq!(session.active_tab, second_tab);
+    }
+
+    #[test]
+    fn new_tab_titles_do_not_reuse_an_existing_number_after_close() {
+        let mut session = Session::with_panes("daily", &[PaneId::new()]).expect("session");
+        let second = session.add_tab(PaneId::new()).expect("second tab");
+        session.add_tab(PaneId::new()).expect("third tab");
+        session.select_tab(second).expect("select middle tab");
+        session.close_active_tab().expect("close middle tab");
+
+        session.add_tab(PaneId::new()).expect("replacement tab");
+
+        let titles = session
+            .tabs
+            .iter()
+            .map(|tab| tab.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, vec!["1", "2", "3"]);
+    }
+
+    #[test]
+    fn numeric_title_repair_keeps_user_text_titles() {
+        let mut session = Session::with_panes("daily", &[PaneId::new()]).expect("session");
+        session.add_tab(PaneId::new()).expect("second tab");
+        session.add_tab(PaneId::new()).expect("third tab");
+        session.tabs[1].title = "build".to_owned();
+        session.tabs[2].title = "1".to_owned();
+
+        session.normalize_numeric_tab_titles();
+
+        let titles = session
+            .tabs
+            .iter()
+            .map(|tab| tab.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, vec!["1", "build", "3"]);
     }
 
     #[test]

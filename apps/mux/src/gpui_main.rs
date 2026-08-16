@@ -62,10 +62,10 @@ use mux_terminal::{
 use mux_terminal_ghostty::{GhosttyEngine, GhosttyFont, GhosttyTheme};
 use mux_workspace::{
     Action, AgentSessionId, Direction, InputMode, Key as MuxKey, KeyChord, Keymap, Modifiers,
-    PaneId, Session, TabId, WorkspaceCommand,
+    PaneId, Session, SessionId, TabId, WorkspaceCommand,
 };
 use settings::AppSettings;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 const WINDOW_WIDTH: f32 = 1120.0;
 const WINDOW_HEIGHT: f32 = 720.0;
@@ -131,20 +131,39 @@ struct PaneReplica {
     engine: GhosttyEngine,
     frame: Rc<RenderFrame>,
     render_cache: Rc<RefCell<TerminalRenderCache>>,
+    next_output_sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PaneOutputUpdate {
+    Applied,
+    Duplicate,
+    Gap { expected: u64, actual: u64 },
 }
 
 impl PaneReplica {
-    fn new(engine: GhosttyEngine, frame: RenderFrame) -> Self {
+    fn new(engine: GhosttyEngine, frame: RenderFrame, next_output_sequence: u64) -> Self {
         Self {
             engine,
             frame: Rc::new(frame),
             render_cache: Rc::new(RefCell::new(TerminalRenderCache::default())),
+            next_output_sequence,
         }
     }
 
-    fn apply_output(&mut self, sequence: u64, bytes: &[u8]) -> Result<()> {
+    fn apply_output(&mut self, sequence: u64, bytes: &[u8]) -> Result<PaneOutputUpdate> {
+        if sequence < self.next_output_sequence {
+            return Ok(PaneOutputUpdate::Duplicate);
+        }
+        if sequence > self.next_output_sequence {
+            return Ok(PaneOutputUpdate::Gap {
+                expected: self.next_output_sequence,
+                actual: sequence,
+            });
+        }
         self.engine.apply_output(sequence, bytes)?;
-        Ok(())
+        self.next_output_sequence += 1;
+        Ok(PaneOutputUpdate::Applied)
     }
 
     fn publish_frame(&mut self) -> Result<()> {
@@ -181,7 +200,7 @@ fn restore_pane_replica(
     if !pane.terminal.replay.is_empty() {
         engine.render_frame_into(&mut frame)?;
     }
-    Ok(PaneReplica::new(engine, frame))
+    Ok(PaneReplica::new(engine, frame, pane.terminal.next_sequence))
 }
 
 fn restore_pane_replicas(
@@ -201,10 +220,9 @@ fn reconcile_pane_replicas(
 ) -> Result<HashMap<PaneId, PaneReplica>> {
     let mut reconciled = HashMap::with_capacity(attachments.len());
     for pane in attachments {
-        let replica = if let Some(replica) = existing.remove(&pane.pane_id) {
-            replica
-        } else {
-            restore_pane_replica(pane, ghostty_theme)?
+        let replica = match existing.remove(&pane.pane_id) {
+            Some(replica) if replica.next_output_sequence == pane.terminal.next_sequence => replica,
+            Some(_) | None => restore_pane_replica(pane, ghostty_theme)?,
         };
         reconciled.insert(pane.pane_id, replica);
     }
@@ -288,6 +306,7 @@ struct MuxApp {
     selected_pane: Option<PaneId>,
     selection_drag: Option<TerminalPointerCapture>,
     mouse_reporting: Option<TerminalPointerCapture>,
+    terminal_resync_pending: Option<SessionId>,
     selection_clock_origin: Instant,
     keymap: Keymap,
     mode: InputMode,
@@ -412,6 +431,7 @@ impl MuxApp {
             selected_pane: None,
             selection_drag: None,
             mouse_reporting: None,
+            terminal_resync_pending: None,
             selection_clock_origin: Instant::now(),
             keymap: Keymap::zellij_default(),
             mode: InputMode::Normal,
@@ -467,22 +487,37 @@ impl MuxApp {
         for event in events {
             match event {
                 UserEvent::Server(ServerEvent::PaneOutput {
+                    session_id,
                     pane_id,
                     sequence,
                     bytes,
-                    ..
                 }) => {
                     let visible = self.terminal_pane_is_visible(pane_id);
                     let result = self
                         .panes
                         .get_mut(&pane_id)
-                        .map_or(Ok(()), |pane| pane.apply_output(sequence, &bytes));
+                        .map_or(Ok(PaneOutputUpdate::Duplicate), |pane| {
+                            pane.apply_output(sequence, &bytes)
+                        });
                     match result {
-                        Ok(()) if visible => {
+                        Ok(PaneOutputUpdate::Applied) if visible => {
                             dirty_panes.insert(pane_id);
                             needs_render = true;
                         }
-                        Ok(()) => {}
+                        Ok(PaneOutputUpdate::Applied | PaneOutputUpdate::Duplicate) => {}
+                        Ok(PaneOutputUpdate::Gap { expected, actual }) => {
+                            if self.terminal_resync_pending != Some(session_id) {
+                                warn!(
+                                    %session_id,
+                                    %pane_id,
+                                    expected,
+                                    actual,
+                                    "GUI terminal replica fell behind; requesting a fresh attachment"
+                                );
+                                self.terminal_resync_pending = Some(session_id);
+                                self.backend.send(CommandMessage::AttachSession(session_id));
+                            }
+                        }
                         Err(error) => Self::report_ui_error(&error, window, cx),
                     }
                 }
@@ -612,13 +647,21 @@ impl MuxApp {
 
     fn apply_workspace_attachment(
         &mut self,
-        attachment: SessionAttachment,
+        mut attachment: SessionAttachment,
         rebuild: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
+        // Older live daemons may still hold numeric titles allocated from a
+        // stale tab count. Repair the presentation snapshot without touching
+        // stable tab IDs or user-authored text titles.
+        attachment.session.normalize_numeric_tab_titles();
+        let session_id = attachment.session.id;
         if rebuild {
             self.attach(attachment)?;
+            if self.terminal_resync_pending == Some(session_id) {
+                self.terminal_resync_pending = None;
+            }
         } else {
             self.update_workspace(attachment)?;
         }
@@ -702,8 +745,15 @@ impl MuxApp {
                 ..
             } => {
                 if let Some(pane) = self.panes.get_mut(&pane_id) {
-                    pane.apply_output(sequence, &bytes)?;
-                    pane.publish_frame()?;
+                    match pane.apply_output(sequence, &bytes)? {
+                        PaneOutputUpdate::Applied => pane.publish_frame()?,
+                        PaneOutputUpdate::Duplicate => {}
+                        PaneOutputUpdate::Gap { expected, actual } => {
+                            return Err(anyhow!(
+                                "terminal output was out of order: expected {expected}, received {actual}"
+                            ));
+                        }
+                    }
                 }
             }
             ServerEvent::PaneExited { .. }
@@ -5066,9 +5116,10 @@ mod tests {
     use mux_workspace::{PaneId, Session};
 
     use super::{
-        GridMetrics, PaneReplica, PaneScrollState, agent_composer_height, input_position_at,
-        layout, pane_needs_live_frame, reconcile_pane_replicas, terminal_frame_text,
-        terminal_key_event, terminal_sizes_for_geometry, terminal_tab_keystroke,
+        GridMetrics, PaneOutputUpdate, PaneReplica, PaneScrollState, agent_composer_height,
+        input_position_at, layout, pane_needs_live_frame, reconcile_pane_replicas,
+        terminal_frame_text, terminal_key_event, terminal_sizes_for_geometry,
+        terminal_tab_keystroke,
     };
 
     #[test]
@@ -5166,11 +5217,21 @@ mod tests {
         })
         .expect("new terminal");
         let frame = engine.render_frame().expect("initial frame");
-        let mut pane = PaneReplica::new(engine, frame);
+        let next_sequence = engine
+            .attachment()
+            .expect("initial attachment")
+            .next_sequence;
+        let mut pane = PaneReplica::new(engine, frame, next_sequence);
         let displayed = Rc::clone(&pane.frame);
 
-        pane.apply_output(1, b"one ").expect("first output");
-        pane.apply_output(2, b"two").expect("second output");
+        assert_eq!(
+            pane.apply_output(1, b"one ").expect("first output"),
+            PaneOutputUpdate::Applied
+        );
+        assert_eq!(
+            pane.apply_output(2, b"two").expect("second output"),
+            PaneOutputUpdate::Applied
+        );
 
         assert!(Rc::ptr_eq(&displayed, &pane.frame));
         assert!(!terminal_frame_text(&displayed).contains("one two"));
@@ -5202,15 +5263,22 @@ mod tests {
             }))
             .expect("local selection");
         let local_frame = local_engine.render_frame().expect("local frame");
-        let local_replica = PaneReplica::new(local_engine, local_frame);
+        let local_next_sequence = local_engine
+            .attachment()
+            .expect("local attachment")
+            .next_sequence;
+        let local_replica = PaneReplica::new(local_engine, local_frame, local_next_sequence);
         let displayed = Rc::clone(&local_replica.frame);
 
-        let daemon_engine = GhosttyEngine::new(TerminalSize {
+        let mut daemon_engine = GhosttyEngine::new(TerminalSize {
             cols: 20,
             rows: 4,
             ..TerminalSize::default()
         })
         .expect("daemon terminal");
+        daemon_engine
+            .apply_output(1, b"hello world")
+            .expect("daemon output");
         let attachment = PaneAttachment {
             pane_id,
             terminal: daemon_engine.attachment().expect("daemon attachment"),
@@ -5229,6 +5297,70 @@ mod tests {
             preserved.engine.selected_text().expect("selected text"),
             Some("hello".to_owned())
         );
+    }
+
+    #[test]
+    fn workspace_updates_rebuild_a_terminal_replica_that_fell_behind() {
+        let pane_id = PaneId::new();
+        let size = TerminalSize {
+            cols: 20,
+            rows: 4,
+            ..TerminalSize::default()
+        };
+        let mut local_engine = GhosttyEngine::new(size).expect("local terminal");
+        local_engine.apply_output(1, b"one ").expect("local output");
+        let local_frame = local_engine.render_frame().expect("local frame");
+        let local_next_sequence = local_engine
+            .attachment()
+            .expect("local attachment")
+            .next_sequence;
+        let local_replica = PaneReplica::new(local_engine, local_frame, local_next_sequence);
+        let displayed = Rc::clone(&local_replica.frame);
+
+        let mut daemon_engine = GhosttyEngine::new(size).expect("daemon terminal");
+        daemon_engine
+            .apply_output(1, b"one ")
+            .expect("first daemon output");
+        daemon_engine
+            .apply_output(2, b"two")
+            .expect("second daemon output");
+        let attachment = PaneAttachment {
+            pane_id,
+            terminal: daemon_engine.attachment().expect("daemon attachment"),
+            exit_status: None,
+        };
+
+        let mut reconciled = reconcile_pane_replicas(
+            HashMap::from([(pane_id, local_replica)]),
+            &[attachment],
+            &GhosttyTheme::default(),
+        )
+        .expect("reconcile workspace update");
+        let repaired = reconciled.get_mut(&pane_id).expect("repaired pane");
+
+        assert!(!Rc::ptr_eq(&displayed, &repaired.frame));
+        assert!(terminal_frame_text(&repaired.frame).contains("one two"));
+        assert_eq!(
+            repaired
+                .apply_output(3, b" three")
+                .expect("next live output"),
+            PaneOutputUpdate::Applied
+        );
+    }
+
+    #[test]
+    fn terminal_replicas_ignore_already_applied_output() {
+        let mut engine = GhosttyEngine::new(TerminalSize::default()).expect("terminal");
+        engine.apply_output(1, b"once").expect("initial output");
+        let frame = engine.render_frame().expect("frame");
+        let next_sequence = engine.attachment().expect("attachment").next_sequence;
+        let mut pane = PaneReplica::new(engine, frame, next_sequence);
+
+        assert_eq!(
+            pane.apply_output(1, b"once").expect("duplicate output"),
+            PaneOutputUpdate::Duplicate
+        );
+        assert_eq!(pane.next_output_sequence, 2);
     }
 
     #[test]

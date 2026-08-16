@@ -179,11 +179,15 @@ impl Client {
             .await?
         {
             Response::Attached(attachment) => {
+                let session_id = attachment.session.id;
+                self.pending_events
+                    .retain(|event| !attachment_supersedes_event(event, session_id));
                 self.next_output_sequence = attachment
                     .panes
                     .iter()
                     .map(|pane| (pane.pane_id, pane.terminal.next_sequence))
                     .collect();
+                self.desynced_session = None;
                 Ok(attachment)
             }
             response => Err(ClientError::UnexpectedResponse(Box::new(response))),
@@ -454,6 +458,26 @@ impl Client {
     }
 }
 
+fn attachment_supersedes_event(event: &ServerEvent, session_id: SessionId) -> bool {
+    match event {
+        ServerEvent::PaneOutput {
+            session_id: event_session,
+            ..
+        }
+        | ServerEvent::PaneExited {
+            session_id: event_session,
+            ..
+        }
+        | ServerEvent::ResyncRequired {
+            session_id: event_session,
+        }
+        | ServerEvent::WorkspaceChanged {
+            session_id: event_session,
+        } => *event_session == session_id,
+        ServerEvent::Agent(_) | ServerEvent::AgentResyncRequired => false,
+    }
+}
+
 #[must_use]
 pub fn default_state_dir() -> Option<PathBuf> {
     state_dir_for("Mux")
@@ -515,8 +539,128 @@ pub enum ClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mux_protocol::{ClientMessage, ServerHello, ServerMessage, read_frame, write_frame};
+    use mux_protocol::{
+        ClientMessage, PaneAttachment, ServerHello, ServerMessage, read_frame, write_frame,
+    };
+    use mux_terminal::{EngineDescriptor, TerminalAttachment};
+    use mux_workspace::Session;
     use tokio::net::UnixListener;
+
+    fn test_attachment(session: Session, pane_id: PaneId, next_sequence: u64) -> SessionAttachment {
+        SessionAttachment {
+            session,
+            panes: vec![PaneAttachment {
+                pane_id,
+                terminal: TerminalAttachment {
+                    descriptor: EngineDescriptor {
+                        name: "test".to_owned(),
+                        revision: "1".to_owned(),
+                        checkpoint_format: 0,
+                    },
+                    checkpoint: None,
+                    replay: Vec::new(),
+                    retained_from_sequence: next_sequence,
+                    next_sequence,
+                },
+                exit_status: None,
+            }],
+        }
+    }
+
+    async fn serve_workspace_snapshot_race(
+        listener: UnixListener,
+        pane_id: PaneId,
+        session_id: SessionId,
+        tab_id: mux_workspace::TabId,
+        initial_attachment: SessionAttachment,
+        updated_attachment: SessionAttachment,
+    ) {
+        let (mut stream, _) = listener.accept().await.expect("accept client");
+        let hello: ClientMessage = read_frame(&mut stream).await.expect("read client hello");
+        assert!(matches!(hello, ClientMessage::Hello(_)));
+        write_frame(
+            &mut stream,
+            &ServerMessage::Hello(ServerHello {
+                protocol_version: PROTOCOL_VERSION,
+                daemon_pid: 42,
+            }),
+        )
+        .await
+        .expect("write server hello");
+
+        let attach: ClientMessage = read_frame(&mut stream).await.expect("read attach");
+        let ClientMessage::Request {
+            request_id: attach_id,
+            request: Request::AttachSession { .. },
+        } = attach
+        else {
+            panic!("expected attach request");
+        };
+        write_frame(
+            &mut stream,
+            &ServerMessage::Response {
+                request_id: attach_id,
+                response: Ok(Response::Attached(initial_attachment)),
+            },
+        )
+        .await
+        .expect("write initial attachment");
+
+        let workspace: ClientMessage = read_frame(&mut stream)
+            .await
+            .expect("read workspace command");
+        let ClientMessage::Request {
+            request_id: workspace_id,
+            request:
+                Request::WorkspaceCommand {
+                    session_id: requested_session,
+                    command: WorkspaceCommand::SelectTab(requested_tab),
+                },
+        } = workspace
+        else {
+            panic!("expected select-tab request");
+        };
+        assert_eq!(requested_session, session_id);
+        assert_eq!(requested_tab, tab_id);
+
+        write_frame(
+            &mut stream,
+            &ServerMessage::Event(ServerEvent::PaneOutput {
+                session_id,
+                pane_id,
+                sequence: 1,
+                bytes: b"covered by snapshot".to_vec(),
+            }),
+        )
+        .await
+        .expect("write queued output");
+        write_frame(
+            &mut stream,
+            &ServerMessage::Response {
+                request_id: workspace_id,
+                response: Ok(Response::Attached(updated_attachment)),
+            },
+        )
+        .await
+        .expect("write workspace attachment");
+        write_frame(
+            &mut stream,
+            &ServerMessage::Event(ServerEvent::WorkspaceChanged { session_id }),
+        )
+        .await
+        .expect("write workspace event");
+        write_frame(
+            &mut stream,
+            &ServerMessage::Event(ServerEvent::PaneOutput {
+                session_id,
+                pane_id,
+                sequence: 2,
+                bytes: b"live output".to_vec(),
+            }),
+        )
+        .await
+        .expect("write live output");
+    }
 
     #[test]
     fn named_application_profiles_have_isolated_state_directories() {
@@ -632,6 +776,55 @@ mod tests {
             client.next_event().await.expect("next event"),
             ServerEvent::AgentResyncRequired
         );
+        server.await.expect("fake daemon task");
+    }
+
+    #[tokio::test]
+    async fn workspace_snapshot_discards_queued_output_it_already_contains() {
+        let directory = tempfile::tempdir().expect("temporary state directory");
+        let socket = directory.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        let pane_id = PaneId::new();
+        let session = Session::with_panes("ordering", &[pane_id]).expect("session");
+        let session_id = session.id;
+        let tab_id = session.active_tab;
+        let initial_attachment = test_attachment(session.clone(), pane_id, 1);
+        let updated_attachment = test_attachment(session, pane_id, 2);
+        let server = tokio::spawn(serve_workspace_snapshot_race(
+            listener,
+            pane_id,
+            session_id,
+            tab_id,
+            initial_attachment,
+            updated_attachment,
+        ));
+
+        let mut client = Client::connect(&socket, "workspace-ordering-test")
+            .await
+            .expect("connect client");
+        client
+            .attach(SessionSelector::Id(session_id))
+            .await
+            .expect("initial attachment");
+        client
+            .workspace_command(session_id, WorkspaceCommand::SelectTab(tab_id))
+            .await
+            .expect("workspace update");
+
+        assert_eq!(
+            client.next_event().await.expect("workspace event"),
+            ServerEvent::WorkspaceChanged { session_id }
+        );
+        assert_eq!(
+            client.next_event().await.expect("live output"),
+            ServerEvent::PaneOutput {
+                session_id,
+                pane_id,
+                sequence: 2,
+                bytes: b"live output".to_vec(),
+            }
+        );
+        assert_eq!(client.next_output_sequence.get(&pane_id), Some(&3));
         server.await.expect("fake daemon task");
     }
 }
