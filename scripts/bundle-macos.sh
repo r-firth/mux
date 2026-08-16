@@ -77,6 +77,30 @@ if [ -z "$ghostty_library" ]; then
 fi
 cp "$ghostty_library" "$frameworks_dir/libghostty-vt.dylib"
 install_name_tool -add_rpath '@executable_path/../Frameworks' "$macos_dir/mux" 2>/dev/null || true
-codesign --force --deep --options runtime --sign "$codesign_identity" "$app_dir"
+
+# Generated bundles should not inherit quarantine, Finder metadata, or resource
+# forks from a checkout or cached native dependency. Those attributes make
+# strict code-signature validation fail on some machines.
+xattr -cr "$app_dir"
+
+sign_code() {
+  code_path=$1
+  if [ "$codesign_identity" = - ]; then
+    # Apple Silicon requires code to carry a signature, but local builds do
+    # not need a certificate or Hardened Runtime. Keeping this signature
+    # purely ad hoc avoids imposing distribution-only library validation on
+    # an app someone has just built from source on their own Mac.
+    codesign --force --sign - "$code_path"
+  else
+    # A real distribution identity should use Apple's notarization-compatible
+    # signing shape: Hardened Runtime plus a trusted timestamp.
+    codesign --force --options runtime --timestamp --sign "$codesign_identity" "$code_path"
+  fi
+}
+
+# Sign nested code first, then seal the outer bundle. Using --deep while
+# signing can accidentally apply the app's options to every nested code item.
+sign_code "$frameworks_dir/libghostty-vt.dylib"
+sign_code "$app_dir"
 
 echo "$app_dir"

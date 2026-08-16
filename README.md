@@ -63,6 +63,11 @@ MUX_ZIG="$(scripts/install-zig-macos.sh)" scripts/bundle-macos.sh
 open target/Mux.app
 ```
 
+The default build is signed locally with an ad-hoc signature, so building Mux
+does not require an Apple Developer account. Distribution builds can set
+`MUX_CODESIGN_IDENTITY` to a Developer ID Application identity; those builds
+enable Hardened Runtime and add a trusted timestamp for notarization.
+
 Mux discovers or starts its per-user daemon automatically. Closing the GUI
 does not stop its shells.
 
