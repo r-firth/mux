@@ -171,6 +171,16 @@ impl BackendConnection {
         send_event(events, UserEvent::Attached(attachment))
     }
 
+    fn publish_workspace_update(
+        &mut self,
+        events: &EventSender,
+        attachment: SessionAttachment,
+    ) -> Result<()> {
+        self.current_session = attachment.session.clone();
+        self.focused_pane = attachment.session.active_tab().map(|tab| tab.focused_pane);
+        send_event(events, UserEvent::WorkspaceUpdated(attachment))
+    }
+
     async fn publish_sessions(&mut self, events: &EventSender) -> Result<()> {
         match self.client.list_sessions().await {
             Ok(sessions) => send_event(events, UserEvent::Sessions(sessions)),
@@ -199,7 +209,7 @@ impl BackendConnection {
     ) -> Result<()> {
         let command = translate_workspace_command(&self.current_session, command);
         match self.client.workspace_command(session_id, command).await {
-            Ok(attachment) => self.publish_attachment(events, attachment),
+            Ok(attachment) => self.publish_workspace_update(events, attachment),
             Err(error) => {
                 report_backend_error(events, error);
                 Ok(())
@@ -416,10 +426,13 @@ impl BackendConnection {
             event @ (ServerEvent::PaneOutput { .. } | ServerEvent::PaneExited { .. }) => {
                 send_event(events, UserEvent::Server(event))
             }
-            ServerEvent::ResyncRequired { session_id }
-            | ServerEvent::WorkspaceChanged { session_id } => {
+            ServerEvent::ResyncRequired { session_id } => {
                 let attachment = self.client.attach(SessionSelector::Id(session_id)).await?;
                 self.publish_attachment(events, attachment)
+            }
+            ServerEvent::WorkspaceChanged { session_id } => {
+                let attachment = self.client.attach(SessionSelector::Id(session_id)).await?;
+                self.publish_workspace_update(events, attachment)
             }
             ServerEvent::Agent(event) => send_event(events, UserEvent::Agent(event)),
             ServerEvent::AgentResyncRequired => {

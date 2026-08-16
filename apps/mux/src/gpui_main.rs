@@ -51,7 +51,7 @@ use mux_acp::{
     AgentSessionSnapshot, AgentSessionStatus, AgentTimelineItem, AgentTool, AgentToolKind,
     ToolStatus, built_in_agent_profiles,
 };
-use mux_protocol::{ServerEvent, SessionAttachment, SessionSummary};
+use mux_protocol::{PaneAttachment, ServerEvent, SessionAttachment, SessionSummary};
 use mux_terminal::{
     CellWidth, RenderFrame, Rgb, TerminalEngine, TerminalInteraction, TerminalKey,
     TerminalKeyAction, TerminalKeyEvent, TerminalModifiers, TerminalMouseAction,
@@ -113,6 +113,7 @@ gpui::actions!(
 
 enum UserEvent {
     Attached(SessionAttachment),
+    WorkspaceUpdated(SessionAttachment),
     Sessions(Vec<SessionSummary>),
     Server(ServerEvent),
     Agents(Vec<AgentSessionSnapshot>),
@@ -158,9 +159,67 @@ impl PaneReplica {
     }
 }
 
+fn restore_pane_replica(
+    pane: &PaneAttachment,
+    ghostty_theme: &GhosttyTheme,
+) -> Result<PaneReplica> {
+    let checkpoint = pane
+        .terminal
+        .checkpoint
+        .as_ref()
+        .ok_or_else(|| anyhow!("daemon returned a non-libghostty terminal attachment"))?;
+    let mut engine = GhosttyEngine::restore(checkpoint)
+        .with_context(|| format!("restore terminal pane {}", pane.pane_id))?;
+    let mut frame = engine.render_frame()?;
+    if frame.background == Rgb::default() && !ghostty_theme.is_empty() {
+        engine.apply_theme(ghostty_theme)?;
+        engine.render_frame_into(&mut frame)?;
+    }
+    for chunk in &pane.terminal.replay {
+        engine.apply_output(chunk.sequence, &chunk.bytes)?;
+    }
+    if !pane.terminal.replay.is_empty() {
+        engine.render_frame_into(&mut frame)?;
+    }
+    Ok(PaneReplica::new(engine, frame))
+}
+
+fn restore_pane_replicas(
+    attachments: &[PaneAttachment],
+    ghostty_theme: &GhosttyTheme,
+) -> Result<HashMap<PaneId, PaneReplica>> {
+    attachments
+        .iter()
+        .map(|pane| Ok((pane.pane_id, restore_pane_replica(pane, ghostty_theme)?)))
+        .collect()
+}
+
+fn reconcile_pane_replicas(
+    mut existing: HashMap<PaneId, PaneReplica>,
+    attachments: &[PaneAttachment],
+    ghostty_theme: &GhosttyTheme,
+) -> Result<HashMap<PaneId, PaneReplica>> {
+    let mut reconciled = HashMap::with_capacity(attachments.len());
+    for pane in attachments {
+        let replica = if let Some(replica) = existing.remove(&pane.pane_id) {
+            replica
+        } else {
+            restore_pane_replica(pane, ghostty_theme)?
+        };
+        reconciled.insert(pane.pane_id, replica);
+    }
+    Ok(reconciled)
+}
+
 #[derive(Default)]
 struct PaneScrollState {
     fractional_rows: f32,
+}
+
+#[derive(Clone, Copy)]
+struct TerminalPointerCapture {
+    pane_id: PaneId,
+    rect: layout::Rect,
 }
 
 impl PaneScrollState {
@@ -227,8 +286,8 @@ struct MuxApp {
     expanded_agent_items: HashSet<String>,
     agent_context: AgentContextMode,
     selected_pane: Option<PaneId>,
-    selection_drag: Option<PaneId>,
-    mouse_reporting_pane: Option<PaneId>,
+    selection_drag: Option<TerminalPointerCapture>,
+    mouse_reporting: Option<TerminalPointerCapture>,
     selection_clock_origin: Instant,
     keymap: Keymap,
     mode: InputMode,
@@ -352,7 +411,7 @@ impl MuxApp {
             agent_context: AgentContextMode::Tab,
             selected_pane: None,
             selection_drag: None,
-            mouse_reporting_pane: None,
+            mouse_reporting: None,
             selection_clock_origin: Instant::now(),
             keymap: Keymap::zellij_default(),
             mode: InputMode::Normal,
@@ -427,9 +486,9 @@ impl MuxApp {
                         Err(error) => Self::report_ui_error(&error, window, cx),
                     }
                 }
-                UserEvent::Attached(attachment) => {
+                event @ (UserEvent::Attached(_) | UserEvent::WorkspaceUpdated(_)) => {
                     self.publish_terminal_frames(&mut dirty_panes, window, cx);
-                    self.apply_user_event(UserEvent::Attached(attachment), window, cx);
+                    self.apply_user_event(event, window, cx);
                     needs_render = true;
                 }
                 event => {
@@ -465,19 +524,10 @@ impl MuxApp {
     fn apply_user_event(&mut self, event: UserEvent, window: &mut Window, cx: &mut Context<Self>) {
         let result = match event {
             UserEvent::Attached(attachment) => {
-                let attached = self.attach(attachment);
-                if attached.is_ok() {
-                    self.sync_agent_draft_for_active_tab(window, cx);
-                }
-                if attached.is_ok()
-                    && let Some(pane_id) = self.active_agent_pane()
-                    && Some(pane_id) == self.focused_pane_id()
-                {
-                    self.backend
-                        .send(CommandMessage::RefreshAgentFiles { pane_id });
-                    self.focus_agent_composer(window);
-                }
-                attached
+                self.apply_workspace_attachment(attachment, true, window, cx)
+            }
+            UserEvent::WorkspaceUpdated(attachment) => {
+                self.apply_workspace_attachment(attachment, false, window, cx)
             }
             UserEvent::Sessions(sessions) => {
                 self.sessions = sessions;
@@ -560,28 +610,31 @@ impl MuxApp {
         }
     }
 
-    fn attach(&mut self, attachment: SessionAttachment) -> Result<()> {
-        let mut panes = HashMap::with_capacity(attachment.panes.len());
-        for pane in attachment.panes {
-            let checkpoint =
-                pane.terminal.checkpoint.as_ref().ok_or_else(|| {
-                    anyhow!("daemon returned a non-libghostty terminal attachment")
-                })?;
-            let mut engine = GhosttyEngine::restore(checkpoint)
-                .with_context(|| format!("restore terminal pane {}", pane.pane_id))?;
-            let mut frame = engine.render_frame()?;
-            if frame.background == Rgb::default() && !self.ghostty_theme.is_empty() {
-                engine.apply_theme(&self.ghostty_theme)?;
-                engine.render_frame_into(&mut frame)?;
-            }
-            for chunk in &pane.terminal.replay {
-                engine.apply_output(chunk.sequence, &chunk.bytes)?;
-            }
-            if !pane.terminal.replay.is_empty() {
-                engine.render_frame_into(&mut frame)?;
-            }
-            panes.insert(pane.pane_id, PaneReplica::new(engine, frame));
+    fn apply_workspace_attachment(
+        &mut self,
+        attachment: SessionAttachment,
+        rebuild: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        if rebuild {
+            self.attach(attachment)?;
+        } else {
+            self.update_workspace(attachment)?;
         }
+        self.sync_agent_draft_for_active_tab(window, cx);
+        if let Some(pane_id) = self.active_agent_pane()
+            && Some(pane_id) == self.focused_pane_id()
+        {
+            self.backend
+                .send(CommandMessage::RefreshAgentFiles { pane_id });
+            self.focus_agent_composer(window);
+        }
+        Ok(())
+    }
+
+    fn attach(&mut self, attachment: SessionAttachment) -> Result<()> {
+        let panes = restore_pane_replicas(&attachment.panes, &self.ghostty_theme)?;
         self.session = Some(attachment.session);
         // Every attachment replaces the local emulators from daemon-owned
         // checkpoints. Force the next layout pass to size both copies again;
@@ -590,6 +643,40 @@ impl MuxApp {
         self.sent_sizes.clear();
         self.pane_scrolls.clear();
         self.panes = panes;
+        self.selected_pane = None;
+        self.selection_drag = None;
+        self.mouse_reporting = None;
+        self.reconcile_workspace_ui_state();
+        Ok(())
+    }
+
+    fn update_workspace(&mut self, attachment: SessionAttachment) -> Result<()> {
+        let panes = reconcile_pane_replicas(
+            std::mem::take(&mut self.panes),
+            &attachment.panes,
+            &self.ghostty_theme,
+        )?;
+        self.session = Some(attachment.session);
+        self.panes = panes;
+        let pane_ids = self.panes.keys().copied().collect::<HashSet<_>>();
+        self.sent_sizes
+            .retain(|pane_id, _| pane_ids.contains(pane_id));
+        self.pane_scrolls
+            .retain(|pane_id, _| pane_ids.contains(pane_id));
+        self.selected_pane = self
+            .selected_pane
+            .filter(|pane_id| pane_ids.contains(pane_id));
+        self.selection_drag = self
+            .selection_drag
+            .filter(|capture| pane_ids.contains(&capture.pane_id));
+        self.mouse_reporting = self
+            .mouse_reporting
+            .filter(|capture| pane_ids.contains(&capture.pane_id));
+        self.reconcile_workspace_ui_state();
+        Ok(())
+    }
+
+    fn reconcile_workspace_ui_state(&mut self) {
         let valid_agent_panes = self
             .session
             .as_ref()
@@ -604,7 +691,6 @@ impl MuxApp {
             })
             .collect::<HashMap<_, _>>();
         self.agent_panes = valid_agent_panes;
-        Ok(())
     }
 
     fn apply_server_event(&mut self, event: ServerEvent) -> Result<()> {
@@ -1946,7 +2032,9 @@ impl MuxApp {
     }
 
     fn pointer_down(&mut self, pane_id: PaneId, rect: layout::Rect, event: &gpui::MouseDownEvent) {
-        self.send_workspace(WorkspaceCommand::SetFocusedPane(pane_id));
+        if self.focused_pane_id() != Some(pane_id) {
+            self.send_workspace(WorkspaceCommand::SetFocusedPane(pane_id));
+        }
         let button = terminal_mouse_button(event.button);
         if !event.modifiers.shift
             && self.report_mouse_event(
@@ -1959,7 +2047,7 @@ impl MuxApp {
                 true,
             )
         {
-            self.mouse_reporting_pane = Some(pane_id);
+            self.mouse_reporting = Some(TerminalPointerCapture { pane_id, rect });
             self.selection_drag = None;
             return;
         }
@@ -1968,40 +2056,46 @@ impl MuxApp {
         }
     }
 
-    fn pointer_move(&mut self, pane_id: PaneId, rect: layout::Rect, event: &gpui::MouseMoveEvent) {
-        if self.mouse_reporting_pane == Some(pane_id)
-            && self.report_mouse_event(
-                pane_id,
-                rect,
+    fn pointer_move(&mut self, event: &gpui::MouseMoveEvent) -> bool {
+        if let Some(capture) = self.mouse_reporting {
+            let _ = self.report_mouse_event(
+                capture.pane_id,
+                capture.rect,
                 event.position,
                 TerminalMouseAction::Motion,
                 event.pressed_button.map(terminal_mouse_button),
                 event.modifiers,
                 event.pressed_button.is_some(),
-            )
-        {
-            return;
+            );
+            return true;
         }
-        self.drag_selection(pane_id, rect, event);
+        let Some(capture) = self.selection_drag else {
+            return false;
+        };
+        self.drag_selection(capture, event);
+        true
     }
 
-    fn pointer_up(&mut self, pane_id: PaneId, rect: layout::Rect, event: &gpui::MouseUpEvent) {
-        if self.mouse_reporting_pane == Some(pane_id) {
+    fn pointer_up(&mut self, event: &gpui::MouseUpEvent) -> bool {
+        if let Some(capture) = self.mouse_reporting.take() {
             let _ = self.report_mouse_event(
-                pane_id,
-                rect,
+                capture.pane_id,
+                capture.rect,
                 event.position,
                 TerminalMouseAction::Release,
                 Some(terminal_mouse_button(event.button)),
                 event.modifiers,
                 false,
             );
-            self.mouse_reporting_pane = None;
-            return;
+            return true;
         }
-        if event.button == gpui::MouseButton::Left {
-            self.end_selection(pane_id, rect, event);
+        if event.button == gpui::MouseButton::Left
+            && let Some(capture) = self.selection_drag.take()
+        {
+            self.end_selection(capture, event);
+            return true;
         }
+        false
     }
 
     fn begin_selection(
@@ -2010,7 +2104,6 @@ impl MuxApp {
         rect: layout::Rect,
         event: &gpui::MouseDownEvent,
     ) {
-        self.send_workspace(WorkspaceCommand::SetFocusedPane(pane_id));
         if self.selected_pane != Some(pane_id)
             && let Some(previous) = self.selected_pane.take()
             && let Some(pane) = self.panes.get_mut(&previous)
@@ -2025,32 +2118,32 @@ impl MuxApp {
         let Some(point) = pointer.point else {
             return;
         };
-        self.selection_drag = Some(pane_id);
         let time_ns = Instant::now()
             .duration_since(self.selection_clock_origin)
             .as_nanos()
             .min(u128::from(u64::MAX)) as u64;
-        let _ = self.apply_selection_gesture(
-            pane_id,
-            TerminalSelectionGestureEvent::Press {
-                point,
-                position: pointer.position,
-                time_ns,
-                repeat_distance: f64::from(self.metrics.cell_width),
-                repeat_interval_ns: 500_000_000,
-            },
-        );
+        if self
+            .apply_selection_gesture(
+                pane_id,
+                TerminalSelectionGestureEvent::Press {
+                    point,
+                    position: pointer.position,
+                    time_ns,
+                    repeat_distance: f64::from(self.metrics.cell_width),
+                    repeat_interval_ns: 500_000_000,
+                },
+            )
+            .is_ok()
+        {
+            self.selection_drag = Some(TerminalPointerCapture { pane_id, rect });
+        }
     }
 
-    fn drag_selection(
-        &mut self,
-        pane_id: PaneId,
-        rect: layout::Rect,
-        event: &gpui::MouseMoveEvent,
-    ) {
-        if self.selection_drag != Some(pane_id) || !event.dragging() {
+    fn drag_selection(&mut self, capture: TerminalPointerCapture, event: &gpui::MouseMoveEvent) {
+        if !event.dragging() {
             return;
         }
+        let TerminalPointerCapture { pane_id, rect } = capture;
         let Some(frame) = self.panes.get(&pane_id).map(|pane| Rc::clone(&pane.frame)) else {
             return;
         };
@@ -2066,17 +2159,14 @@ impl MuxApp {
         );
     }
 
-    fn end_selection(&mut self, pane_id: PaneId, rect: layout::Rect, event: &gpui::MouseUpEvent) {
-        if self.selection_drag != Some(pane_id) {
-            return;
-        }
+    fn end_selection(&mut self, capture: TerminalPointerCapture, event: &gpui::MouseUpEvent) {
+        let TerminalPointerCapture { pane_id, rect } = capture;
         let point = self.panes.get(&pane_id).and_then(|pane| {
             self.selection_pointer(rect, &pane.frame, event.position)
                 .point
         });
         let _ =
             self.apply_selection_gesture(pane_id, TerminalSelectionGestureEvent::Release { point });
-        self.selection_drag = None;
     }
 
     fn scroll_pane(
@@ -2507,12 +2597,64 @@ impl MuxApp {
             .into_any_element()
         }
     }
+
+    fn render_terminal_pane(
+        &self,
+        geometry: layout::PaneGeometry,
+        pane_count: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let pane = self.panes.get(&geometry.pane_id)?;
+        let pane_id = geometry.pane_id;
+        let rect = geometry.rect;
+        let focused = geometry.focused;
+        let pointer_app = cx.weak_entity();
+        let scroll_app = pointer_app.clone();
+        let mut surface = div()
+            .absolute()
+            .left(px(rect.x))
+            .top(px(rect.y))
+            .w(px(rect.width))
+            .h(px(rect.height))
+            .overflow_hidden()
+            .bg(rgb(SURFACE))
+            .on_any_mouse_down(move |event, window, cx| {
+                let _ = pointer_app.update(cx, |this, cx| {
+                    this.focus_handle.focus(window);
+                    this.pointer_down(pane_id, rect, event);
+                    cx.notify();
+                });
+                cx.stop_propagation();
+            })
+            .on_scroll_wheel(move |event, _, cx| {
+                let _ = scroll_app.update(cx, |this, cx| {
+                    if this.scroll_pane(pane_id, rect, event) {
+                        cx.notify();
+                    }
+                });
+                cx.stop_propagation();
+            })
+            .child(gpui_terminal::terminal_canvas(
+                Rc::clone(&pane.frame),
+                Rc::clone(&pane.render_cache),
+                self.terminal_font.clone(),
+                self.metrics,
+                focused,
+            ));
+        if focused && pane_count > 1 {
+            // A short "focus beam" is visible at a glance without boxing
+            // every pane or stealing terminal pixels with permanent borders.
+            surface = surface.child(pane_focus_beam(pane_id, self.motion));
+        }
+        Some(surface.into_any_element())
+    }
 }
 
 impl UserEvent {
     const fn label(&self) -> &'static str {
         match self {
             Self::Attached(_) => "attached",
+            Self::WorkspaceUpdated(_) => "workspace-updated",
             Self::Sessions(_) => "sessions",
             Self::Server(_) => "server",
             Self::Agents(_) => "agents",
@@ -2567,6 +2709,9 @@ impl Render for MuxApp {
         let geometry =
             self.sync_terminal_sizes(f32::from(viewport.width), f32::from(viewport.height));
         let pane_count = geometry.panes.len();
+        let move_app = cx.weak_entity();
+        let release_app = move_app.clone();
+        let release_out_app = move_app.clone();
         let mut root = div()
             .id("mux-root")
             .key_context("MuxTerminal")
@@ -2578,6 +2723,48 @@ impl Render for MuxApp {
             .on_action(cx.listener(Self::on_forward_terminal_backtab))
             .on_key_down(cx.listener(Self::handle_key_down))
             .on_key_up(cx.listener(Self::handle_key_up))
+            .on_mouse_move(move |event, _, cx| {
+                let handled = move_app
+                    .update(cx, |this, cx| {
+                        let handled = this.pointer_move(event);
+                        if handled {
+                            cx.notify();
+                        }
+                        handled
+                    })
+                    .unwrap_or(false);
+                if handled {
+                    cx.stop_propagation();
+                }
+            })
+            .capture_any_mouse_up(move |event, _, cx| {
+                let handled = release_app
+                    .update(cx, |this, cx| {
+                        let handled = this.pointer_up(event);
+                        if handled {
+                            cx.notify();
+                        }
+                        handled
+                    })
+                    .unwrap_or(false);
+                if handled {
+                    cx.stop_propagation();
+                }
+            })
+            .on_mouse_up_out(gpui::MouseButton::Left, move |event, _, cx| {
+                let handled = release_out_app
+                    .update(cx, |this, cx| {
+                        let handled = this.pointer_up(event);
+                        if handled {
+                            cx.notify();
+                        }
+                        handled
+                    })
+                    .unwrap_or(false);
+                if handled {
+                    cx.stop_propagation();
+                }
+            })
             .bg(rgb(SURFACE))
             .text_color(rgb(TEXT))
             .child(self.render_tabs(cx));
@@ -2590,65 +2777,9 @@ impl Render for MuxApp {
                 root = root.child(self.render_agent_pane(pane_id, rect, focused, window, cx));
                 continue;
             }
-            let Some(pane) = self.panes.get(&pane_id) else {
-                continue;
-            };
-            let pointer_app = cx.weak_entity();
-            let move_app = pointer_app.clone();
-            let release_app = pointer_app.clone();
-            let scroll_app = pointer_app.clone();
-            let rect = geometry.rect;
-            let focused = geometry.focused;
-            let mut surface = div()
-                .absolute()
-                .left(px(geometry.rect.x))
-                .top(px(geometry.rect.y))
-                .w(px(geometry.rect.width))
-                .h(px(geometry.rect.height))
-                .overflow_hidden()
-                .bg(rgb(SURFACE))
-                .on_any_mouse_down(move |event, window, cx| {
-                    let _ = pointer_app.update(cx, |this, cx| {
-                        this.focus_handle.focus(window);
-                        this.pointer_down(pane_id, rect, event);
-                        cx.notify();
-                    });
-                    cx.stop_propagation();
-                })
-                .on_mouse_move(move |event, _, cx| {
-                    let _ = move_app.update(cx, |this, cx| {
-                        this.pointer_move(pane_id, rect, event);
-                        cx.notify();
-                    });
-                })
-                .capture_any_mouse_up(move |event, _, cx| {
-                    let _ = release_app.update(cx, |this, cx| {
-                        this.pointer_up(pane_id, rect, event);
-                        cx.notify();
-                    });
-                    cx.stop_propagation();
-                })
-                .on_scroll_wheel(move |event, _, cx| {
-                    let _ = scroll_app.update(cx, |this, cx| {
-                        if this.scroll_pane(pane_id, rect, event) {
-                            cx.notify();
-                        }
-                    });
-                    cx.stop_propagation();
-                })
-                .child(gpui_terminal::terminal_canvas(
-                    Rc::clone(&pane.frame),
-                    Rc::clone(&pane.render_cache),
-                    self.terminal_font.clone(),
-                    self.metrics,
-                    focused,
-                ));
-            if focused && pane_count > 1 {
-                // A short "focus beam" is visible at a glance without boxing
-                // every pane or stealing terminal pixels with permanent borders.
-                surface = surface.child(pane_focus_beam(pane_id, self.motion));
+            if let Some(surface) = self.render_terminal_pane(geometry, pane_count, cx) {
+                root = root.child(surface);
             }
-            root = root.child(surface);
         }
 
         if self.mode != InputMode::Normal {
@@ -4923,16 +5054,21 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::rc::Rc;
 
-    use mux_terminal::{TerminalInteraction as _, TerminalRenderer as _, TerminalSize};
-    use mux_terminal_ghostty::GhosttyEngine;
+    use mux_protocol::PaneAttachment;
+    use mux_terminal::{
+        TerminalEngine as _, TerminalInteraction as _, TerminalRenderer as _, TerminalSelection,
+        TerminalSize,
+    };
+    use mux_terminal_ghostty::{GhosttyEngine, GhosttyTheme};
     use mux_workspace::{PaneId, Session};
 
     use super::{
         GridMetrics, PaneReplica, PaneScrollState, agent_composer_height, input_position_at,
-        layout, pane_needs_live_frame, terminal_frame_text, terminal_key_event,
-        terminal_sizes_for_geometry, terminal_tab_keystroke,
+        layout, pane_needs_live_frame, reconcile_pane_replicas, terminal_frame_text,
+        terminal_key_event, terminal_sizes_for_geometry, terminal_tab_keystroke,
     };
 
     #[test]
@@ -5044,6 +5180,55 @@ mod tests {
         assert!(!Rc::ptr_eq(&displayed, &pane.frame));
         assert!(!terminal_frame_text(&displayed).contains("one two"));
         assert!(terminal_frame_text(&pane.frame).contains("one two"));
+    }
+
+    #[test]
+    fn workspace_updates_preserve_gui_local_terminal_selection() {
+        let pane_id = PaneId::new();
+        let mut local_engine = GhosttyEngine::new(TerminalSize {
+            cols: 20,
+            rows: 4,
+            ..TerminalSize::default()
+        })
+        .expect("local terminal");
+        local_engine
+            .apply_output(1, b"hello world")
+            .expect("local output");
+        local_engine
+            .set_selection(Some(TerminalSelection {
+                anchor: mux_terminal::TerminalPoint { column: 0, row: 0 },
+                focus: mux_terminal::TerminalPoint { column: 4, row: 0 },
+                rectangular: false,
+            }))
+            .expect("local selection");
+        let local_frame = local_engine.render_frame().expect("local frame");
+        let local_replica = PaneReplica::new(local_engine, local_frame);
+        let displayed = Rc::clone(&local_replica.frame);
+
+        let daemon_engine = GhosttyEngine::new(TerminalSize {
+            cols: 20,
+            rows: 4,
+            ..TerminalSize::default()
+        })
+        .expect("daemon terminal");
+        let attachment = PaneAttachment {
+            pane_id,
+            terminal: daemon_engine.attachment().expect("daemon attachment"),
+            exit_status: None,
+        };
+        let reconciled = reconcile_pane_replicas(
+            HashMap::from([(pane_id, local_replica)]),
+            &[attachment],
+            &GhosttyTheme::default(),
+        )
+        .expect("reconcile workspace update");
+        let preserved = reconciled.get(&pane_id).expect("preserved pane");
+
+        assert!(Rc::ptr_eq(&displayed, &preserved.frame));
+        assert_eq!(
+            preserved.engine.selected_text().expect("selected text"),
+            Some("hello".to_owned())
+        );
     }
 
     #[test]
