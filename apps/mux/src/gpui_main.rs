@@ -43,7 +43,8 @@ use gpui_component::{
     Icon, IconName, InteractiveElementExt as _, Selectable as _, Sizable as _, StyledExt as _,
     Theme as ComponentTheme, ThemeMode, TitleBar, WindowExt as _,
     animation::cubic_bezier,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonVariant, ButtonVariants as _},
+    dialog::DialogButtonProps,
     h_flex,
     input::{Enter, Input, InputEvent, InputState, Position, Textarea, TextareaState},
     notification::Notification,
@@ -1349,38 +1350,63 @@ impl MuxApp {
         });
     }
 
-    #[allow(clippy::too_many_lines)]
     fn open_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.backend.send(CommandMessage::ListSessions);
         let app = cx.weak_entity();
+        let active_session_id = self.session.as_ref().map(|session| session.id);
         window.open_dialog(cx, move |dialog, _window, cx| {
             let create_app = app.clone();
-            let mut content = v_flex().gap_2().child(
-                Button::new("session-new")
-                    .label("＋ New session")
-                    .primary()
-                    .compact()
-                    .on_click(move |_, window, cx| {
-                        let _ = create_app.update(cx, |this, _| {
-                            if let Some(pane_id) = this.focused_pane_id() {
-                                let mut number = this.sessions.len() + 1;
-                                let name = loop {
-                                    let candidate = format!("session-{number}");
-                                    if !this
-                                        .sessions
-                                        .iter()
-                                        .any(|session| session.name == candidate)
-                                    {
-                                        break candidate;
+            let theme = BezelTheme::of(cx).clone();
+            let mut content = v_flex().gap_3().font_family(theme.font_sans.clone()).child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_start()
+                    .gap_2()
+                    .child(theme.row_tile(bezel_icons::CLOUD))
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .flex_1()
+                            .child(theme.row_title("Durable workspaces"))
+                            .child(theme.meta_line(vec![
+                                    div()
+                                        .child("Switch without stopping shells, panes, or agents.")
+                                        .into_any_element(),
+                                ])),
+                    )
+                    .child(
+                        Button::new("session-new")
+                            .icon(IconName::Plus)
+                            .label("New")
+                            .secondary()
+                            .small()
+                            .compact()
+                            .tooltip("Move the focused pane into a new session")
+                            .on_click(move |_, window, cx| {
+                                let _ = create_app.update(cx, |this, _| {
+                                    if let Some(pane_id) = this.focused_pane_id() {
+                                        let mut number = this.sessions.len() + 1;
+                                        let name = loop {
+                                            let candidate = format!("session-{number}");
+                                            if !this
+                                                .sessions
+                                                .iter()
+                                                .any(|session| session.name == candidate)
+                                            {
+                                                break candidate;
+                                            }
+                                            number += 1;
+                                        };
+                                        this.backend.send(CommandMessage::CreateSessionForPane {
+                                            name,
+                                            pane_id,
+                                        });
                                     }
-                                    number += 1;
-                                };
-                                this.backend
-                                    .send(CommandMessage::CreateSessionForPane { name, pane_id });
-                            }
-                        });
-                        window.close_dialog(cx);
-                    }),
+                                });
+                                window.close_dialog(cx);
+                            }),
+                    ),
             );
             let sessions = app
                 .upgrade()
@@ -1389,86 +1415,152 @@ impl MuxApp {
             if sessions.is_empty() {
                 content = content.child(
                     div()
+                        .w_full()
+                        .p_3()
+                        .rounded(px(BezelTheme::SURFACE_RADIUS))
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.surface_card)
                         .text_sm()
-                        .text_color(rgb(MUTED_TEXT))
+                        .text_color(theme.text_muted)
                         .child("Loading sessions…"),
                 );
+            } else {
+                let mut group = theme.group_box();
+                for (index, session) in sessions.iter().enumerate() {
+                    group = group.child(Self::session_switcher_row(
+                        &app,
+                        session,
+                        active_session_id,
+                        index == 0,
+                        &theme,
+                    ));
+                }
+                content = content.child(group);
             }
-            for session in sessions {
-                let attach_app = app.clone();
-                let rename_app = app.clone();
-                let kill_app = app.clone();
-                let session_id = session.id;
-                let session_name = session.name.clone();
-                let pane_count = session.pane_count;
-                let rename_session = session.clone();
-                let kill_name = session.name.clone();
-                content = content.child(
-                    h_flex()
-                        .gap_1()
-                        .child(
-                            Button::new(SharedString::from(format!("session-{session_id}")))
-                                .label(format!("{session_name}  ·  {pane_count} panes"))
-                                .ghost()
-                                .flex_1()
-                                .on_click(move |_, window, cx| {
-                                    let _ = attach_app.update(cx, |this, _| {
-                                        this.backend
-                                            .send(CommandMessage::AttachSession(session_id));
-                                    });
-                                    window.close_dialog(cx);
-                                }),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!("rename-session-{session_id}")))
-                                .icon(IconName::ALargeSmall)
-                                .ghost()
-                                .small()
-                                .tooltip("Rename session")
-                                .on_click(move |_, window, cx| {
-                                    open_rename_session_dialog(
-                                        rename_app.clone(),
-                                        &rename_session,
-                                        window,
-                                        cx,
-                                    );
-                                }),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!("kill-session-{session_id}")))
-                                .icon(IconName::Delete)
-                                .ghost()
-                                .small()
-                                .tooltip("Kill session")
-                                .on_click(move |_, window, cx| {
-                                    let confirm_app = kill_app.clone();
-                                    let kill_name = kill_name.clone();
-                                    window.open_alert_dialog(cx, move |dialog, _, _| {
-                                        let confirm_app = confirm_app.clone();
-                                        dialog
-                                            .title(format!("Kill {kill_name}?"))
-                                            .confirm()
-                                            .on_ok(move |_, window, cx| {
-                                                let _ = confirm_app.update(cx, |this, _| {
-                                                    this.backend.send(CommandMessage::KillSession(
-                                                        session_id,
-                                                    ));
-                                                });
-                                                window.close_all_dialogs(cx);
-                                                true
-                                            })
-                                            .child(
-                                                div().text_sm().child(
-                                                    "All processes in this session will exit.",
-                                                ),
-                                            )
-                                    });
-                                }),
-                        ),
-                );
-            }
-            dialog.title("Sessions").w(px(460.0)).child(content)
+            dialog.title("Sessions").w(px(560.0)).child(content)
         });
+    }
+
+    fn session_switcher_row(
+        app: &gpui::WeakEntity<MuxApp>,
+        session: &SessionSummary,
+        active_session_id: Option<SessionId>,
+        first: bool,
+        theme: &BezelTheme,
+    ) -> gpui::AnyElement {
+        let session_id = session.id;
+        let active = active_session_id == Some(session_id);
+        let badge = if active {
+            theme.badge_active("CURRENT").into_any_element()
+        } else {
+            theme.badge("DURABLE").into_any_element()
+        };
+        let actions = Self::session_switcher_actions(app, session, active);
+        theme
+            .card_row(first)
+            .child(theme.row_tile(bezel_icons::MONITOR))
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .flex_1()
+                    .child(
+                        h_flex()
+                            .min_w_0()
+                            .gap_2()
+                            .child(theme.row_title(session.name.clone()))
+                            .child(badge),
+                    )
+                    .child(theme.meta_line(vec![
+                        div()
+                            .child(format!(
+                                "{} · owned by muxd",
+                                format_session_pane_count(session.pane_count)
+                            ))
+                            .into_any_element(),
+                    ])),
+            )
+            .child(actions)
+            .into_any_element()
+    }
+
+    fn session_switcher_actions(
+        app: &gpui::WeakEntity<MuxApp>,
+        session: &SessionSummary,
+        active: bool,
+    ) -> gpui::AnyElement {
+        let attach_app = app.clone();
+        let rename_app = app.clone();
+        let kill_app = app.clone();
+        let session_id = session.id;
+        let rename_session = session.clone();
+        let kill_name = session.name.clone();
+        h_flex()
+            .flex_none()
+            .gap_1()
+            .when(!active, |actions| {
+                actions.child(
+                    Button::new(SharedString::from(format!("session-{session_id}")))
+                        .label("Open")
+                        .ghost()
+                        .small()
+                        .compact()
+                        .on_click(move |_, window, cx| {
+                            let _ = attach_app.update(cx, |this, _| {
+                                this.backend.send(CommandMessage::AttachSession(session_id));
+                            });
+                            window.close_dialog(cx);
+                        }),
+                )
+            })
+            .child(
+                Button::new(SharedString::from(format!("rename-session-{session_id}")))
+                    .icon(IconName::ALargeSmall)
+                    .label("Rename")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .on_click(move |_, window, cx| {
+                        open_rename_session_dialog(rename_app.clone(), &rename_session, window, cx);
+                    }),
+            )
+            .child(
+                Button::new(SharedString::from(format!("kill-session-{session_id}")))
+                    .icon(IconName::Delete)
+                    .label("End")
+                    .danger()
+                    .small()
+                    .compact()
+                    .on_click(move |_, window, cx| {
+                        let confirm_app = kill_app.clone();
+                        let kill_name = kill_name.clone();
+                        window.open_alert_dialog(cx, move |dialog, _, _| {
+                            let confirm_app = confirm_app.clone();
+                            dialog
+                                .title(format!("End {kill_name}?"))
+                                .button_props(
+                                    DialogButtonProps::default()
+                                        .ok_text("End session")
+                                        .ok_variant(ButtonVariant::Danger)
+                                        .cancel_text("Keep session")
+                                        .show_cancel(true),
+                                )
+                                .on_ok(move |_, window, cx| {
+                                    let _ = confirm_app.update(cx, |this, _| {
+                                        this.backend.send(CommandMessage::KillSession(session_id));
+                                    });
+                                    window.close_all_dialogs(cx);
+                                    true
+                                })
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .child("All processes in this durable session will exit."),
+                                )
+                        });
+                    }),
+            )
+            .into_any_element()
     }
 
     fn open_rename_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3310,6 +3402,10 @@ fn format_tab_pane_count(panes: usize) -> String {
         "{panes} {} in tab",
         if panes == 1 { "pane" } else { "panes" }
     )
+}
+
+fn format_session_pane_count(panes: usize) -> String {
+    format!("{panes} {}", if panes == 1 { "pane" } else { "panes" })
 }
 
 fn agent_status_badge(status: AgentSessionStatus, theme: &BezelTheme) -> impl IntoElement {
@@ -5425,9 +5521,10 @@ mod tests {
     use super::{
         GridMetrics, PaneOutputUpdate, PaneReplica, PaneScrollState, agent_composer_height,
         agent_pane_is_compact, agent_session_empty_copy, agent_surface_inset,
-        format_agent_context_usage, format_tab_pane_count, input_position_at, layout,
-        pane_needs_live_frame, reconcile_pane_replicas, terminal_frame_text, terminal_key_event,
-        terminal_sizes_for_geometry, terminal_tab_keystroke,
+        format_agent_context_usage, format_session_pane_count, format_tab_pane_count,
+        input_position_at, layout, pane_needs_live_frame, reconcile_pane_replicas,
+        terminal_frame_text, terminal_key_event, terminal_sizes_for_geometry,
+        terminal_tab_keystroke,
     };
     use mux_acp::AgentSessionStatus;
 
@@ -5472,6 +5569,12 @@ mod tests {
     fn agent_header_metadata_describes_tab_membership_without_implying_context_sharing() {
         assert_eq!(format_tab_pane_count(1), "1 pane in tab");
         assert_eq!(format_tab_pane_count(3), "3 panes in tab");
+    }
+
+    #[test]
+    fn session_switcher_uses_human_pane_counts() {
+        assert_eq!(format_session_pane_count(1), "1 pane");
+        assert_eq!(format_session_pane_count(4), "4 panes");
     }
 
     #[test]
