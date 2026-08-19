@@ -15,12 +15,12 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-// Bump this whenever a serialized IPC type changes incompatibly. The daemon
-// outlives the GUI, so an explicit epoch is what prevents a newly installed
-// client from interpreting an older daemon's postcard bytes as another type.
-/// Version 5 adds live pane working-directory discovery and file references
-/// for the native agent composer.
-pub const PROTOCOL_VERSION: u16 = 5;
+// Bump this whenever a serialized IPC type changes incompatibly or daemon
+// semantics require a coordinated upgrade. The daemon outlives the GUI, so
+// this epoch also prevents a newly installed client from retaining old
+// sequencing behavior indefinitely.
+/// Version 6 requires the hardened terminal snapshot/output ordering contract.
+pub const PROTOCOL_VERSION: u16 = 6;
 /// Request id zero is reserved for latency-sensitive messages whose successful
 /// completion does not require a response.
 pub const UNACKNOWLEDGED_REQUEST_ID: u64 = 0;

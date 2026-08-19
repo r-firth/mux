@@ -10,7 +10,7 @@ use mux_protocol::{
     RemoteError, Request, Response, ServerEvent, ServerMessage, SessionAttachment, SessionSelector,
     SessionSummary, UNACKNOWLEDGED_REQUEST_ID, read_frame, write_frame,
 };
-use mux_terminal::TerminalSize;
+use mux_terminal::{TerminalError, TerminalSize};
 use mux_workspace::{AgentSessionId, PaneId, SessionId, WorkspaceCommand};
 use thiserror::Error;
 use tokio::net::UnixStream;
@@ -126,12 +126,9 @@ impl Client {
     ) -> Result<SessionAttachment, ClientError> {
         match self.request(Request::AttachSession { session }).await? {
             Response::Attached(attachment) => {
+                let next_output_sequence = attachment_output_sequences(&attachment)?;
                 self.pending_events.clear();
-                self.next_output_sequence = attachment
-                    .panes
-                    .iter()
-                    .map(|pane| (pane.pane_id, pane.terminal.next_sequence))
-                    .collect();
+                self.next_output_sequence = next_output_sequence;
                 self.desynced_session = None;
                 Ok(attachment)
             }
@@ -180,13 +177,10 @@ impl Client {
         {
             Response::Attached(attachment) => {
                 let session_id = attachment.session.id;
+                let next_output_sequence = attachment_output_sequences(&attachment)?;
                 self.pending_events
                     .retain(|event| !attachment_supersedes_event(event, session_id));
-                self.next_output_sequence = attachment
-                    .panes
-                    .iter()
-                    .map(|pane| (pane.pane_id, pane.terminal.next_sequence))
-                    .collect();
+                self.next_output_sequence = next_output_sequence;
                 self.desynced_session = None;
                 Ok(attachment)
             }
@@ -478,6 +472,24 @@ fn attachment_supersedes_event(event: &ServerEvent, session_id: SessionId) -> bo
     }
 }
 
+fn attachment_output_sequences(
+    attachment: &SessionAttachment,
+) -> Result<HashMap<PaneId, u64>, ClientError> {
+    attachment
+        .panes
+        .iter()
+        .map(|pane| {
+            pane.terminal
+                .validate_sequence_contract()
+                .map_err(|source| ClientError::InvalidTerminalAttachment {
+                    pane_id: pane.pane_id,
+                    source,
+                })?;
+            Ok((pane.pane_id, pane.terminal.next_sequence))
+        })
+        .collect()
+}
+
 #[must_use]
 pub fn default_state_dir() -> Option<PathBuf> {
     state_dir_for("Mux")
@@ -529,6 +541,12 @@ pub enum ClientError {
         client: u16,
         server: u16,
         daemon_pid: u32,
+    },
+    #[error("daemon returned an invalid terminal attachment for pane {pane_id}: {source}")]
+    InvalidTerminalAttachment {
+        pane_id: PaneId,
+        #[source]
+        source: TerminalError,
     },
     #[error("daemon sent an unexpected response id: {0}")]
     UnexpectedResponseId(u64),
@@ -671,6 +689,22 @@ mod tests {
         assert!(preview.to_string_lossy().contains("MuxPreview"));
     }
 
+    #[test]
+    fn attachment_cursor_is_validated_before_client_filtering_uses_it() {
+        let pane_id = PaneId::new();
+        let session = Session::with_panes("invalid", &[pane_id]).expect("session");
+        let mut attachment = test_attachment(session, pane_id, 2);
+        attachment.panes[0].terminal.retained_from_sequence = 1;
+
+        assert!(matches!(
+            attachment_output_sequences(&attachment),
+            Err(ClientError::InvalidTerminalAttachment {
+                pane_id: invalid_pane,
+                source: TerminalError::InvalidAttachment(_),
+            }) if invalid_pane == pane_id
+        ));
+    }
+
     #[tokio::test]
     async fn incompatible_daemon_is_rejected_during_the_hello_exchange() {
         let directory = tempfile::tempdir().expect("temporary state directory");
@@ -691,9 +725,8 @@ mod tests {
             .expect("write server hello");
         });
 
-        let error = match Client::connect(&socket, "version-test").await {
-            Ok(_) => panic!("old daemon must not be decoded by the new client"),
-            Err(error) => error,
+        let Err(error) = Client::connect(&socket, "version-test").await else {
+            panic!("old daemon must not be decoded by the new client");
         };
         assert!(matches!(
             error,

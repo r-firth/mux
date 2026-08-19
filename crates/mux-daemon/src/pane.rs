@@ -123,9 +123,11 @@ impl PaneRuntime {
     }
 
     pub fn attachment(&self) -> Result<mux_protocol::PaneAttachment, PaneError> {
+        let terminal = self.terminal.lock().attachment()?;
+        terminal.validate_sequence_contract()?;
         Ok(mux_protocol::PaneAttachment {
             pane_id: self.id,
-            terminal: self.terminal.lock().attachment()?,
+            terminal,
             exit_status: *self.exit_status.lock(),
         })
     }
@@ -219,7 +221,6 @@ fn spawn_reader(
     thread::Builder::new()
         .name(format!("mux-pane-output-{pane_id}"))
         .spawn(move || {
-            let mut output_sequence = 1_u64;
             while let Ok(first) = output_receiver.recv() {
                 let mut bytes = first;
                 let mut disconnected = false;
@@ -234,14 +235,15 @@ fn spawn_reader(
                     }
                 }
 
-                let responses = {
+                let (output_sequence, responses) = {
                     let mut terminal = terminal.lock();
+                    let output_sequence = terminal.next_output_sequence();
                     if let Err(error) = terminal.apply_output(output_sequence, &bytes) {
                         error!(%session_id, %pane_id, %error, "terminal engine rejected pane output");
                         break;
                     }
                     match terminal.take_pty_responses() {
-                        Ok(responses) => responses,
+                        Ok(responses) => (output_sequence, responses),
                         Err(error) => {
                             error!(%session_id, %pane_id, %error, "terminal engine failed to generate PTY responses");
                             break;
@@ -265,7 +267,6 @@ fn spawn_reader(
                     sequence: output_sequence,
                     bytes,
                 });
-                output_sequence += 1;
                 if disconnected {
                     break;
                 }

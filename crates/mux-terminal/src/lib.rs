@@ -417,8 +417,74 @@ pub struct TerminalAttachment {
     pub next_sequence: u64,
 }
 
+impl TerminalAttachment {
+    /// Validate the redundant cursor metadata before a client uses it to
+    /// filter live output. Attachments deliberately carry enough information
+    /// to detect a torn or incompatible snapshot at the process boundary.
+    pub fn validate_sequence_contract(&self) -> Result<(), TerminalError> {
+        if self.next_sequence == 0 || self.retained_from_sequence == 0 {
+            return Err(TerminalError::InvalidAttachment(
+                "sequence numbers must start at one".to_owned(),
+            ));
+        }
+        if let Some(checkpoint) = &self.checkpoint {
+            if checkpoint.descriptor != self.descriptor {
+                return Err(TerminalError::InvalidAttachment(
+                    "checkpoint descriptor does not match the attachment descriptor".to_owned(),
+                ));
+            }
+            if checkpoint.next_sequence == 0 {
+                return Err(TerminalError::InvalidAttachment(
+                    "checkpoint sequence must start at one".to_owned(),
+                ));
+            }
+        }
+
+        let retained_from_sequence = self
+            .replay
+            .first()
+            .map_or(self.next_sequence, |chunk| chunk.sequence);
+        if self.retained_from_sequence != retained_from_sequence {
+            return Err(TerminalError::InvalidAttachment(format!(
+                "retained cursor is {}, but the retained output starts at {}",
+                self.retained_from_sequence, retained_from_sequence
+            )));
+        }
+
+        let mut expected = self
+            .checkpoint
+            .as_ref()
+            .map_or(retained_from_sequence, |checkpoint| {
+                checkpoint.next_sequence
+            });
+        for chunk in &self.replay {
+            if chunk.sequence != expected {
+                return Err(TerminalError::InvalidAttachment(format!(
+                    "replay is not contiguous: expected sequence {expected}, found {}",
+                    chunk.sequence
+                )));
+            }
+            expected = expected.checked_add(1).ok_or_else(|| {
+                TerminalError::InvalidAttachment("sequence cursor overflowed".to_owned())
+            })?;
+        }
+        if expected != self.next_sequence {
+            return Err(TerminalError::InvalidAttachment(format!(
+                "reconstructed cursor is {expected}, but the attachment advertises {}",
+                self.next_sequence
+            )));
+        }
+        Ok(())
+    }
+}
+
 pub trait TerminalEngine: Send {
     fn descriptor(&self) -> &EngineDescriptor;
+
+    /// The sequence number accepted by the next call to [`Self::apply_output`].
+    /// Producers and replicas must consult the engine instead of mirroring
+    /// this cursor in independently mutable state.
+    fn next_output_sequence(&self) -> u64;
 
     fn apply_output(&mut self, sequence: u64, bytes: &[u8]) -> Result<(), TerminalError>;
 
@@ -476,6 +542,10 @@ impl TerminalEngine for ReplayEngine {
         &self.descriptor
     }
 
+    fn next_output_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+
     fn apply_output(&mut self, sequence: u64, bytes: &[u8]) -> Result<(), TerminalError> {
         if sequence != self.next_sequence {
             return Err(TerminalError::OutOfOrder {
@@ -522,6 +592,8 @@ impl TerminalEngine for ReplayEngine {
 pub enum TerminalError {
     #[error("invalid terminal size {cols}x{rows}")]
     InvalidSize { cols: u16, rows: u16 },
+    #[error("invalid terminal attachment: {0}")]
+    InvalidAttachment(String),
     #[error("terminal output was out of order: expected {expected}, received {actual}")]
     OutOfOrder { expected: u64, actual: u64 },
     #[error("terminal engine failure: {0}")]
@@ -542,6 +614,9 @@ mod tests {
         assert_eq!(attachment.retained_from_sequence, 2);
         assert_eq!(attachment.next_sequence, 3);
         assert_eq!(attachment.replay[0].bytes, b"def");
+        attachment
+            .validate_sequence_contract()
+            .expect("valid replay contract");
     }
 
     #[test]
@@ -553,6 +628,61 @@ mod tests {
                 expected: 1,
                 actual: 2,
             }),
+        ));
+    }
+
+    #[test]
+    fn attachment_rejects_an_advertised_cursor_that_disagrees_with_its_checkpoint() {
+        let descriptor = EngineDescriptor {
+            name: "test".to_owned(),
+            revision: "1".to_owned(),
+            checkpoint_format: 1,
+        };
+        let attachment = TerminalAttachment {
+            descriptor: descriptor.clone(),
+            checkpoint: Some(TerminalCheckpoint {
+                descriptor,
+                next_sequence: 3,
+                payload: Vec::new(),
+            }),
+            replay: Vec::new(),
+            retained_from_sequence: 2,
+            next_sequence: 2,
+        };
+
+        assert!(matches!(
+            attachment.validate_sequence_contract(),
+            Err(TerminalError::InvalidAttachment(message))
+                if message.contains("reconstructed cursor is 3")
+        ));
+    }
+
+    #[test]
+    fn attachment_rejects_a_gap_in_replay() {
+        let descriptor = EngineDescriptor {
+            name: "test".to_owned(),
+            revision: "1".to_owned(),
+            checkpoint_format: 1,
+        };
+        let attachment = TerminalAttachment {
+            descriptor: descriptor.clone(),
+            checkpoint: Some(TerminalCheckpoint {
+                descriptor,
+                next_sequence: 2,
+                payload: Vec::new(),
+            }),
+            replay: vec![OutputChunk {
+                sequence: 3,
+                bytes: b"late".to_vec(),
+            }],
+            retained_from_sequence: 3,
+            next_sequence: 4,
+        };
+
+        assert!(matches!(
+            attachment.validate_sequence_contract(),
+            Err(TerminalError::InvalidAttachment(message))
+                if message.contains("expected sequence 2, found 3")
         ));
     }
 }

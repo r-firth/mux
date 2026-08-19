@@ -5,6 +5,8 @@ use mux_client::Client;
 use mux_protocol::{CreateSession, ServerEvent, SessionSelector, SpawnCommand};
 use mux_terminal::TerminalSize;
 use mux_workspace::PaneId;
+#[cfg(feature = "ghostty")]
+use mux_workspace::WorkspaceCommand;
 use tempfile::TempDir;
 
 struct ChildGuard(Child);
@@ -194,6 +196,109 @@ async fn sustained_terminal_output_is_not_backpressured() {
         "{} bytes in {event_count} events took {elapsed:?}",
         output.len()
     );
+}
+
+#[cfg(feature = "ghostty")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_churn_during_output_preserves_terminal_sequence() {
+    let state_dir = TempDir::new().expect("temporary state directory");
+    let socket_path = state_dir.path().join("daemon.sock");
+    let daemon = Command::new(env!("CARGO_BIN_EXE_muxd"))
+        .arg("--state-dir")
+        .arg(state_dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn daemon");
+    let _daemon = ChildGuard(daemon);
+
+    let mut client = connect_with_retry(&socket_path).await;
+    let summary = client
+        .create_session(CreateSession {
+            name: "workspace-output-race".to_owned(),
+            cwd: std::env::current_dir().expect("current directory"),
+            command: SpawnCommand {
+                program: "/bin/sh".into(),
+                args: vec![
+                    "-c".to_owned(),
+                    "i=0; while [ \"$i\" -lt 10000 ]; do printf 'line:%s\\n' \"$i\"; i=$((i + 1)); if [ $((i % 50)) -eq 0 ]; then sleep 0.005; fi; done; sleep 2"
+                        .to_owned(),
+                ],
+                environment: Vec::new(),
+            },
+            initial_panes: 1,
+            initial_size: TerminalSize::default(),
+        })
+        .await
+        .expect("create session");
+    client
+        .attach(SessionSelector::Id(summary.id))
+        .await
+        .expect("attach");
+
+    client
+        .workspace_command(summary.id, WorkspaceCommand::NewTab)
+        .await
+        .expect("create second busy tab");
+    await_workspace_change_without_resync(&mut client, summary.id).await;
+
+    for command in (0..80).map(|index| {
+        if index % 2 == 0 {
+            WorkspaceCommand::PreviousTab
+        } else {
+            WorkspaceCommand::NextTab
+        }
+    }) {
+        let attachment = client
+            .workspace_command(summary.id, command)
+            .await
+            .expect("switch tab while output is active");
+        assert_eq!(attachment.session.tabs.len(), 2);
+        assert!(
+            attachment
+                .panes
+                .iter()
+                .all(|pane| pane.terminal.validate_sequence_contract().is_ok()),
+            "workspace snapshot contained an inconsistent terminal cursor"
+        );
+        await_workspace_change_without_resync(&mut client, summary.id).await;
+
+        if let Ok(event) = tokio::time::timeout(Duration::from_millis(5), client.next_event()).await
+        {
+            assert_not_resync(&event.expect("event after workspace change"));
+        }
+    }
+}
+
+#[cfg(feature = "ghostty")]
+async fn await_workspace_change_without_resync(
+    client: &mut Client,
+    session_id: mux_workspace::SessionId,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = client.next_event().await.expect("workspace event");
+            let workspace_changed = matches!(
+                &event,
+                ServerEvent::WorkspaceChanged {
+                    session_id: event_session,
+                } if *event_session == session_id
+            );
+            assert_not_resync(&event);
+            if workspace_changed {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for workspace change");
+}
+
+#[cfg(feature = "ghostty")]
+fn assert_not_resync(event: &ServerEvent) {
+    if let ServerEvent::ResyncRequired { session_id } = event {
+        panic!("terminal output desynchronized for session {session_id}");
+    }
 }
 
 async fn connect_with_retry(socket_path: &std::path::Path) -> Client {

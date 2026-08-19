@@ -832,6 +832,10 @@ mod linked {
             &self.descriptor
         }
 
+        fn next_output_sequence(&self) -> u64 {
+            self.next_sequence
+        }
+
         fn apply_output(&mut self, sequence: u64, bytes: &[u8]) -> Result<(), TerminalError> {
             if sequence != self.next_sequence {
                 return Err(TerminalError::OutOfOrder {
