@@ -165,6 +165,13 @@ enum PaneOutputUpdate {
     Gap { expected: u64, actual: u64 },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentTabActivity {
+    Idle,
+    Working,
+    Attention,
+}
+
 impl PaneReplica {
     fn new(engine: GhosttyEngine, frame: RenderFrame) -> Self {
         Self {
@@ -2751,20 +2758,49 @@ impl MuxApp {
             for tab in &session.tabs {
                 let tab_id = tab.id;
                 let active = tab_id == session.active_tab;
-                bar = bar.child(
-                    Button::new(SharedString::from(format!("tab-{tab_id}")))
-                        .label(tab.title.clone())
-                        .ghost()
-                        .small()
-                        .compact()
-                        .selected(active)
-                        .on_click(cx.listener(move |this, _, _, _| {
-                            this.send_workspace(WorkspaceCommand::SelectTab(tab_id));
-                        })),
+                let activity = agent_tab_activity(
+                    self.agents
+                        .iter()
+                        .filter(|agent| agent.tab_id == Some(tab_id))
+                        .map(|agent| agent.status),
                 );
+                let title = tab.title.clone();
+                let mut button = Button::new(SharedString::from(format!("tab-{tab_id}")))
+                    .label(title.clone())
+                    .ghost()
+                    .small()
+                    .compact()
+                    .selected(active)
+                    .on_click(cx.listener(move |this, _, _, _| {
+                        this.send_workspace(WorkspaceCommand::SelectTab(tab_id));
+                    }));
+                if let Some(activity) = activity {
+                    button = button
+                        .tooltip(format!("{title} · {}", agent_tab_activity_label(activity)))
+                        .child(
+                            div()
+                                .flex_none()
+                                .size(px(5.0))
+                                .rounded_full()
+                                .bg(agent_tab_activity_tone(activity, &theme)),
+                        );
+                }
+                bar = bar.child(button);
             }
         }
         bar.child(
+            Button::new("tab-new")
+                .icon(IconName::Plus)
+                .label("New")
+                .ghost()
+                .xsmall()
+                .compact()
+                .tooltip("New terminal tab")
+                .on_click(cx.listener(|this, _, _, _| {
+                    this.send_workspace(WorkspaceCommand::NewTab);
+                })),
+        )
+        .child(
             div()
                 .id("window-drag-region")
                 .flex_1()
@@ -4889,6 +4925,47 @@ fn agent_status_tone(status: AgentSessionStatus, theme: &BezelTheme) -> Hsla {
     }
 }
 
+fn agent_tab_activity(
+    statuses: impl IntoIterator<Item = AgentSessionStatus>,
+) -> Option<AgentTabActivity> {
+    let mut activity = None;
+    for status in statuses {
+        let candidate = match status {
+            AgentSessionStatus::WaitingForAuthentication
+            | AgentSessionStatus::WaitingForPermission
+            | AgentSessionStatus::Failed => AgentTabActivity::Attention,
+            AgentSessionStatus::Starting
+            | AgentSessionStatus::Authenticating
+            | AgentSessionStatus::Working => AgentTabActivity::Working,
+            AgentSessionStatus::Idle => AgentTabActivity::Idle,
+            AgentSessionStatus::Closed => continue,
+        };
+        if candidate == AgentTabActivity::Attention {
+            return Some(candidate);
+        }
+        if candidate == AgentTabActivity::Working || activity.is_none() {
+            activity = Some(candidate);
+        }
+    }
+    activity
+}
+
+const fn agent_tab_activity_label(activity: AgentTabActivity) -> &'static str {
+    match activity {
+        AgentTabActivity::Idle => "agent ready",
+        AgentTabActivity::Working => "agent working",
+        AgentTabActivity::Attention => "agent needs attention",
+    }
+}
+
+fn agent_tab_activity_tone(activity: AgentTabActivity, theme: &BezelTheme) -> Hsla {
+    match activity {
+        AgentTabActivity::Idle => theme.success,
+        AgentTabActivity::Working => theme.accent,
+        AgentTabActivity::Attention => theme.warning,
+    }
+}
+
 fn interface_animation(duration_ms: u64) -> Animation {
     Animation::new(Duration::from_millis(duration_ms))
         .with_easing(cubic_bezier(0.16, 1.0, 0.3, 1.0))
@@ -5519,8 +5596,9 @@ mod tests {
     use mux_workspace::{PaneId, Session};
 
     use super::{
-        GridMetrics, PaneOutputUpdate, PaneReplica, PaneScrollState, agent_composer_height,
-        agent_pane_is_compact, agent_session_empty_copy, agent_surface_inset,
+        AgentTabActivity, GridMetrics, PaneOutputUpdate, PaneReplica, PaneScrollState,
+        agent_composer_height, agent_pane_is_compact, agent_session_empty_copy,
+        agent_surface_inset, agent_tab_activity, agent_tab_activity_label,
         format_agent_context_usage, format_session_pane_count, format_tab_pane_count,
         input_position_at, layout, pane_needs_live_frame, reconcile_pane_replicas,
         terminal_frame_text, terminal_key_event, terminal_sizes_for_geometry,
@@ -5575,6 +5653,28 @@ mod tests {
     fn session_switcher_uses_human_pane_counts() {
         assert_eq!(format_session_pane_count(1), "1 pane");
         assert_eq!(format_session_pane_count(4), "4 panes");
+    }
+
+    #[test]
+    fn tab_agent_activity_rolls_up_the_most_urgent_state() {
+        assert_eq!(agent_tab_activity([]), None);
+        assert_eq!(agent_tab_activity([AgentSessionStatus::Closed]), None);
+        assert_eq!(
+            agent_tab_activity([AgentSessionStatus::Idle, AgentSessionStatus::Working]),
+            Some(AgentTabActivity::Working)
+        );
+        assert_eq!(
+            agent_tab_activity([
+                AgentSessionStatus::Working,
+                AgentSessionStatus::WaitingForPermission,
+                AgentSessionStatus::Idle,
+            ]),
+            Some(AgentTabActivity::Attention)
+        );
+        assert_eq!(
+            agent_tab_activity_label(AgentTabActivity::Attention),
+            "agent needs attention"
+        );
     }
 
     #[test]
