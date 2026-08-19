@@ -278,13 +278,13 @@ mod linked {
     use std::ptr::{self, NonNull};
 
     use mux_terminal::{
-        CellStyle, CellWidth, CursorStyle, EngineDescriptor, RenderCell, RenderCursor, RenderDirty,
-        RenderFrame, RenderRow, Rgb, SemanticContent, TerminalAttachment, TerminalCheckpoint,
-        TerminalEngine, TerminalError, TerminalInteraction, TerminalKey, TerminalKeyAction,
-        TerminalKeyEvent, TerminalModifiers, TerminalMouseAction, TerminalMouseButton,
-        TerminalMouseEvent, TerminalRenderer, TerminalScrollState, TerminalSelection,
-        TerminalSelectionAutoscroll, TerminalSelectionGestureEvent, TerminalSelectionGestureStatus,
-        TerminalSize, TerminalViewportScroll,
+        CellStyle, CellWidth, CursorStyle, EngineDescriptor, KITTY_KEYBOARD_RESET_SEQUENCE,
+        RenderCell, RenderCursor, RenderDirty, RenderFrame, RenderRow, Rgb, SemanticContent,
+        TerminalAttachment, TerminalCheckpoint, TerminalEngine, TerminalError, TerminalInteraction,
+        TerminalKey, TerminalKeyAction, TerminalKeyEvent, TerminalModifiers, TerminalMouseAction,
+        TerminalMouseButton, TerminalMouseEvent, TerminalRenderer, TerminalScrollState,
+        TerminalSelection, TerminalSelectionAutoscroll, TerminalSelectionGestureEvent,
+        TerminalSelectionGestureStatus, TerminalSize, TerminalViewportScroll,
     };
     use thiserror::Error;
 
@@ -411,6 +411,10 @@ mod linked {
             palette_len: usize,
         ) -> i32;
         fn mux_ghostty_terminal_write(terminal: *mut c_void, bytes: *const u8, len: usize);
+        fn mux_ghostty_terminal_kitty_keyboard_flags(
+            terminal: *mut c_void,
+            out_flags: *mut u8,
+        ) -> i32;
         fn mux_ghostty_terminal_resize(
             terminal: *mut c_void,
             cols: u16,
@@ -907,6 +911,33 @@ mod linked {
             // SAFETY: clearing retains the collector allocation and invalidates no Rust borrow.
             unsafe { mux_ghostty_response_collector_clear(self.responses.as_ptr()) };
             Ok(response)
+        }
+
+        fn kitty_keyboard_flags(&self) -> Result<u8, TerminalError> {
+            let mut flags = 0_u8;
+            // SAFETY: the terminal and output pointer are valid for this
+            // synchronous read-only query.
+            let result = unsafe {
+                mux_ghostty_terminal_kitty_keyboard_flags(self.terminal.as_ptr(), &raw mut flags)
+            };
+            check(result).map_err(|error| TerminalError::Engine(error.to_string()))?;
+            Ok(flags)
+        }
+
+        fn reset_kitty_keyboard(&mut self) -> Result<(), TerminalError> {
+            // Setting the current progressive-enhancement flags to zero is
+            // intentionally out-of-band: the daemon mirrors these same bytes
+            // in the ordered output event consumed by GUI replicas.
+            // SAFETY: the terminal is owned and the static slice remains valid
+            // for this synchronous write.
+            unsafe {
+                mux_ghostty_terminal_write(
+                    self.terminal.as_ptr(),
+                    KITTY_KEYBOARD_RESET_SEQUENCE.as_ptr(),
+                    KITTY_KEYBOARD_RESET_SEQUENCE.len(),
+                );
+            }
+            Ok(())
         }
     }
 
@@ -2019,6 +2050,43 @@ mod linked {
                 engine
                     .encode_key(&release)
                     .expect("encode legacy key release")
+                    .is_empty()
+            );
+        }
+
+        #[test]
+        fn kitty_keyboard_reset_clears_stale_release_reporting_without_advancing_output() {
+            let mut engine = GhosttyEngine::new(TerminalSize::default()).expect("new terminal");
+            engine
+                .apply_output(1, b"\x1b[>3u")
+                .expect("enable Kitty release reporting");
+            assert_eq!(engine.kitty_keyboard_flags().expect("keyboard flags"), 3);
+
+            let release = TerminalKeyEvent {
+                action: TerminalKeyAction::Release,
+                key: TerminalKey::Letter('a'),
+                modifiers: TerminalModifiers::default(),
+                consumed_modifiers: TerminalModifiers::default(),
+                unshifted_codepoint: Some('a'),
+                text: None,
+                composing: false,
+            };
+            assert_eq!(
+                engine.encode_key(&release).expect("Kitty key release"),
+                b"\x1b[97;1:3u"
+            );
+            let next_sequence = engine.next_output_sequence();
+
+            engine
+                .reset_kitty_keyboard()
+                .expect("reset Kitty keyboard mode");
+
+            assert_eq!(engine.kitty_keyboard_flags().expect("reset flags"), 0);
+            assert_eq!(engine.next_output_sequence(), next_sequence);
+            assert!(
+                engine
+                    .encode_key(&release)
+                    .expect("legacy key release")
                     .is_empty()
             );
         }

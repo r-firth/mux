@@ -2,14 +2,17 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 #[cfg(feature = "ghostty")]
 use std::sync::OnceLock;
-use std::sync::mpsc::{RecvTimeoutError, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
 use std::thread;
 use std::time::Duration;
 
 use mux_protocol::{ProcessExit, ServerEvent, SpawnCommand};
 #[cfg(not(feature = "ghostty"))]
 use mux_terminal::ReplayEngine;
-use mux_terminal::{TerminalEngine, TerminalError, TerminalSize};
+use mux_terminal::{
+    KITTY_KEYBOARD_REPORT_EVENTS, KITTY_KEYBOARD_RESET_SEQUENCE, TerminalEngine, TerminalError,
+    TerminalSize,
+};
 #[cfg(feature = "ghostty")]
 use mux_terminal_ghostty::{GhosttyEngine, GhosttyTheme};
 use mux_workspace::{PaneId, SessionId};
@@ -24,9 +27,132 @@ const READ_BUFFER_SIZE: usize = 64 * 1024;
 const OUTPUT_BATCH_SIZE: usize = 64 * 1024;
 const OUTPUT_BATCH_IDLE: Duration = Duration::from_micros(500);
 
+#[derive(Debug)]
+struct ForegroundProcessTracker {
+    shell_process_id: Option<u32>,
+    child_was_foreground: bool,
+}
+
+impl ForegroundProcessTracker {
+    const fn new(shell_process_id: Option<u32>) -> Self {
+        Self {
+            shell_process_id,
+            child_was_foreground: false,
+        }
+    }
+
+    fn observe(&mut self, foreground_process_id: Option<u32>) -> bool {
+        let Some(shell_process_id) = self.shell_process_id else {
+            return false;
+        };
+        match foreground_process_id {
+            Some(process_id) if process_id == shell_process_id => {
+                std::mem::take(&mut self.child_was_foreground)
+            }
+            Some(_) => {
+                self.child_was_foreground = true;
+                false
+            }
+            None => false,
+        }
+    }
+}
+
+struct PaneOutputWorker {
+    session_id: SessionId,
+    pane_id: PaneId,
+    terminal: Arc<Mutex<Box<dyn TerminalEngine>>>,
+    response_writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    shell_process_id: Option<u32>,
+    events: broadcast::Sender<ServerEvent>,
+}
+
+impl PaneOutputWorker {
+    fn run(self, output_receiver: &Receiver<Vec<u8>>) {
+        let mut foreground = ForegroundProcessTracker::new(self.shell_process_id);
+        while let Ok(first) = output_receiver.recv() {
+            let (mut bytes, disconnected) = collect_output_batch(first, output_receiver);
+            let shell_regained = foreground.observe(foreground_process_id(&self.master));
+            let (output_sequence, responses, reset_keyboard) = match self
+                .apply_terminal_output(&bytes, shell_regained)
+            {
+                Ok(output) => output,
+                Err(error) => {
+                    error!(session_id = %self.session_id, pane_id = %self.pane_id, %error, "terminal engine failed to apply pane output");
+                    break;
+                }
+            };
+            if !responses.is_empty() && !self.write_responses(&responses) {
+                break;
+            }
+            if reset_keyboard {
+                warn!(
+                    session_id = %self.session_id,
+                    pane_id = %self.pane_id,
+                    "reset stale Kitty keyboard mode after the shell regained the terminal"
+                );
+                bytes.extend_from_slice(KITTY_KEYBOARD_RESET_SEQUENCE);
+            }
+            let _ = self.events.send(ServerEvent::PaneOutput {
+                session_id: self.session_id,
+                pane_id: self.pane_id,
+                sequence: output_sequence,
+                bytes,
+            });
+            if disconnected {
+                break;
+            }
+        }
+    }
+
+    fn apply_terminal_output(
+        &self,
+        bytes: &[u8],
+        shell_regained: bool,
+    ) -> Result<(u64, Vec<u8>, bool), TerminalError> {
+        let mut terminal = self.terminal.lock();
+        let output_sequence = terminal.next_output_sequence();
+        terminal.apply_output(output_sequence, bytes)?;
+        let reset_keyboard =
+            shell_regained && terminal.kitty_keyboard_flags()? & KITTY_KEYBOARD_REPORT_EVENTS != 0;
+        if reset_keyboard {
+            terminal.reset_kitty_keyboard()?;
+        }
+        let responses = terminal.take_pty_responses()?;
+        Ok((output_sequence, responses, reset_keyboard))
+    }
+
+    fn write_responses(&self, responses: &[u8]) -> bool {
+        let mut writer = self.response_writer.lock();
+        if writer
+            .write_all(responses)
+            .and_then(|()| writer.flush())
+            .is_ok()
+        {
+            true
+        } else {
+            warn!(session_id = %self.session_id, pane_id = %self.pane_id, "failed writing terminal response to PTY");
+            false
+        }
+    }
+}
+
+fn collect_output_batch(first: Vec<u8>, receiver: &Receiver<Vec<u8>>) -> (Vec<u8>, bool) {
+    let mut bytes = first;
+    while bytes.len() < OUTPUT_BATCH_SIZE {
+        match receiver.recv_timeout(OUTPUT_BATCH_IDLE) {
+            Ok(next) => bytes.extend_from_slice(&next),
+            Err(RecvTimeoutError::Timeout) => return (bytes, false),
+            Err(RecvTimeoutError::Disconnected) => return (bytes, true),
+        }
+    }
+    (bytes, false)
+}
+
 pub struct PaneRuntime {
     pub id: PaneId,
-    master: Mutex<Box<dyn MasterPty + Send>>,
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     terminal: Arc<Mutex<Box<dyn TerminalEngine>>>,
@@ -66,13 +192,18 @@ impl PaneRuntime {
         let terminal: Arc<Mutex<Box<dyn TerminalEngine>>> =
             Arc::new(Mutex::new(create_terminal_engine(size, replay_bytes)?));
         let exit_status = Arc::new(Mutex::new(None));
+        let master = Arc::new(Mutex::new(pair.master));
         spawn_reader(
-            session_id,
-            id,
             reader,
-            Arc::clone(&terminal),
-            Arc::clone(&writer),
-            events.clone(),
+            PaneOutputWorker {
+                session_id,
+                pane_id: id,
+                terminal: Arc::clone(&terminal),
+                response_writer: Arc::clone(&writer),
+                master: Arc::clone(&master),
+                shell_process_id: process_id,
+                events: events.clone(),
+            },
         )?;
 
         let exit_status_for_thread = Arc::clone(&exit_status);
@@ -99,7 +230,7 @@ impl PaneRuntime {
 
         Ok(Arc::new(Self {
             id,
-            master: Mutex::new(pair.master),
+            master,
             writer,
             killer: Mutex::new(killer),
             terminal,
@@ -186,16 +317,13 @@ fn create_terminal_engine(
 
 // Keep PTY reads, batching, terminal mutation, response writes, and event
 // publication together so their ordering remains explicit and single-owner.
-#[allow(clippy::cognitive_complexity)]
 fn spawn_reader(
-    session_id: SessionId,
-    pane_id: PaneId,
     mut reader: Box<dyn Read + Send>,
-    terminal: Arc<Mutex<Box<dyn TerminalEngine>>>,
-    response_writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    events: broadcast::Sender<ServerEvent>,
+    output: PaneOutputWorker,
 ) -> Result<(), PaneError> {
     let (output_sender, output_receiver) = sync_channel::<Vec<u8>>(256);
+    let session_id = output.session_id;
+    let pane_id = output.pane_id;
     thread::Builder::new()
         .name(format!("mux-pane-pty-read-{pane_id}"))
         .spawn(move || {
@@ -223,59 +351,21 @@ fn spawn_reader(
 
     thread::Builder::new()
         .name(format!("mux-pane-output-{pane_id}"))
-        .spawn(move || {
-            while let Ok(first) = output_receiver.recv() {
-                let mut bytes = first;
-                let mut disconnected = false;
-                while bytes.len() < OUTPUT_BATCH_SIZE {
-                    match output_receiver.recv_timeout(OUTPUT_BATCH_IDLE) {
-                        Ok(next) => bytes.extend_from_slice(&next),
-                        Err(RecvTimeoutError::Timeout) => break,
-                        Err(RecvTimeoutError::Disconnected) => {
-                            disconnected = true;
-                            break;
-                        }
-                    }
-                }
-
-                let (output_sequence, responses) = {
-                    let mut terminal = terminal.lock();
-                    let output_sequence = terminal.next_output_sequence();
-                    if let Err(error) = terminal.apply_output(output_sequence, &bytes) {
-                        error!(%session_id, %pane_id, %error, "terminal engine rejected pane output");
-                        break;
-                    }
-                    match terminal.take_pty_responses() {
-                        Ok(responses) => (output_sequence, responses),
-                        Err(error) => {
-                            error!(%session_id, %pane_id, %error, "terminal engine failed to generate PTY responses");
-                            break;
-                        }
-                    }
-                };
-                if !responses.is_empty() {
-                    let mut writer = response_writer.lock();
-                    if writer
-                        .write_all(&responses)
-                        .and_then(|()| writer.flush())
-                        .is_err()
-                    {
-                        warn!(%session_id, %pane_id, "failed writing terminal response to PTY");
-                        break;
-                    }
-                }
-                let _ = events.send(ServerEvent::PaneOutput {
-                    session_id,
-                    pane_id,
-                    sequence: output_sequence,
-                    bytes,
-                });
-                if disconnected {
-                    break;
-                }
-            }
-        })?;
+        .spawn(move || output.run(&output_receiver))?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn foreground_process_id(master: &Mutex<Box<dyn MasterPty + Send>>) -> Option<u32> {
+    master
+        .lock()
+        .process_group_leader()
+        .and_then(|process_id| u32::try_from(process_id).ok())
+}
+
+#[cfg(not(unix))]
+fn foreground_process_id(_: &Mutex<Box<dyn MasterPty + Send>>) -> Option<u32> {
+    None
 }
 
 fn to_pty_size(size: TerminalSize) -> PtySize {
@@ -297,4 +387,31 @@ pub enum PaneError {
     Io(#[from] std::io::Error),
     #[error("terminal engine failed: {0}")]
     Terminal(#[from] TerminalError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ForegroundProcessTracker;
+
+    #[test]
+    fn foreground_tracker_reports_a_child_to_shell_transition_once() {
+        let mut tracker = ForegroundProcessTracker::new(Some(41));
+
+        assert!(!tracker.observe(Some(41)));
+        assert!(!tracker.observe(Some(72)));
+        assert!(!tracker.observe(Some(72)));
+        assert!(tracker.observe(Some(41)));
+        assert!(!tracker.observe(Some(41)));
+    }
+
+    #[test]
+    fn foreground_tracker_ignores_unknown_and_untracked_process_groups() {
+        let mut unavailable = ForegroundProcessTracker::new(None);
+        assert!(!unavailable.observe(Some(72)));
+        assert!(!unavailable.observe(None));
+
+        let mut tracker = ForegroundProcessTracker::new(Some(41));
+        assert!(!tracker.observe(None));
+        assert!(!tracker.observe(Some(41)));
+    }
 }

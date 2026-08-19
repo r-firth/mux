@@ -90,6 +90,13 @@ queue. This prevents keystrokes immediately following a pane, tab, or session
 change from being routed to the formerly focused PTY. A GUI can also select an
 explicit state directory for isolated profiles and native integration tests.
 
+The pane runtime also observes the PTY foreground process group. If a child
+process enabled Kitty key-release reporting and exits without restoring it,
+the daemon clears that orphaned mode when the shell regains the terminal and
+publishes the reset in the same ordered output stream consumed by GUI replicas.
+This keeps durable checkpoints and every attached client in agreement while
+preserving enhanced keyboard input for live TUIs.
+
 The daemon also owns ACP processes. Closing the native agent surface only
 detaches that view; explicit `/end` closes the selected process. A new agent is
 started for a pane ID rather than a GUI-supplied guessed path, so the daemon can

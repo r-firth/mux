@@ -3,7 +3,11 @@ use std::time::Duration;
 
 use mux_client::Client;
 use mux_protocol::{CreateSession, ServerEvent, SessionSelector, SpawnCommand};
+#[cfg(all(feature = "ghostty", unix))]
+use mux_terminal::TerminalEngine as _;
 use mux_terminal::TerminalSize;
+#[cfg(all(feature = "ghostty", unix))]
+use mux_terminal_ghostty::GhosttyEngine;
 use mux_workspace::PaneId;
 #[cfg(feature = "ghostty")]
 use mux_workspace::WorkspaceCommand;
@@ -98,6 +102,70 @@ async fn two_ptys_survive_client_disconnect_and_reattach() {
         .await
         .expect("write second pane");
     await_output(&mut second_client, second_pane, b"reply:second-pane").await;
+}
+
+#[cfg(all(feature = "ghostty", unix))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shell_reentry_clears_a_childs_orphaned_kitty_keyboard_mode() {
+    let state_dir = TempDir::new().expect("temporary state directory");
+    let socket_path = state_dir.path().join("daemon.sock");
+    let daemon = Command::new(env!("CARGO_BIN_EXE_muxd"))
+        .arg("--state-dir")
+        .arg(state_dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn daemon");
+    let _daemon = ChildGuard(daemon);
+
+    let mut client = connect_with_retry(&socket_path).await;
+    let summary = client
+        .create_session(CreateSession {
+            name: "keyboard-recovery".to_owned(),
+            cwd: std::env::current_dir().expect("current directory"),
+            command: SpawnCommand {
+                program: "/bin/sh".into(),
+                args: vec!["-i".to_owned()],
+                environment: vec![("PS1".to_owned(), "MUX> ".to_owned())],
+            },
+            initial_panes: 1,
+            initial_size: TerminalSize::default(),
+        })
+        .await
+        .expect("create session");
+    let attachment = client
+        .attach(SessionSelector::Id(summary.id))
+        .await
+        .expect("attach");
+    let pane_id = attachment.panes[0].pane_id;
+
+    // The child opts into release reporting, stays foreground long enough for
+    // the daemon to observe it, and then dies without popping the mode.
+    client
+        .write_input(
+            pane_id,
+            b"sh -c 'printf \"\\033[>3u\"; sleep 0.2; kill -9 $$'\n".to_vec(),
+        )
+        .await
+        .expect("start crashing TUI stand-in");
+    await_output(&mut client, pane_id, b"\x1b[=0u").await;
+
+    let attachment = client
+        .attach(SessionSelector::Id(summary.id))
+        .await
+        .expect("reattach after recovery");
+    let checkpoint = attachment.panes[0]
+        .terminal
+        .checkpoint
+        .as_ref()
+        .expect("Ghostty checkpoint");
+    let restored = GhosttyEngine::restore(checkpoint).expect("restore recovered terminal");
+    assert_eq!(
+        restored
+            .kitty_keyboard_flags()
+            .expect("read recovered keyboard flags"),
+        0
+    );
 }
 
 #[cfg(feature = "ghostty")]

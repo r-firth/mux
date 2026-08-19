@@ -494,6 +494,16 @@ void mux_ghostty_terminal_write(
   ghostty_terminal_vt_write((GhosttyTerminal)terminal, bytes, len);
 }
 
+int32_t mux_ghostty_terminal_kitty_keyboard_flags(
+    mux_ghostty_terminal_t terminal,
+    uint8_t *out_flags) {
+  if (out_flags == NULL) return (int32_t)GHOSTTY_INVALID_VALUE;
+  return (int32_t)ghostty_terminal_get(
+      (GhosttyTerminal)terminal,
+      GHOSTTY_TERMINAL_DATA_KITTY_KEYBOARD_FLAGS,
+      out_flags);
+}
+
 int32_t mux_ghostty_terminal_resize(
     mux_ghostty_terminal_t terminal,
     uint16_t cols,

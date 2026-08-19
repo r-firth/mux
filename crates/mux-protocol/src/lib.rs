@@ -19,8 +19,9 @@ use tokio::task::JoinHandle;
 // semantics require a coordinated upgrade. The daemon outlives the GUI, so
 // this epoch also prevents a newly installed client from retaining old
 // sequencing behavior indefinitely.
-/// Version 6 requires the hardened terminal snapshot/output ordering contract.
-pub const PROTOCOL_VERSION: u16 = 6;
+/// Version 7 requires daemon-side recovery of orphaned terminal keyboard modes
+/// when the shell regains its PTY after a child process exits.
+pub const PROTOCOL_VERSION: u16 = 7;
 /// Request id zero is reserved for latency-sensitive messages whose successful
 /// completion does not require a response.
 pub const UNACKNOWLEDGED_REQUEST_ID: u64 = 0;

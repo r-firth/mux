@@ -8,6 +8,11 @@ use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Kitty progressive-keyboard flag requesting press/repeat/release event types.
+pub const KITTY_KEYBOARD_REPORT_EVENTS: u8 = 1 << 1;
+/// Pop one orphaned enhancement frame, then force legacy keyboard encoding.
+pub const KITTY_KEYBOARD_RESET_SEQUENCE: &[u8] = b"\x1b[<u\x1b[=0u";
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Rgb {
     pub r: u8,
@@ -496,6 +501,20 @@ pub trait TerminalEngine: Send {
     /// such as device-status and cursor-position query responses.
     fn take_pty_responses(&mut self) -> Result<Vec<u8>, TerminalError> {
         Ok(Vec::new())
+    }
+
+    /// Current Kitty keyboard-protocol enhancement flags.
+    ///
+    /// Engines without Kitty keyboard support remain in legacy mode.
+    fn kitty_keyboard_flags(&self) -> Result<u8, TerminalError> {
+        Ok(0)
+    }
+
+    /// Return the emulator to legacy keyboard encoding without advancing the
+    /// PTY output sequence. Callers must mirror the control sequence to every
+    /// render replica as part of the current ordered output event.
+    fn reset_kitty_keyboard(&mut self) -> Result<(), TerminalError> {
+        Ok(())
     }
 }
 

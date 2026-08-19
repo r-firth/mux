@@ -350,8 +350,10 @@ struct MuxApp {
     expanded_agent_items: HashSet<String>,
     agent_context: AgentContextMode,
     selected_pane: Option<PaneId>,
+    pending_focused_pane: Option<PaneId>,
     selection_drag: Option<TerminalPointerCapture>,
     mouse_reporting: Option<TerminalPointerCapture>,
+    terminal_key_presses: HashMap<String, PaneId>,
     terminal_resync_pending: Option<SessionId>,
     selection_clock_origin: Instant,
     keymap: Keymap,
@@ -478,8 +480,10 @@ impl MuxApp {
             expanded_agent_items: HashSet::new(),
             agent_context: AgentContextMode::Tab,
             selected_pane: None,
+            pending_focused_pane: None,
             selection_drag: None,
             mouse_reporting: None,
+            terminal_key_presses: HashMap::new(),
             terminal_resync_pending: None,
             selection_clock_origin: Instant::now(),
             keymap: Keymap::zellij_default(),
@@ -736,8 +740,10 @@ impl MuxApp {
         self.pane_scrolls.clear();
         self.panes = panes;
         self.selected_pane = None;
+        self.pending_focused_pane = None;
         self.selection_drag = None;
         self.mouse_reporting = None;
+        self.terminal_key_presses.clear();
         self.reconcile_workspace_ui_state();
         Ok(())
     }
@@ -758,12 +764,20 @@ impl MuxApp {
         self.selected_pane = self
             .selected_pane
             .filter(|pane_id| pane_ids.contains(pane_id));
+        self.pending_focused_pane = self
+            .pending_focused_pane
+            .filter(|pane_id| pane_ids.contains(pane_id));
+        if self.pending_focused_pane == self.focused_pane_id() {
+            self.pending_focused_pane = None;
+        }
         self.selection_drag = self
             .selection_drag
             .filter(|capture| pane_ids.contains(&capture.pane_id));
         self.mouse_reporting = self
             .mouse_reporting
             .filter(|capture| pane_ids.contains(&capture.pane_id));
+        self.terminal_key_presses
+            .retain(|_, pane_id| pane_ids.contains(pane_id));
         self.reconcile_workspace_ui_state();
         Ok(())
     }
@@ -835,6 +849,10 @@ impl MuxApp {
             .as_ref()?
             .active_tab()
             .map(|tab| tab.focused_pane)
+    }
+
+    fn terminal_input_pane_id(&self) -> Option<PaneId> {
+        terminal_input_pane(self.pending_focused_pane, self.focused_pane_id())
     }
 
     fn active_tab_id(&self) -> Option<TabId> {
@@ -1104,6 +1122,14 @@ impl MuxApp {
         }
     }
 
+    fn request_pane_focus(&mut self, pane_id: PaneId) {
+        if self.terminal_input_pane_id() == Some(pane_id) {
+            return;
+        }
+        self.pending_focused_pane = Some(pane_id);
+        self.send_workspace(WorkspaceCommand::SetFocusedPane(pane_id));
+    }
+
     fn write_focused(&self, bytes: Vec<u8>) {
         if !bytes.is_empty() {
             self.backend.send(CommandMessage::WriteFocused { bytes });
@@ -1116,11 +1142,16 @@ impl MuxApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !event.is_held {
+            // A fresh press supersedes any release ownership left behind when
+            // the window lost focus before GPUI delivered the prior key-up.
+            self.terminal_key_presses.remove(&event.keystroke.key);
+        }
         if window.has_active_dialog(cx) || window.has_active_sheet(cx) {
             cx.propagate();
             return;
         }
-        if self.active_agent_pane() == self.focused_pane_id() {
+        if self.active_agent_pane() == self.terminal_input_pane_id() {
             // The focused pane is currently a native agent surface. Its input
             // and modal-key handlers own this event; never leak it through to
             // the live terminal process hidden behind the surface.
@@ -1129,7 +1160,7 @@ impl MuxApp {
         }
 
         let Some(chord) = key_chord(&event.keystroke) else {
-            self.send_terminal_key(&event.keystroke, false, event.is_held, window.capslock().on);
+            self.send_terminal_key_down(&event.keystroke, event.is_held, window.capslock().on);
             cx.stop_propagation();
             return;
         };
@@ -1137,32 +1168,26 @@ impl MuxApp {
             self.perform_action(action, window, cx);
             cx.stop_propagation();
         } else {
-            self.send_terminal_key(&event.keystroke, false, event.is_held, window.capslock().on);
+            self.send_terminal_key_down(&event.keystroke, event.is_held, window.capslock().on);
             cx.stop_propagation();
         }
     }
 
     fn handle_key_up(&mut self, event: &KeyUpEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if window.has_active_dialog(cx) || window.has_active_sheet(cx) {
+        let Some(pane_id) =
+            take_terminal_key_release(&mut self.terminal_key_presses, &event.keystroke.key)
+        else {
+            // The corresponding key-down belonged to Mux, a dialog, or a
+            // native agent surface. Never invent a terminal release for it.
             cx.propagate();
             return;
-        }
-        if self.active_agent_pane() == self.focused_pane_id() {
-            cx.propagate();
-            return;
-        }
-        self.send_terminal_key(&event.keystroke, true, false, window.capslock().on);
+        };
+        self.send_terminal_key_to(pane_id, &event.keystroke, true, false, window.capslock().on);
         cx.stop_propagation();
     }
 
-    fn send_terminal_key(
-        &mut self,
-        keystroke: &gpui::Keystroke,
-        release: bool,
-        held: bool,
-        caps_lock: bool,
-    ) {
-        if !release && keystroke.modifiers.platform && keystroke.key == "c" {
+    fn send_terminal_key_down(&mut self, keystroke: &gpui::Keystroke, held: bool, caps_lock: bool) {
+        if keystroke.modifiers.platform && keystroke.key == "c" {
             let selected = self.selected_pane.or_else(|| self.focused_pane_id());
             if let Some(text) = selected
                 .and_then(|pane_id| self.panes.get(&pane_id))
@@ -1173,10 +1198,10 @@ impl MuxApp {
             }
             return;
         }
-        if !release && keystroke.modifiers.platform && keystroke.key == "v" {
+        if keystroke.modifiers.platform && keystroke.key == "v" {
             if let Some(clipboard) = &mut self.clipboard
                 && let Ok(text) = clipboard.get_text()
-                && let Some(pane_id) = self.focused_pane_id()
+                && let Some(pane_id) = self.terminal_input_pane_id()
                 && let Some(pane) = self.panes.get(&pane_id)
                 && let Ok(bytes) = pane.engine.encode_paste(&text)
             {
@@ -1185,25 +1210,54 @@ impl MuxApp {
             return;
         }
 
-        let Some(pane_id) = self.focused_pane_id() else {
+        let pane_id = terminal_key_down_target(
+            &self.terminal_key_presses,
+            &keystroke.key,
+            held,
+            self.terminal_input_pane_id(),
+        );
+        let Some(pane_id) = pane_id else {
             return;
         };
+        if self.send_terminal_key_to(pane_id, keystroke, false, held, caps_lock) && !held {
+            self.terminal_key_presses
+                .insert(keystroke.key.clone(), pane_id);
+        }
+    }
+
+    fn send_terminal_key_to(
+        &self,
+        pane_id: PaneId,
+        keystroke: &gpui::Keystroke,
+        release: bool,
+        held: bool,
+        caps_lock: bool,
+    ) -> bool {
         let Some(pane) = self.panes.get(&pane_id) else {
-            return;
+            return false;
         };
         let terminal_event = terminal_key_event(keystroke, release, held, caps_lock);
         match pane.engine.encode_key(&terminal_event) {
-            Ok(bytes) => self.write_focused(bytes),
-            Err(error) => error!(%error, "encode terminal key"),
+            Ok(bytes) => {
+                if !bytes.is_empty() {
+                    self.backend.send(CommandMessage::Write { pane_id, bytes });
+                }
+                true
+            }
+            Err(error) => {
+                error!(%error, "encode terminal key");
+                false
+            }
         }
     }
 
     fn forward_terminal_tab(&mut self, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active_agent_pane() == self.focused_pane_id() {
+        if self.active_agent_pane() == self.terminal_input_pane_id() {
             return;
         }
         let keystroke = terminal_tab_keystroke(shift);
-        self.send_terminal_key(&keystroke, false, false, window.capslock().on);
+        self.terminal_key_presses.remove(&keystroke.key);
+        self.send_terminal_key_down(&keystroke, false, window.capslock().on);
         cx.stop_propagation();
     }
 
@@ -2249,9 +2303,7 @@ impl MuxApp {
     }
 
     fn pointer_down(&mut self, pane_id: PaneId, rect: layout::Rect, event: &gpui::MouseDownEvent) {
-        if self.focused_pane_id() != Some(pane_id) {
-            self.send_workspace(WorkspaceCommand::SetFocusedPane(pane_id));
-        }
+        self.request_pane_focus(pane_id);
         let button = terminal_mouse_button(event.button);
         if !event.modifiers.shift
             && self.report_mouse_event(
@@ -2640,7 +2692,7 @@ impl MuxApp {
             .when(!focused, move |body| {
                 body.on_any_mouse_down(move |_, window, cx| {
                     let _ = focus_app.update(cx, |this, _cx| {
-                        this.send_workspace(WorkspaceCommand::SetFocusedPane(pane_id));
+                        this.request_pane_focus(pane_id);
                         this.focus_agent_composer(window);
                     });
                 })
@@ -5094,6 +5146,27 @@ fn key_chord(keystroke: &gpui::Keystroke) -> Option<KeyChord> {
     })
 }
 
+fn terminal_input_pane(pending: Option<PaneId>, focused: Option<PaneId>) -> Option<PaneId> {
+    pending.or(focused)
+}
+
+fn terminal_key_down_target(
+    presses: &HashMap<String, PaneId>,
+    key: &str,
+    held: bool,
+    focused: Option<PaneId>,
+) -> Option<PaneId> {
+    if held {
+        presses.get(key).copied()
+    } else {
+        focused
+    }
+}
+
+fn take_terminal_key_release(presses: &mut HashMap<String, PaneId>, key: &str) -> Option<PaneId> {
+    presses.remove(key)
+}
+
 fn mux_modifiers(modifiers: gpui::Modifiers) -> Modifiers {
     let mut result = Modifiers::EMPTY;
     if modifiers.control {
@@ -5601,7 +5674,8 @@ mod tests {
         agent_surface_inset, agent_tab_activity, agent_tab_activity_label,
         format_agent_context_usage, format_session_pane_count, format_tab_pane_count,
         input_position_at, layout, pane_needs_live_frame, reconcile_pane_replicas,
-        terminal_frame_text, terminal_key_event, terminal_sizes_for_geometry,
+        take_terminal_key_release, terminal_frame_text, terminal_input_pane,
+        terminal_key_down_target, terminal_key_event, terminal_sizes_for_geometry,
         terminal_tab_keystroke,
     };
     use mux_acp::AgentSessionStatus;
@@ -5701,6 +5775,44 @@ mod tests {
             engine.encode_key(&backtab).expect("encode Backtab"),
             b"\x1b[Z",
         );
+    }
+
+    #[test]
+    fn terminal_releases_return_to_the_pane_that_owned_the_press() {
+        let original = PaneId::new();
+        let newly_focused = PaneId::new();
+        let mut presses = HashMap::from([("a".to_owned(), original)]);
+
+        assert_eq!(
+            terminal_key_down_target(&presses, "a", true, Some(newly_focused)),
+            Some(original),
+        );
+        assert_eq!(take_terminal_key_release(&mut presses, "a"), Some(original));
+        assert_eq!(take_terminal_key_release(&mut presses, "a"), None);
+    }
+
+    #[test]
+    fn unmatched_mux_key_releases_never_acquire_a_terminal_target() {
+        let mut presses = HashMap::new();
+        let focused = PaneId::new();
+
+        assert_eq!(
+            terminal_key_down_target(&presses, "a", true, Some(focused)),
+            None
+        );
+        assert_eq!(take_terminal_key_release(&mut presses, "a"), None);
+    }
+
+    #[test]
+    fn a_clicked_pane_owns_input_while_its_focus_update_is_in_flight() {
+        let focused = PaneId::new();
+        let clicked = PaneId::new();
+
+        assert_eq!(
+            terminal_input_pane(Some(clicked), Some(focused)),
+            Some(clicked)
+        );
+        assert_eq!(terminal_input_pane(None, Some(focused)), Some(focused));
     }
 
     #[cfg(target_os = "macos")]
