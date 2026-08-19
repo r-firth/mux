@@ -28,7 +28,7 @@ use bezel::{
     theme::{self as bezel_theme, Appearance as BezelAppearance, Theme as BezelTheme},
     ui::{
         self as bezel_ui, icons as bezel_icons,
-        widgets::{self as bezel_widgets, Status as _},
+        widgets::{self as bezel_widgets, Content as _, Scaffolding as _, Status as _},
     },
 };
 use gpui::prelude::FluentBuilder as _;
@@ -40,8 +40,8 @@ use gpui::{
     div, px, rgb, size,
 };
 use gpui_component::{
-    Disableable as _, Icon, IconName, InteractiveElementExt as _, Selectable as _, Sizable as _,
-    StyledExt as _, Theme as ComponentTheme, ThemeMode, TitleBar, WindowExt as _,
+    Icon, IconName, InteractiveElementExt as _, Selectable as _, Sizable as _, StyledExt as _,
+    Theme as ComponentTheme, ThemeMode, TitleBar, WindowExt as _,
     animation::cubic_bezier,
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -79,6 +79,7 @@ const WINDOW_HEIGHT: f32 = 720.0;
 const SURFACE: u32 = 0x0011_131a;
 const MUTED_TEXT: u32 = 0x008c_96a8;
 const SIGNAL: u32 = 0x005e_b6e8;
+const HEADER_ACTIONS_WIDTH: f32 = 142.0;
 const EMBEDDED_TERMINAL_FONT: &str = "JetBrainsMono Nerd Font Mono";
 const INITIAL_USER_EVENT_BATCH_CAPACITY: usize = 8;
 const MAX_USER_EVENT_BATCH: usize = 256;
@@ -2439,7 +2440,8 @@ impl MuxApp {
         let completion_menu = self.agent_completion_menu.clone();
         let completion_open = completion_menu.is_some();
         let composer_value = self.agent_input.read(cx).value();
-        let composer_bottom = agent_composer_height(composer_value.as_ref(), rect.width);
+        let composer_width = rect.width.min(760.0);
+        let composer_bottom = agent_composer_height(composer_value.as_ref(), composer_width);
         let composer_ready =
             !composer_value.trim().is_empty() && self.pending_agent_prompt.is_none();
         let agent = active_agent_id.and_then(|id| self.agents.iter().find(|agent| agent.id == id));
@@ -2544,43 +2546,15 @@ impl MuxApp {
                     });
                 })
             })
-            .child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .flex_none()
-                    .h(px(34.0))
-                    .px_3()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .bg(theme.glass())
-                    .child(agent_pane_title(agent, &theme))
-                    .child(
-                        div()
-                            .flex_none()
-                            .max_w(px(120.0))
-                            .truncate()
-                            .text_xs()
-                            .text_color(theme.text_faint)
-                            .child(if other_panes == 0 {
-                                "⌃A close".to_owned()
-                            } else {
-                                format!("{other_panes} context panes · ⌃A")
-                            }),
-                    ),
-            );
+            .child(agent_pane_header(
+                &app,
+                pane_id,
+                agent,
+                other_panes + 1,
+                &theme,
+            ));
         if let Some(picker) = picker {
-            body = body.child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .flex_none()
-                    .overflow_hidden()
-                    .px_3()
-                    .pt_2()
-                    .child(picker),
-            );
+            body = body.child(picker);
         }
         if let Some(agent) = agent {
             body = body.child(agent_timeline(
@@ -2601,11 +2575,18 @@ impl MuxApp {
         } else if show_help {
             body = body.child(agent_help_surface(None, &theme));
         } else {
-            body = body.child(agent_empty_state(self, &theme));
+            body = body.child(agent_empty_state(
+                self,
+                other_panes + 1,
+                agent_pane_is_compact(rect.width),
+                &theme,
+            ));
         }
         body = body.child(
             div()
                 .w_full()
+                .max_w(px(760.0))
+                .mx_auto()
                 .min_w_0()
                 .flex_none()
                 .overflow_hidden()
@@ -2625,6 +2606,7 @@ impl MuxApp {
                 &app,
                 menu,
                 composer_bottom,
+                rect.width,
                 self.motion,
                 &theme,
             ));
@@ -2704,7 +2686,7 @@ impl MuxApp {
                     window.zoom_window();
                 }),
         )
-        .child(div().w(px(52.0)).h_full())
+        .child(div().w(px(HEADER_ACTIONS_WIDTH)).h_full())
     }
 
     fn render_mode_bar(&self, theme: &BezelTheme) -> gpui::AnyElement {
@@ -2958,7 +2940,7 @@ impl Render for MuxApp {
             .agents_for_active_tab()
             .filter(|agent| agent.status != AgentSessionStatus::Closed)
             .count();
-        root = root.child(header_actions(cx.weak_entity(), active_agents, &theme));
+        root = root.child(header_actions(&cx.weak_entity(), active_agents));
         root
     }
 }
@@ -3004,60 +2986,42 @@ impl Render for MuxLayerHost {
     }
 }
 
-fn header_actions(
-    app: gpui::WeakEntity<MuxApp>,
-    active_agents: usize,
-    theme: &BezelTheme,
-) -> impl IntoElement {
+fn header_actions(app: &gpui::WeakEntity<MuxApp>, active_agents: usize) -> impl IntoElement {
+    let agents_app = app.clone();
     let settings_app = app.clone();
+    let agents_label = if active_agents == 0 {
+        "Agents".to_owned()
+    } else {
+        format!("Agents {active_agents}")
+    };
     h_flex()
         .absolute()
         .top(px(2.0))
         .right(px(4.0))
         .gap_1()
         .child(
-            div()
-                .id("open-agents")
-                .relative()
-                .size(px(24.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(BezelTheme::CONTROL_RADIUS))
-                .text_color(theme.text_muted)
-                .hover(|style| style.bg(theme.glass_hover()).text_color(theme.text))
-                .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-                    cx.stop_propagation();
-                    let _ = app.update(cx, |this, cx| this.toggle_agents(window, cx));
-                })
-                .child(bezel_icons::icon(bezel_icons::CHAT_ROUND_LINE).size(px(16.0)))
-                .when(active_agents > 0, |button| {
-                    button.child(
-                        div()
-                            .absolute()
-                            .top(px(3.0))
-                            .right(px(3.0))
-                            .size(px(4.0))
-                            .rounded_full()
-                            .bg(theme.accent),
-                    )
+            Button::new("open-agents")
+                .icon(IconName::Bot)
+                .label(agents_label)
+                .ghost()
+                .xsmall()
+                .compact()
+                .tooltip("Open agent workspace · ⌃A")
+                .on_click(move |_, window, cx| {
+                    let _ = agents_app.update(cx, |this, cx| this.toggle_agents(window, cx));
                 }),
         )
         .child(
-            div()
-                .id("open-settings")
-                .size(px(24.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(BezelTheme::CONTROL_RADIUS))
-                .text_color(theme.text_muted)
-                .hover(|style| style.bg(theme.glass_hover()).text_color(theme.text))
-                .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-                    cx.stop_propagation();
+            Button::new("open-settings")
+                .icon(IconName::Settings2)
+                .label("Settings")
+                .ghost()
+                .xsmall()
+                .compact()
+                .tooltip("Open Mux settings")
+                .on_click(move |_, window, cx| {
                     let _ = settings_app.update(cx, |this, cx| this.open_settings(window, cx));
-                })
-                .child(bezel_icons::icon(bezel_icons::TUNING).size(px(16.0))),
+                }),
         )
 }
 
@@ -3233,170 +3197,233 @@ fn agent_session_picker(
 ) -> impl IntoElement {
     let agents = this.agents_for_active_tab().collect::<Vec<_>>();
     let selected_id = this.active_agent().map(|agent| agent.id);
-    let selected_index = selected_id
-        .and_then(|selected| agents.iter().position(|agent| agent.id == selected))
-        .unwrap_or(agents.len().saturating_sub(1));
-    let previous = selected_index
-        .checked_sub(1)
-        .and_then(|index| agents.get(index))
-        .map(|agent| agent.id);
-    let next = agents.get(selected_index + 1).map(|agent| agent.id);
-    let label = agent_session_picker_label(&agents, selected_index);
-    let previous_app = app.clone();
-    let next_app = app.clone();
     let new_app = app.clone();
-    h_flex()
+    let mut rail = h_flex()
         .w_full()
         .min_w_0()
-        .h(px(28.0))
+        .flex_none()
+        .flex_wrap()
         .gap_1()
-        .pb_1()
-        .child(
-            Button::new("agent-session-previous")
-                .icon(IconName::ChevronLeft)
-                .ghost()
-                .xsmall()
-                .compact()
-                .disabled(previous.is_none())
-                .tooltip("Previous agent session · ⌥←")
-                .on_click(move |_, window, cx| {
-                    let Some(session_id) = previous else {
-                        return;
-                    };
-                    let _ = previous_app.update(cx, |this, cx| {
-                        this.select_active_tab_agent(Some(session_id));
-                        this.follow_active_agent_tail();
-                        cx.notify();
-                    });
-                    window.refresh();
-                }),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .truncate()
-                .text_xs()
-                .text_color(theme.text_muted)
-                .child(label),
-        )
+        .px(px(10.0))
+        .py(px(5.0))
+        .border_b_1()
+        .border_color(theme.border)
+        .bg(theme.band)
         .child(
             div()
                 .flex_none()
+                .pr(px(4.0))
                 .text_size(px(9.0))
+                .font_semibold()
                 .text_color(theme.text_faint)
-                .child("⌥← →"),
-        )
-        .child(
-            Button::new("agent-session-next")
-                .icon(IconName::ChevronRight)
+                .child("SESSIONS"),
+        );
+    for agent in agents {
+        let session_id = agent.id;
+        let select_app = app.clone();
+        let selected = selected_id == Some(session_id);
+        let label = agent_session_picker_label(agent);
+        rail = rail.child(
+            Button::new(SharedString::from(format!("agent-session-{session_id}")))
+                .label(label.clone())
                 .ghost()
-                .xsmall()
+                .small()
                 .compact()
-                .disabled(next.is_none())
-                .tooltip("Next agent session · ⌥→")
+                .selected(selected)
+                .tooltip(format!("{label} · ⌥←/⌥→ to navigate"))
                 .on_click(move |_, window, cx| {
-                    let Some(session_id) = next else {
-                        return;
-                    };
-                    let _ = next_app.update(cx, |this, cx| {
+                    let _ = select_app.update(cx, |this, cx| {
                         this.select_active_tab_agent(Some(session_id));
                         this.follow_active_agent_tail();
                         cx.notify();
                     });
                     window.refresh();
                 }),
+        );
+    }
+    rail.child(div().flex_1()).child(
+        Button::new("agent-new")
+            .icon(IconName::Plus)
+            .label("New")
+            .ghost()
+            .small()
+            .compact()
+            .tooltip("New agent session · /new")
+            .on_click(move |_, window, cx| {
+                let _ = new_app.update(cx, |this, cx| {
+                    this.select_active_tab_agent(None);
+                    cx.notify();
+                });
+                window.refresh();
+            }),
+    )
+}
+
+fn agent_session_picker_label(agent: &AgentSessionSnapshot) -> String {
+    format!(
+        "{} · {}",
+        agent_display_name(agent),
+        agent_status_label(agent.status)
+    )
+}
+
+fn agent_display_name(agent: &AgentSessionSnapshot) -> &str {
+    agent.agent_name.as_deref().unwrap_or(agent.name.as_str())
+}
+
+fn agent_context_usage_label(agent: &AgentSessionSnapshot) -> Option<String> {
+    format_agent_context_usage(agent.context_used, agent.context_size)
+}
+
+fn format_agent_context_usage(used: Option<u64>, size: Option<u64>) -> Option<String> {
+    let (used, size) = (used?, size?);
+    (size > 0).then(|| format!("context {}%", used.min(size).saturating_mul(100) / size))
+}
+
+fn agent_pane_is_compact(pane_width: f32) -> bool {
+    pane_width < 620.0
+}
+
+fn agent_header_metadata(agent: &AgentSessionSnapshot, context_panes: usize) -> Vec<String> {
+    let mut metadata = vec![
+        agent.cwd.file_name().map_or_else(
+            || agent.cwd.display().to_string(),
+            |name| name.to_string_lossy().into(),
+        ),
+        format_tab_pane_count(context_panes),
+    ];
+    if let Some(mode) = agent
+        .current_mode
+        .as_deref()
+        .filter(|mode| !mode.trim().is_empty())
+    {
+        metadata.push(mode.to_owned());
+    }
+    if let Some(context) = agent_context_usage_label(agent) {
+        metadata.push(context);
+    }
+    metadata
+}
+
+fn format_tab_pane_count(panes: usize) -> String {
+    format!(
+        "{panes} {} in tab",
+        if panes == 1 { "pane" } else { "panes" }
+    )
+}
+
+fn agent_status_badge(status: AgentSessionStatus, theme: &BezelTheme) -> impl IntoElement {
+    let tone = agent_status_tone(status, theme);
+    theme
+        .badge(agent_status_label(status))
+        .border_color(tone.opacity(0.28))
+        .bg(tone.opacity(0.09))
+        .text_color(tone)
+}
+
+fn agent_pane_header(
+    app: &gpui::WeakEntity<MuxApp>,
+    pane_id: PaneId,
+    agent: Option<&AgentSessionSnapshot>,
+    context_panes: usize,
+    theme: &BezelTheme,
+) -> impl IntoElement {
+    let return_app = app.clone();
+    let name = agent.map_or("Agent workspace", agent_display_name);
+    let metadata = agent.map_or_else(
+        || vec![format_tab_pane_count(context_panes)],
+        |agent| agent_header_metadata(agent, context_panes),
+    );
+    let mut meta = h_flex()
+        .min_w_0()
+        .gap(px(6.0))
+        .text_size(px(10.5))
+        .text_color(theme.text_faint);
+    for (index, item) in metadata.into_iter().enumerate() {
+        if index > 0 {
+            meta = meta.child(div().flex_none().opacity(0.45).child("·"));
+        }
+        meta = meta.child(div().min_w_0().truncate().child(item));
+    }
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .flex_none()
+        .h(px(52.0))
+        .px(px(10.0))
+        .gap(px(10.0))
+        .border_b_1()
+        .border_color(theme.border)
+        .bg(theme.glass())
+        .child(theme.row_tile(bezel_icons::CHAT_ROUND_LINE))
+        .child(
+            v_flex()
+                .min_w_0()
+                .flex_1()
+                .gap(px(2.0))
+                .child(
+                    h_flex()
+                        .min_w_0()
+                        .gap(px(8.0))
+                        .child(theme.row_title(name))
+                        .when_some(agent.map(|agent| agent.status), |row, status| {
+                            row.child(agent_status_badge(status, theme))
+                        }),
+                )
+                .child(meta),
         )
         .child(
-            Button::new("agent-new")
-                .icon(IconName::Plus)
+            Button::new(SharedString::from(format!("agent-return-{pane_id}")))
+                .icon(IconName::SquareTerminal)
+                .label("Terminal")
                 .ghost()
-                .xsmall()
+                .small()
                 .compact()
-                .tooltip("New agent session · /new")
+                .tooltip("Return to terminal · ⌃A")
                 .on_click(move |_, window, cx| {
-                    let _ = new_app.update(cx, |this, cx| {
-                        this.select_active_tab_agent(None);
-                        cx.notify();
-                    });
-                    window.refresh();
+                    return_agent_pane(&return_app, window, cx);
                 }),
         )
 }
 
-fn agent_session_picker_label(agents: &[&AgentSessionSnapshot], selected_index: usize) -> String {
-    agents.get(selected_index).map_or_else(
-        || "New session".to_owned(),
-        |agent| {
-            format!(
-                "{} of {} · {}",
-                selected_index + 1,
-                agents.len(),
-                agent.agent_name.as_deref().unwrap_or(agent.name.as_str())
-            )
-        },
-    )
-}
-
-fn agent_pane_title(agent: Option<&AgentSessionSnapshot>, theme: &BezelTheme) -> impl IntoElement {
-    let (name, status) = agent.map_or(("Agent".to_owned(), None), |agent| {
-        (
-            agent
-                .agent_name
-                .clone()
-                .unwrap_or_else(|| agent.name.clone()),
-            Some(agent.status),
+fn agent_manifest_row(
+    theme: &BezelTheme,
+    first: bool,
+    icon: &'static str,
+    title: &'static str,
+    detail: String,
+    badge: &'static str,
+) -> gpui::AnyElement {
+    theme
+        .card_row(first)
+        .child(theme.row_tile(icon))
+        .child(
+            v_flex()
+                .min_w_0()
+                .flex_1()
+                .child(theme.row_title(title))
+                .child(theme.meta_line(vec![
+                    div().min_w_0().truncate().child(detail).into_any_element(),
+                ])),
         )
-    });
-    h_flex()
-        .flex_1()
-        .min_w_0()
-        .overflow_hidden()
-        .gap_2()
-        .child(bezel_widgets::status_dot(
-            status.map_or(theme.text_faint, |status| agent_status_tone(status, theme)),
-        ))
-        .child(div().min_w_0().flex_1().truncate().child(name))
-        .when_some(status, |title, status| {
-            title.child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .font_normal()
-                    .text_color(theme.text_muted)
-                    .child(agent_status_label(status)),
-            )
-        })
+        .child(theme.badge(badge))
+        .into_any_element()
 }
 
-fn agent_empty_state(this: &MuxApp, theme: &BezelTheme) -> impl IntoElement {
-    let mut profiles = this
-        .enabled_profiles()
-        .map(|profile| profile.name.as_str())
-        .collect::<Vec<_>>();
-    let profiles = match profiles.pop() {
-        None => "an enabled agent".to_owned(),
-        Some(last) if profiles.is_empty() => last.to_owned(),
-        Some(last) if profiles.len() == 1 => format!("{} or {last}", profiles[0]),
-        Some(last) => format!("{}, or {last}", profiles.join(", ")),
-    };
-    v_flex()
+fn agent_empty_hero(compact: bool, theme: &BezelTheme) -> gpui::AnyElement {
+    h_flex()
         .w_full()
         .min_w_0()
-        .flex_1()
-        .items_center()
-        .justify_center()
-        .gap_3()
-        .px_5()
-        .overflow_hidden()
-        .text_center()
+        .items_start()
+        .gap(px(14.0))
         .child(
             div()
+                .flex_none()
                 .size(px(46.0))
-                .rounded_full()
+                .rounded(px(BezelTheme::SURFACE_RADIUS))
                 .border_1()
-                .border_color(theme.border)
-                .bg(theme.element_hover)
+                .border_color(theme.accent.opacity(0.25))
+                .bg(theme.accent.opacity(0.08))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -3407,37 +3434,109 @@ fn agent_empty_state(this: &MuxApp, theme: &BezelTheme) -> impl IntoElement {
                 ),
         )
         .child(
-            div()
-                .text_size(px(16.0))
-                .font_semibold()
-                .child("Start an agent"),
+            v_flex()
+                .min_w_0()
+                .flex_1()
+                .gap(px(5.0))
+                .child(
+                    div()
+                        .text_size(px(10.5))
+                        .font_semibold()
+                        .text_color(theme.accent)
+                        .child("DURABLE AGENT"),
+                )
+                .child(
+                    div()
+                        .text_size(px(if compact { 18.0 } else { 21.0 }))
+                        .font_semibold()
+                        .child("Put this tab to work."),
+                )
+                .child(
+                    div()
+                        .whitespace_normal()
+                        .text_sm()
+                        .line_height(px(20.0))
+                        .text_color(theme.text_muted)
+                        .child("Send a task below. Mux keeps the agent, terminal context, and workspace attached while you move on."),
+                ),
         )
+        .into_any_element()
+}
+
+fn agent_empty_state(
+    this: &MuxApp,
+    context_panes: usize,
+    compact: bool,
+    theme: &BezelTheme,
+) -> impl IntoElement {
+    let mut profiles = this
+        .enabled_profiles()
+        .map(|profile| profile.name.as_str())
+        .collect::<Vec<_>>();
+    let profiles = match profiles.pop() {
+        None => "an enabled agent".to_owned(),
+        Some(last) if profiles.is_empty() => last.to_owned(),
+        Some(last) if profiles.len() == 1 => format!("{} or {last}", profiles[0]),
+        Some(last) => format!("{}, or {last}", profiles.join(", ")),
+    };
+    let panes = format!(
+        "{context_panes} live {} · starts in the focused pane's directory",
+        if context_panes == 1 { "pane" } else { "panes" }
+    );
+    let manifest = theme
+        .group_box()
+        .mt(px(if compact { 16.0 } else { 22.0 }))
+        .child(agent_manifest_row(
+            theme,
+            true,
+            bezel_icons::FOLDER_WITH_FILES,
+            "Context follows this tab",
+            panes,
+            "TAB",
+        ))
+        .child(agent_manifest_row(
+            theme,
+            false,
+            bezel_icons::CLOUD,
+            "Durable by default",
+            "Owned by muxd · closing this view leaves the session running".to_owned(),
+            "MUXD",
+        ))
+        .child(agent_manifest_row(
+            theme,
+            false,
+            bezel_icons::CPU,
+            "Choose the right agent",
+            format!("Enabled: {profiles}"),
+            "READY",
+        ));
+    div()
+        .w_full()
+        .min_w_0()
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scrollbar()
+        .flex()
+        .justify_center()
         .child(
             div()
                 .w_full()
-                .max_w(px(560.0))
+                .max_w(px(660.0))
                 .min_w_0()
-                .min_h(px(40.0))
-                .flex_none()
-                .whitespace_normal()
-                .text_sm()
-                .line_height(px(20.0))
-                .text_color(theme.text_muted)
-                .child(format!(
-                    "Message {profiles}. Use /new <agent> [cwd] to choose."
-                )),
-        )
-        .child(
-            div()
-                .w_full()
-                .max_w(px(420.0))
-                .min_w_0()
-                .flex_none()
-                .whitespace_normal()
-                .text_xs()
-                .line_height(px(18.0))
-                .text_color(theme.text_faint)
-                .child("Starts in the focused pane's directory."),
+                .px(px(if compact { 16.0 } else { 24.0 }))
+                .py(px(if compact { 24.0 } else { 40.0 }))
+                .child(agent_empty_hero(compact, theme))
+                .child(manifest)
+                .child(
+                    h_flex()
+                        .mt(px(12.0))
+                        .gap(px(8.0))
+                        .text_size(px(10.5))
+                        .text_color(theme.text_faint)
+                        .child("⌃A returns to terminal")
+                        .child(div().opacity(0.45).child("·"))
+                        .child("/help shows every command"),
+                ),
         )
 }
 
@@ -3713,9 +3812,11 @@ fn agent_completion_overlay(
     app: &gpui::WeakEntity<MuxApp>,
     menu: &AgentCompletionMenu,
     bottom: f32,
+    pane_width: f32,
     motion: MotionPreference,
     theme: &BezelTheme,
 ) -> gpui::AnyElement {
+    let horizontal_inset = agent_surface_inset(pane_width);
     let mut items = v_flex().w_full().min_w_0().p_1().gap_0p5();
     for (index, completion) in menu.items.iter().enumerate() {
         items = items.child(agent_completion_row(
@@ -3730,8 +3831,8 @@ fn agent_completion_overlay(
     let popup = v_flex()
         .id("agent-completion-menu")
         .absolute()
-        .left(px(8.0))
-        .right(px(8.0))
+        .left(px(horizontal_inset))
+        .right(px(horizontal_inset))
         .bottom(px(bottom))
         .min_w_0()
         .overflow_hidden()
@@ -3778,6 +3879,10 @@ fn agent_completion_overlay(
         popup,
     )
     .into_any_element()
+}
+
+fn agent_surface_inset(pane_width: f32) -> f32 {
+    ((pane_width - 760.0) / 2.0).max(8.0)
 }
 
 fn agent_completion_row(
@@ -3887,6 +3992,151 @@ fn agent_scroll_is_near_bottom(scroll: &ScrollHandle) -> bool {
     maximum + offset <= 48.0
 }
 
+fn agent_session_empty_copy(
+    status: AgentSessionStatus,
+    name: &str,
+) -> (&'static str, String, &'static str) {
+    match status {
+        AgentSessionStatus::Starting => (
+            "CONNECTING",
+            format!("Starting {name}…"),
+            "Mux is opening a durable ACP session. You can leave this view while it connects.",
+        ),
+        AgentSessionStatus::WaitingForAuthentication => (
+            "SIGN-IN REQUIRED",
+            format!("Finish signing in to {name}."),
+            "Complete authentication below; the session will resume here when access is ready.",
+        ),
+        AgentSessionStatus::Authenticating => (
+            "AUTHENTICATING",
+            format!("Signing in to {name}…"),
+            "Mux is completing the agent handshake and will keep this session attached.",
+        ),
+        AgentSessionStatus::Idle => (
+            "SESSION READY",
+            format!("{name} is ready."),
+            "Give it a focused outcome. Mux keeps the agent attached while you work elsewhere.",
+        ),
+        AgentSessionStatus::Working => (
+            "IN PROGRESS",
+            format!("{name} is working…"),
+            "Responses and tool activity will appear here as soon as they arrive.",
+        ),
+        AgentSessionStatus::WaitingForPermission => (
+            "DECISION NEEDED",
+            format!("{name} needs permission."),
+            "Review the requested action below before the session continues.",
+        ),
+        AgentSessionStatus::Failed => (
+            "SESSION INTERRUPTED",
+            format!("{name} could not continue."),
+            "Review the session controls below, or start a new durable agent with /new.",
+        ),
+        AgentSessionStatus::Closed => (
+            "SESSION ENDED",
+            format!("{name} has stopped."),
+            "The transcript remains available here; use /new when you want another session.",
+        ),
+    }
+}
+
+fn agent_session_empty_state(agent: &AgentSessionSnapshot, theme: &BezelTheme) -> impl IntoElement {
+    let name = agent_display_name(agent);
+    let (eyebrow, title, description) = agent_session_empty_copy(agent.status, name);
+    let tone = agent_status_tone(agent.status, theme);
+    let manifest = theme
+        .group_box()
+        .mt(px(20.0))
+        .child(agent_manifest_row(
+            theme,
+            true,
+            bezel_icons::FOLDER_WITH_FILES,
+            "Working directory",
+            agent.cwd.display().to_string(),
+            "CWD",
+        ))
+        .child(agent_manifest_row(
+            theme,
+            false,
+            bezel_icons::CLOUD,
+            "Durable session",
+            "Owned by muxd · revisit the agent independently of its terminal".to_owned(),
+            "MUXD",
+        ));
+    div()
+        .size_full()
+        .min_w_0()
+        .min_h_0()
+        .overflow_y_scrollbar()
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .w_full()
+                .max_w(px(600.0))
+                .min_w_0()
+                .px(px(20.0))
+                .py(px(40.0))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .items_start()
+                        .gap(px(14.0))
+                        .child(
+                            div()
+                                .flex_none()
+                                .size(px(44.0))
+                                .rounded(px(BezelTheme::SURFACE_RADIUS))
+                                .border_1()
+                                .border_color(tone.opacity(0.25))
+                                .bg(tone.opacity(0.08))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    bezel_icons::icon(bezel_icons::CPU)
+                                        .size(px(20.0))
+                                        .text_color(tone),
+                                ),
+                        )
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .flex_1()
+                                .gap(px(5.0))
+                                .child(
+                                    div()
+                                        .text_size(px(10.5))
+                                        .font_semibold()
+                                        .text_color(tone)
+                                        .child(eyebrow),
+                                )
+                                .child(div().text_size(px(20.0)).font_semibold().child(title))
+                                .child(
+                                    div()
+                                        .whitespace_normal()
+                                        .text_sm()
+                                        .line_height(px(20.0))
+                                        .text_color(theme.text_muted)
+                                        .child(description),
+                                ),
+                        ),
+                )
+                .child(manifest)
+                .child(
+                    h_flex()
+                        .mt(px(12.0))
+                        .gap(px(8.0))
+                        .text_size(px(10.5))
+                        .text_color(theme.text_faint)
+                        .child("@ adds a file")
+                        .child(div().opacity(0.45).child("·"))
+                        .child("/help shows session controls"),
+                ),
+        )
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn agent_timeline(
     app: &gpui::WeakEntity<MuxApp>,
@@ -3975,15 +4225,7 @@ fn agent_timeline(
         .pt(px(18.0))
         .pb(px(28.0));
     if agent.timeline.is_empty() && !show_help {
-        timeline = timeline.child(
-            v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .text_sm()
-                .text_color(theme.text_muted)
-                .child("Ready when you are."),
-        );
+        timeline = timeline.child(agent_session_empty_state(agent, &theme));
     }
     for (index, item) in agent.timeline.iter().enumerate() {
         if matches!(item, AgentTimelineItem::Context { .. }) {
@@ -5182,10 +5424,12 @@ mod tests {
 
     use super::{
         GridMetrics, PaneOutputUpdate, PaneReplica, PaneScrollState, agent_composer_height,
-        input_position_at, layout, pane_needs_live_frame, reconcile_pane_replicas,
-        terminal_frame_text, terminal_key_event, terminal_sizes_for_geometry,
-        terminal_tab_keystroke,
+        agent_pane_is_compact, agent_session_empty_copy, agent_surface_inset,
+        format_agent_context_usage, format_tab_pane_count, input_position_at, layout,
+        pane_needs_live_frame, reconcile_pane_replicas, terminal_frame_text, terminal_key_event,
+        terminal_sizes_for_geometry, terminal_tab_keystroke,
     };
+    use mux_acp::AgentSessionStatus;
 
     #[test]
     fn agent_completion_cursor_positions_use_utf16_columns() {
@@ -5199,6 +5443,48 @@ mod tests {
         assert!((agent_composer_height("one line", 800.0) - 57.0).abs() < f32::EPSILON);
         assert!((agent_composer_height("one\ntwo\nthree", 800.0) - 97.0).abs() < f32::EPSILON);
         assert!((agent_composer_height("a\nb\nc\nd\ne\nf\ng", 800.0) - 157.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn agent_surfaces_share_a_readable_responsive_measure() {
+        assert!((agent_surface_inset(500.0) - 8.0).abs() < f32::EPSILON);
+        assert!((agent_surface_inset(760.0) - 8.0).abs() < f32::EPSILON);
+        assert!((agent_surface_inset(1_000.0) - 120.0).abs() < f32::EPSILON);
+        assert!(agent_pane_is_compact(619.0));
+        assert!(!agent_pane_is_compact(620.0));
+    }
+
+    #[test]
+    fn agent_context_usage_is_bounded_and_omits_unknown_capacity() {
+        assert_eq!(
+            format_agent_context_usage(Some(25), Some(100)).as_deref(),
+            Some("context 25%")
+        );
+        assert_eq!(format_agent_context_usage(Some(25), Some(0)), None);
+        assert_eq!(format_agent_context_usage(None, Some(100)), None);
+        assert_eq!(
+            format_agent_context_usage(Some(u64::MAX), Some(1)).as_deref(),
+            Some("context 100%")
+        );
+    }
+
+    #[test]
+    fn agent_header_metadata_describes_tab_membership_without_implying_context_sharing() {
+        assert_eq!(format_tab_pane_count(1), "1 pane in tab");
+        assert_eq!(format_tab_pane_count(3), "3 panes in tab");
+    }
+
+    #[test]
+    fn empty_agent_sessions_explain_their_operational_state() {
+        let (ready_label, ready_title, _) =
+            agent_session_empty_copy(AgentSessionStatus::Idle, "Codex");
+        assert_eq!(ready_label, "SESSION READY");
+        assert_eq!(ready_title, "Codex is ready.");
+
+        let (permission_label, permission_title, _) =
+            agent_session_empty_copy(AgentSessionStatus::WaitingForPermission, "Claude");
+        assert_eq!(permission_label, "DECISION NEEDED");
+        assert_eq!(permission_title, "Claude needs permission.");
     }
 
     #[test]
