@@ -24,21 +24,28 @@ use agent_completion::{
 };
 use anyhow::{Context as _, Result, anyhow};
 use backend::{BackendHandle, CommandMessage};
+use bezel::{
+    theme::{self as bezel_theme, Appearance as BezelAppearance, Theme as BezelTheme},
+    ui::{
+        self as bezel_ui, icons as bezel_icons,
+        widgets::{self as bezel_widgets, Status as _},
+    },
+};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Animation, AnimationExt as _, App, AppContext as _, Application, Bounds, Context, Entity,
+    Animation, AnimationExt as _, App, AppContext as _, AssetSource, Bounds, Context, Entity,
     FocusHandle, Hsla, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent,
     Menu, MenuItem, ParentElement as _, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled, SystemMenuType, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowOptions, div, px, rgb, size,
+    StatefulInteractiveElement as _, Styled, SystemMenuType, Window, WindowBounds, WindowOptions,
+    div, px, rgb, size,
 };
 use gpui_component::{
     Disableable as _, Icon, IconName, InteractiveElementExt as _, Selectable as _, Sizable as _,
-    StyledExt as _, Theme, ThemeMode, TitleBar, WindowExt as _,
+    StyledExt as _, Theme as ComponentTheme, ThemeMode, TitleBar, WindowExt as _,
     animation::cubic_bezier,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Enter, Input, InputEvent, InputState, Position},
+    input::{Enter, Input, InputEvent, InputState, Position, Textarea, TextareaState},
     notification::Notification,
     scroll::ScrollableElement as _,
     switch::Switch,
@@ -70,15 +77,31 @@ use tracing::{debug, error, info, warn};
 const WINDOW_WIDTH: f32 = 1120.0;
 const WINDOW_HEIGHT: f32 = 720.0;
 const SURFACE: u32 = 0x0011_131a;
-const CHROME: u32 = 0x0017_1a22;
-const CHROME_RAISED: u32 = 0x001d_222c;
-const BORDER: u32 = 0x002a_303c;
-const TEXT: u32 = 0x00e8_ecf3;
 const MUTED_TEXT: u32 = 0x008c_96a8;
 const SIGNAL: u32 = 0x005e_b6e8;
 const EMBEDDED_TERMINAL_FONT: &str = "JetBrainsMono Nerd Font Mono";
 const INITIAL_USER_EVENT_BATCH_CAPACITY: usize = 8;
 const MAX_USER_EVENT_BATCH: usize = 256;
+
+struct MuxAssets;
+
+impl AssetSource for MuxAssets {
+    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        let bezel_assets = bezel_icons::Assets;
+        if let Some(asset) = bezel_assets.load(path)? {
+            return Ok(Some(asset));
+        }
+        gpui_component_assets::Assets.load(path)
+    }
+
+    fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
+        let mut assets = bezel_icons::Assets.list(path)?;
+        assets.extend(gpui_component_assets::Assets.list(path)?);
+        assets.sort_unstable();
+        assets.dedup();
+        Ok(assets)
+    }
+}
 
 #[cfg(target_os = "macos")]
 fn reduce_motion_requested() -> bool {
@@ -131,7 +154,6 @@ struct PaneReplica {
     engine: GhosttyEngine,
     frame: Rc<RenderFrame>,
     render_cache: Rc<RefCell<TerminalRenderCache>>,
-    next_output_sequence: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -142,27 +164,26 @@ enum PaneOutputUpdate {
 }
 
 impl PaneReplica {
-    fn new(engine: GhosttyEngine, frame: RenderFrame, next_output_sequence: u64) -> Self {
+    fn new(engine: GhosttyEngine, frame: RenderFrame) -> Self {
         Self {
             engine,
             frame: Rc::new(frame),
             render_cache: Rc::new(RefCell::new(TerminalRenderCache::default())),
-            next_output_sequence,
         }
     }
 
     fn apply_output(&mut self, sequence: u64, bytes: &[u8]) -> Result<PaneOutputUpdate> {
-        if sequence < self.next_output_sequence {
+        let expected = self.engine.next_output_sequence();
+        if sequence < expected {
             return Ok(PaneOutputUpdate::Duplicate);
         }
-        if sequence > self.next_output_sequence {
+        if sequence > expected {
             return Ok(PaneOutputUpdate::Gap {
-                expected: self.next_output_sequence,
+                expected,
                 actual: sequence,
             });
         }
         self.engine.apply_output(sequence, bytes)?;
-        self.next_output_sequence += 1;
         Ok(PaneOutputUpdate::Applied)
     }
 
@@ -182,6 +203,9 @@ fn restore_pane_replica(
     pane: &PaneAttachment,
     ghostty_theme: &GhosttyTheme,
 ) -> Result<PaneReplica> {
+    pane.terminal
+        .validate_sequence_contract()
+        .with_context(|| format!("invalid terminal attachment for pane {}", pane.pane_id))?;
     let checkpoint = pane
         .terminal
         .checkpoint
@@ -197,10 +221,19 @@ fn restore_pane_replica(
     for chunk in &pane.terminal.replay {
         engine.apply_output(chunk.sequence, &chunk.bytes)?;
     }
+    let restored_next_sequence = engine.next_output_sequence();
+    if restored_next_sequence != pane.terminal.next_sequence {
+        return Err(anyhow!(
+            "inconsistent terminal attachment for pane {}: restored cursor {}, advertised cursor {}",
+            pane.pane_id,
+            restored_next_sequence,
+            pane.terminal.next_sequence
+        ));
+    }
     if !pane.terminal.replay.is_empty() {
         engine.render_frame_into(&mut frame)?;
     }
-    Ok(PaneReplica::new(engine, frame, pane.terminal.next_sequence))
+    Ok(PaneReplica::new(engine, frame))
 }
 
 fn restore_pane_replicas(
@@ -221,7 +254,11 @@ fn reconcile_pane_replicas(
     let mut reconciled = HashMap::with_capacity(attachments.len());
     for pane in attachments {
         let replica = match existing.remove(&pane.pane_id) {
-            Some(replica) if replica.next_output_sequence == pane.terminal.next_sequence => replica,
+            Some(replica)
+                if replica.engine.next_output_sequence() == pane.terminal.next_sequence =>
+            {
+                replica
+            }
             Some(_) | None => restore_pane_replica(pane, ghostty_theme)?,
         };
         reconciled.insert(pane.pane_id, replica);
@@ -289,7 +326,7 @@ struct MuxApp {
     /// A missing entry selects the first session for that tab. `None` as the
     /// stored value deliberately selects the new-session composer.
     selected_agents: HashMap<TabId, Option<AgentSessionId>>,
-    agent_input: Entity<InputState>,
+    agent_input: Entity<TextareaState>,
     agent_input_tab: Option<TabId>,
     agent_drafts: HashMap<TabId, String>,
     agent_completion: Rc<AgentCompletionProvider>,
@@ -324,9 +361,9 @@ struct MuxLayerHost {
 fn create_agent_input(
     window: &mut Window,
     cx: &mut Context<MuxApp>,
-) -> (Entity<InputState>, gpui::Subscription) {
+) -> (Entity<TextareaState>, gpui::Subscription) {
     let input = cx.new(|cx| {
-        InputState::new(window, cx)
+        TextareaState::new(window, cx)
             .auto_grow(1, 6)
             .placeholder("Message an agent · / for commands · @ for files…")
     });
@@ -341,7 +378,10 @@ fn create_agent_input(
                 }
                 this.refresh_agent_completion_menu(cx);
             }
-            InputEvent::PressEnter { secondary: false } if this.agent_completion_menu.is_none() => {
+            InputEvent::PressEnter {
+                secondary: false,
+                shift: false,
+            } if this.agent_completion_menu.is_none() => {
                 this.submit_agent_prompt(window, cx);
             }
             InputEvent::PressEnter { .. } | InputEvent::Focus | InputEvent::Blur => {}
@@ -359,7 +399,7 @@ impl MuxApp {
         settings_error: Option<String>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
-        focus_handle.focus(window);
+        focus_handle.focus(window, cx);
         let font_config = GhosttyFont::load_user().unwrap_or_default();
         let font_size = font_config.size.unwrap_or(14.0).clamp(8.0, 36.0);
         let requested_font = font_config.family.as_deref().unwrap_or_default().trim();
@@ -739,19 +779,27 @@ impl MuxApp {
     fn apply_server_event(&mut self, event: ServerEvent) -> Result<()> {
         match event {
             ServerEvent::PaneOutput {
+                session_id,
                 pane_id,
                 sequence,
                 bytes,
-                ..
             } => {
                 if let Some(pane) = self.panes.get_mut(&pane_id) {
                     match pane.apply_output(sequence, &bytes)? {
                         PaneOutputUpdate::Applied => pane.publish_frame()?,
                         PaneOutputUpdate::Duplicate => {}
                         PaneOutputUpdate::Gap { expected, actual } => {
-                            return Err(anyhow!(
-                                "terminal output was out of order: expected {expected}, received {actual}"
-                            ));
+                            if self.terminal_resync_pending != Some(session_id) {
+                                warn!(
+                                    %session_id,
+                                    %pane_id,
+                                    expected,
+                                    actual,
+                                    "GUI terminal replica fell behind; requesting a fresh attachment"
+                                );
+                                self.terminal_resync_pending = Some(session_id);
+                                self.backend.send(CommandMessage::AttachSession(session_id));
+                            }
                         }
                     }
                 }
@@ -930,7 +978,7 @@ impl MuxApp {
             {
                 Self::report_ui_error(&error, window, cx);
             }
-            self.focus_handle.focus(window);
+            self.focus_handle.focus(window, cx);
         } else {
             self.agent_panes.insert(tab_id, pane_id);
             self.agent_follow_tail.insert(tab_id);
@@ -957,7 +1005,7 @@ impl MuxApp {
                 Self::report_ui_error(&error, window, cx);
             }
         }
-        self.focus_handle.focus(window);
+        self.focus_handle.focus(window, cx);
         self.mode = InputMode::Normal;
         cx.notify();
     }
@@ -982,7 +1030,7 @@ impl MuxApp {
             WorkspaceCommand::FocusPane(direction)
         };
         self.send_workspace(command);
-        self.focus_handle.focus(window);
+        self.focus_handle.focus(window, cx);
         cx.notify();
     }
 
@@ -1217,6 +1265,7 @@ impl MuxApp {
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         info!("opening GPUI settings dialog");
+        let theme = BezelTheme::of(cx).clone();
         let profiles = self.profiles.clone();
         let settings_path = self
             .state_dir
@@ -1224,15 +1273,31 @@ impl MuxApp {
             .map(|path| path.join("settings.json"));
         let app = cx.weak_entity();
         window.open_dialog(cx, move |dialog, _window, cx| {
-            let mut content = v_flex().gap_3();
+            let mut content = v_flex()
+                .gap_2()
+                .font_family(theme.font_sans.clone());
             content = content.child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(MUTED_TEXT))
-                    .child("ACP agents run out of process. Custom agents use Zed-compatible agent_servers entries; restart Mux after editing the file."),
+                h_flex()
+                    .items_start()
+                    .gap_2()
+                    .pb_1()
+                    .child(
+                        bezel_icons::icon(bezel_icons::TUNING)
+                            .size(px(16.0))
+                            .text_color(theme.accent),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .text_sm()
+                            .line_height(px(20.0))
+                            .text_color(theme.text_muted)
+                            .child("ACP agents run out of process. Custom agents use Zed-compatible agent_servers entries; restart Mux after editing the file."),
+                    ),
             );
             if let Some(settings_path) = settings_path.clone() {
-                content = content.child(agent_settings_file_row(&app, &settings_path));
+                content = content.child(agent_settings_file_row(&app, &settings_path, &theme));
             }
             for profile in &profiles {
                 let profile_id = profile.id.clone();
@@ -1247,8 +1312,10 @@ impl MuxApp {
                         .justify_between()
                         .gap_4()
                         .p_3()
-                        .rounded_lg()
-                        .bg(rgb(CHROME_RAISED))
+                        .rounded(px(BezelTheme::SURFACE_RADIUS))
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.surface_card)
                         .child(
                             v_flex()
                                 .gap_1()
@@ -1256,7 +1323,7 @@ impl MuxApp {
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(MUTED_TEXT))
+                                        .text_color(theme.text_muted)
                                         .child(description),
                                 ),
                         )
@@ -1375,7 +1442,7 @@ impl MuxApp {
                                 .on_click(move |_, window, cx| {
                                     let confirm_app = kill_app.clone();
                                     let kill_name = kill_name.clone();
-                                    window.open_dialog(cx, move |dialog, _, _| {
+                                    window.open_alert_dialog(cx, move |dialog, _, _| {
                                         let confirm_app = confirm_app.clone();
                                         dialog
                                             .title(format!("Kill {kill_name}?"))
@@ -2126,6 +2193,27 @@ impl MuxApp {
         true
     }
 
+    fn pointer_hover(
+        &mut self,
+        pane_id: PaneId,
+        rect: layout::Rect,
+        event: &gpui::MouseMoveEvent,
+    ) -> bool {
+        if self.mouse_reporting.is_some() || self.selection_drag.is_some() || event.modifiers.shift
+        {
+            return false;
+        }
+        self.report_mouse_event(
+            pane_id,
+            rect,
+            event.position,
+            TerminalMouseAction::Motion,
+            event.pressed_button.map(terminal_mouse_button),
+            event.modifiers,
+            event.pressed_button.is_some(),
+        )
+    }
+
     fn pointer_up(&mut self, event: &gpui::MouseUpEvent) -> bool {
         if let Some(capture) = self.mouse_reporting.take() {
             let _ = self.report_mouse_event(
@@ -2245,20 +2333,22 @@ impl MuxApp {
         } else {
             TerminalMouseButton::Five
         };
-        let mut reported = false;
-        for _ in 0..rows.unsigned_abs() {
-            reported |= self.report_mouse_event(
-                pane_id,
-                rect,
-                event.position,
-                TerminalMouseAction::Press,
-                Some(wheel_button),
-                event.modifiers,
-                false,
-            );
-        }
-        if reported && !event.modifiers.shift {
-            return false;
+        if !event.modifiers.shift {
+            let mut reported = false;
+            for _ in 0..rows.unsigned_abs() {
+                reported |= self.report_mouse_event(
+                    pane_id,
+                    rect,
+                    event.position,
+                    TerminalMouseAction::Press,
+                    Some(wheel_button),
+                    event.modifiers,
+                    false,
+                );
+            }
+            if reported {
+                return false;
+            }
         }
 
         let Some(pane) = self.panes.get_mut(&pane_id) else {
@@ -2332,6 +2422,7 @@ impl MuxApp {
         self.agent_completion
             .set_command_arguments(command_arguments);
         let show_help = self.agent_help_tabs.contains(&tab_id);
+        let theme = BezelTheme::of(cx).clone();
         let other_panes = self
             .session
             .as_ref()
@@ -2344,11 +2435,13 @@ impl MuxApp {
             .unwrap_or_default();
         let expanded_items = self.expanded_agent_items.clone();
         let picker = (self.agents_for_active_tab().count() > 1)
-            .then(|| agent_session_picker(&app, self).into_any_element());
+            .then(|| agent_session_picker(&app, self, &theme).into_any_element());
         let completion_menu = self.agent_completion_menu.clone();
         let completion_open = completion_menu.is_some();
-        let composer_bottom =
-            agent_composer_height(self.agent_input.read(cx).value().as_ref(), rect.width);
+        let composer_value = self.agent_input.read(cx).value();
+        let composer_bottom = agent_composer_height(composer_value.as_ref(), rect.width);
+        let composer_ready =
+            !composer_value.trim().is_empty() && self.pending_agent_prompt.is_none();
         let agent = active_agent_id.and_then(|id| self.agents.iter().find(|agent| agent.id == id));
 
         let keyboard_app = app.clone();
@@ -2440,7 +2533,9 @@ impl MuxApp {
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
-            .bg(rgb(CHROME))
+            .bg(theme.bg)
+            .font_family(theme.font_sans.clone())
+            .text_color(theme.text)
             .when(!focused, move |body| {
                 body.on_any_mouse_down(move |_, window, cx| {
                     let _ = focus_app.update(cx, |this, _cx| {
@@ -2458,15 +2553,16 @@ impl MuxApp {
                     .px_3()
                     .gap_2()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(agent_pane_title(agent))
+                    .border_color(theme.border)
+                    .bg(theme.glass())
+                    .child(agent_pane_title(agent, &theme))
                     .child(
                         div()
                             .flex_none()
                             .max_w(px(120.0))
                             .truncate()
                             .text_xs()
-                            .text_color(rgb(MUTED_TEXT))
+                            .text_color(theme.text_faint)
                             .child(if other_panes == 0 {
                                 "⌃A close".to_owned()
                             } else {
@@ -2500,12 +2596,12 @@ impl MuxApp {
                 window,
                 cx,
             ));
-            body = body.child(agent_auth_controls(&app, agent));
-            body = body.child(agent_permission_controls(&app, agent));
+            body = body.child(agent_auth_controls(&app, agent, &theme));
+            body = body.child(agent_permission_controls(&app, agent, &theme));
         } else if show_help {
-            body = body.child(agent_help_surface(None));
+            body = body.child(agent_help_surface(None, &theme));
         } else {
-            body = body.child(agent_empty_state(self));
+            body = body.child(agent_empty_state(self, &theme));
         }
         body = body.child(
             div()
@@ -2513,10 +2609,16 @@ impl MuxApp {
                 .min_w_0()
                 .flex_none()
                 .overflow_hidden()
-                .border_t_1()
-                .border_color(rgb(BORDER))
-                .p_2()
-                .child(agent_composer(&app, self, completion_open)),
+                .px(px(14.0))
+                .pt(px(6.0))
+                .pb(px(12.0))
+                .child(agent_composer(
+                    &app,
+                    self,
+                    completion_open,
+                    composer_ready,
+                    &theme,
+                )),
         );
         if let Some(menu) = completion_menu.as_ref() {
             body = body.child(agent_completion_overlay(
@@ -2524,6 +2626,7 @@ impl MuxApp {
                 menu,
                 composer_bottom,
                 self.motion,
+                &theme,
             ));
         }
 
@@ -2538,7 +2641,7 @@ impl MuxApp {
             .min_h_0()
             .overflow_hidden()
             .border_1()
-            .border_color(if focused { rgb(SIGNAL) } else { rgb(BORDER) })
+            .border_color(if focused { theme.accent } else { theme.border })
             .child(body);
         if self.motion == MotionPreference::Reduced {
             pane.into_any_element()
@@ -2556,13 +2659,17 @@ impl MuxApp {
     }
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = BezelTheme::of(cx).clone();
         let mut bar = h_flex()
             .h(px(layout::TAB_BAR_HEIGHT))
             .w_full()
             .items_center()
             .gap_1()
             .px_1()
-            .bg(rgb(CHROME));
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.glass())
+            .font_family(theme.font_sans.clone());
         if cfg!(target_os = "macos") {
             bar = bar.child(div().w(px(70.0)).h_full());
         }
@@ -2600,7 +2707,7 @@ impl MuxApp {
         .child(div().w(px(52.0)).h_full())
     }
 
-    fn render_mode_bar(&self) -> gpui::AnyElement {
+    fn render_mode_bar(&self, theme: &BezelTheme) -> gpui::AnyElement {
         let (label, help) = match self.mode {
             InputMode::Normal => ("NORMAL", ""),
             InputMode::Pane => (
@@ -2622,17 +2729,18 @@ impl MuxApp {
             .h(px(30.0))
             .px_3()
             .gap_3()
-            .bg(rgb(CHROME))
+            .bg(theme.glass())
             .border_t_1()
-            .border_color(rgb(BORDER))
+            .border_color(theme.border)
+            .font_family(theme.font_sans.clone())
             .child(
                 div()
                     .text_xs()
                     .font_semibold()
-                    .text_color(rgb(SIGNAL))
+                    .text_color(theme.accent)
                     .child(label),
             )
-            .child(div().text_xs().text_color(rgb(MUTED_TEXT)).child(help));
+            .child(div().text_xs().text_color(theme.text_muted).child(help));
         if self.motion == MotionPreference::Reduced {
             bar.into_any_element()
         } else {
@@ -2659,6 +2767,7 @@ impl MuxApp {
         let rect = geometry.rect;
         let focused = geometry.focused;
         let pointer_app = cx.weak_entity();
+        let hover_app = pointer_app.clone();
         let scroll_app = pointer_app.clone();
         let mut surface = div()
             .absolute()
@@ -2670,11 +2779,19 @@ impl MuxApp {
             .bg(rgb(SURFACE))
             .on_any_mouse_down(move |event, window, cx| {
                 let _ = pointer_app.update(cx, |this, cx| {
-                    this.focus_handle.focus(window);
+                    this.focus_handle.focus(window, cx);
                     this.pointer_down(pane_id, rect, event);
                     cx.notify();
                 });
                 cx.stop_propagation();
+            })
+            .on_mouse_move(move |event, _, cx| {
+                let handled = hover_app
+                    .update(cx, |this, _| this.pointer_hover(pane_id, rect, event))
+                    .unwrap_or(false);
+                if handled {
+                    cx.stop_propagation();
+                }
             })
             .on_scroll_wheel(move |event, _, cx| {
                 let _ = scroll_app.update(cx, |this, cx| {
@@ -2755,6 +2872,7 @@ fn open_rename_session_dialog(
 
 impl Render for MuxApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = BezelTheme::of(cx).clone();
         let viewport = window.viewport_size();
         let geometry =
             self.sync_terminal_sizes(f32::from(viewport.width), f32::from(viewport.height));
@@ -2815,8 +2933,9 @@ impl Render for MuxApp {
                     cx.stop_propagation();
                 }
             })
-            .bg(rgb(SURFACE))
-            .text_color(rgb(TEXT))
+            .bg(theme.surface)
+            .font_family(theme.font_sans.clone())
+            .text_color(theme.text)
             .child(self.render_tabs(cx));
 
         for geometry in geometry.panes {
@@ -2833,13 +2952,13 @@ impl Render for MuxApp {
         }
 
         if self.mode != InputMode::Normal {
-            root = root.child(self.render_mode_bar());
+            root = root.child(self.render_mode_bar(&theme));
         }
         let active_agents = self
             .agents_for_active_tab()
             .filter(|agent| agent.status != AgentSessionStatus::Closed)
             .count();
-        root = root.child(header_actions(cx.weak_entity(), active_agents));
+        root = root.child(header_actions(cx.weak_entity(), active_agents, &theme));
         root
     }
 }
@@ -2885,7 +3004,11 @@ impl Render for MuxLayerHost {
     }
 }
 
-fn header_actions(app: gpui::WeakEntity<MuxApp>, active_agents: usize) -> impl IntoElement {
+fn header_actions(
+    app: gpui::WeakEntity<MuxApp>,
+    active_agents: usize,
+    theme: &BezelTheme,
+) -> impl IntoElement {
     let settings_app = app.clone();
     h_flex()
         .absolute()
@@ -2900,14 +3023,14 @@ fn header_actions(app: gpui::WeakEntity<MuxApp>, active_agents: usize) -> impl I
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded_md()
-                .text_color(rgb(MUTED_TEXT))
-                .hover(|style| style.bg(rgb(CHROME_RAISED)).text_color(rgb(TEXT)))
+                .rounded(px(BezelTheme::CONTROL_RADIUS))
+                .text_color(theme.text_muted)
+                .hover(|style| style.bg(theme.glass_hover()).text_color(theme.text))
                 .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
                     cx.stop_propagation();
                     let _ = app.update(cx, |this, cx| this.toggle_agents(window, cx));
                 })
-                .child(Icon::new(IconName::Bot).small())
+                .child(bezel_icons::icon(bezel_icons::CHAT_ROUND_LINE).size(px(16.0)))
                 .when(active_agents > 0, |button| {
                     button.child(
                         div()
@@ -2916,7 +3039,7 @@ fn header_actions(app: gpui::WeakEntity<MuxApp>, active_agents: usize) -> impl I
                             .right(px(3.0))
                             .size(px(4.0))
                             .rounded_full()
-                            .bg(rgb(SIGNAL)),
+                            .bg(theme.accent),
                     )
                 }),
         )
@@ -2927,14 +3050,14 @@ fn header_actions(app: gpui::WeakEntity<MuxApp>, active_agents: usize) -> impl I
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded_md()
-                .text_color(rgb(MUTED_TEXT))
-                .hover(|style| style.bg(rgb(CHROME_RAISED)).text_color(rgb(TEXT)))
+                .rounded(px(BezelTheme::CONTROL_RADIUS))
+                .text_color(theme.text_muted)
+                .hover(|style| style.bg(theme.glass_hover()).text_color(theme.text))
                 .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
                     cx.stop_propagation();
                     let _ = settings_app.update(cx, |this, cx| this.open_settings(window, cx));
                 })
-                .child(Icon::new(IconName::Settings2).small()),
+                .child(bezel_icons::icon(bezel_icons::TUNING).size(px(16.0))),
         )
 }
 
@@ -3041,6 +3164,7 @@ fn cancel_agent_turn(app: &gpui::WeakEntity<MuxApp>, _window: &mut Window, cx: &
 fn agent_settings_file_row(
     app: &gpui::WeakEntity<MuxApp>,
     settings_path: &Path,
+    theme: &BezelTheme,
 ) -> gpui::AnyElement {
     let reveal_app = app.clone();
     let reveal_path = settings_path.to_path_buf();
@@ -3049,17 +3173,18 @@ fn agent_settings_file_row(
         .min_w_0()
         .gap_2()
         .p_2()
-        .rounded_lg()
+        .rounded(px(BezelTheme::CONTROL_RADIUS))
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(theme.border)
+        .bg(theme.code_wash)
         .child(
             div()
                 .min_w_0()
                 .flex_1()
                 .truncate()
-                .font_family(EMBEDDED_TERMINAL_FONT)
+                .font_family(theme.font_mono.clone())
                 .text_xs()
-                .text_color(rgb(MUTED_TEXT))
+                .text_color(theme.text_muted)
                 .child(settings_path.display().to_string()),
         )
         .child(
@@ -3101,7 +3226,11 @@ fn agent_settings_file_row(
         .into_any_element()
 }
 
-fn agent_session_picker(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl IntoElement {
+fn agent_session_picker(
+    app: &gpui::WeakEntity<MuxApp>,
+    this: &MuxApp,
+    theme: &BezelTheme,
+) -> impl IntoElement {
     let agents = this.agents_for_active_tab().collect::<Vec<_>>();
     let selected_id = this.active_agent().map(|agent| agent.id);
     let selected_index = selected_id
@@ -3148,14 +3277,14 @@ fn agent_session_picker(app: &gpui::WeakEntity<MuxApp>, this: &MuxApp) -> impl I
                 .flex_1()
                 .truncate()
                 .text_xs()
-                .text_color(rgb(MUTED_TEXT))
+                .text_color(theme.text_muted)
                 .child(label),
         )
         .child(
             div()
                 .flex_none()
                 .text_size(px(9.0))
-                .text_color(rgb(MUTED_TEXT))
+                .text_color(theme.text_faint)
                 .child("⌥← →"),
         )
         .child(
@@ -3209,7 +3338,7 @@ fn agent_session_picker_label(agents: &[&AgentSessionSnapshot], selected_index: 
     )
 }
 
-fn agent_pane_title(agent: Option<&AgentSessionSnapshot>) -> impl IntoElement {
+fn agent_pane_title(agent: Option<&AgentSessionSnapshot>, theme: &BezelTheme) -> impl IntoElement {
     let (name, status) = agent.map_or(("Agent".to_owned(), None), |agent| {
         (
             agent
@@ -3224,13 +3353,9 @@ fn agent_pane_title(agent: Option<&AgentSessionSnapshot>) -> impl IntoElement {
         .min_w_0()
         .overflow_hidden()
         .gap_2()
-        .child(
-            div()
-                .size(px(6.0))
-                .flex_none()
-                .rounded_full()
-                .bg(status.map_or(rgb(MUTED_TEXT), status_color)),
-        )
+        .child(bezel_widgets::status_dot(
+            status.map_or(theme.text_faint, |status| agent_status_tone(status, theme)),
+        ))
         .child(div().min_w_0().flex_1().truncate().child(name))
         .when_some(status, |title, status| {
             title.child(
@@ -3238,13 +3363,13 @@ fn agent_pane_title(agent: Option<&AgentSessionSnapshot>) -> impl IntoElement {
                     .flex_none()
                     .text_xs()
                     .font_normal()
-                    .text_color(rgb(MUTED_TEXT))
+                    .text_color(theme.text_muted)
                     .child(agent_status_label(status)),
             )
         })
 }
 
-fn agent_empty_state(this: &MuxApp) -> impl IntoElement {
+fn agent_empty_state(this: &MuxApp, theme: &BezelTheme) -> impl IntoElement {
     let mut profiles = this
         .enabled_profiles()
         .map(|profile| profile.name.as_str())
@@ -3266,11 +3391,27 @@ fn agent_empty_state(this: &MuxApp) -> impl IntoElement {
         .overflow_hidden()
         .text_center()
         .child(
-            Icon::new(IconName::Bot)
-                .size(px(24.0))
-                .text_color(rgb(MUTED_TEXT)),
+            div()
+                .size(px(46.0))
+                .rounded_full()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.element_hover)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    bezel_icons::icon(bezel_icons::CHAT_ROUND_LINE)
+                        .size(px(21.0))
+                        .text_color(theme.accent),
+                ),
         )
-        .child(div().font_semibold().child("Start an agent"))
+        .child(
+            div()
+                .text_size(px(16.0))
+                .font_semibold()
+                .child("Start an agent"),
+        )
         .child(
             div()
                 .w_full()
@@ -3281,7 +3422,7 @@ fn agent_empty_state(this: &MuxApp) -> impl IntoElement {
                 .whitespace_normal()
                 .text_sm()
                 .line_height(px(20.0))
-                .text_color(rgb(MUTED_TEXT))
+                .text_color(theme.text_muted)
                 .child(format!(
                     "Message {profiles}. Use /new <agent> [cwd] to choose."
                 )),
@@ -3295,12 +3436,15 @@ fn agent_empty_state(this: &MuxApp) -> impl IntoElement {
                 .whitespace_normal()
                 .text_xs()
                 .line_height(px(18.0))
-                .text_color(rgb(MUTED_TEXT))
+                .text_color(theme.text_faint)
                 .child("Starts in the focused pane's directory."),
         )
 }
 
-fn agent_help_surface(agent: Option<&AgentSessionSnapshot>) -> impl IntoElement {
+fn agent_help_surface(
+    agent: Option<&AgentSessionSnapshot>,
+    theme: &BezelTheme,
+) -> impl IntoElement {
     v_flex()
         .w_full()
         .min_w_0()
@@ -3310,29 +3454,35 @@ fn agent_help_surface(agent: Option<&AgentSessionSnapshot>) -> impl IntoElement 
         .px_3()
         .pt_2()
         .pb_3()
-        .child(agent_help_card(agent))
+        .child(
+            div()
+                .w_full()
+                .max_w(px(720.0))
+                .mx_auto()
+                .child(agent_help_card(agent, theme)),
+        )
 }
 
-fn agent_help_card(agent: Option<&AgentSessionSnapshot>) -> gpui::AnyElement {
+fn agent_help_card(agent: Option<&AgentSessionSnapshot>, theme: &BezelTheme) -> gpui::AnyElement {
     let mut card = v_flex()
         .w_full()
         .min_w_0()
         .flex_none()
         .gap_3()
         .p_3()
-        .rounded_lg()
+        .rounded(px(BezelTheme::PANEL_RADIUS))
         .border_1()
-        .border_color(rgb(BORDER))
-        .bg(rgb(CHROME_RAISED))
+        .border_color(theme.border)
+        .bg(theme.surface_card)
         .child(
             h_flex()
                 .w_full()
                 .min_w_0()
                 .gap_2()
                 .child(
-                    Icon::new(IconName::BookOpen)
-                        .small()
-                        .text_color(rgb(SIGNAL)),
+                    bezel_icons::icon(bezel_icons::BOOK)
+                        .size(px(16.0))
+                        .text_color(theme.accent),
                 )
                 .child(div().font_semibold().child("Agent commands")),
         )
@@ -3343,11 +3493,12 @@ fn agent_help_card(agent: Option<&AgentSessionSnapshot>) -> gpui::AnyElement {
                 .whitespace_normal()
                 .text_sm()
                 .line_height(px(20.0))
-                .text_color(rgb(MUTED_TEXT))
+                .text_color(theme.text_muted)
                 .child("Mux commands stay local. Other slash commands are sent to the active ACP agent."),
         )
         .child(agent_help_section(
-            "KEYBOARD",
+            theme,
+            "Keyboard",
             &[
                 "⌃A  toggle agent pane",
                 "⌥arrows  navigate sessions and panes",
@@ -3358,11 +3509,13 @@ fn agent_help_card(agent: Option<&AgentSessionSnapshot>) -> gpui::AnyElement {
             ],
         ))
         .child(agent_help_section(
-            "SESSIONS",
+            theme,
+            "Sessions",
             &["/new [agent] [cwd]", "/next", "/prev", "/use <session>", "/end", "/cancel"],
         ))
         .child(agent_help_section(
-            "CONTEXT + VIEW",
+            theme,
+            "Context + view",
             &[
                 "@path  attach a project file",
                 "/context tab|none",
@@ -3371,7 +3524,8 @@ fn agent_help_card(agent: Option<&AgentSessionSnapshot>) -> gpui::AnyElement {
             ],
         ))
         .child(agent_help_section(
-            "CONFIGURE",
+            theme,
+            "Configure",
             &["/mode <id>", "/model <id>", "/effort <id>", "/login [method]", "/allow [always]", "/deny [always]"],
         ));
 
@@ -3384,21 +3538,29 @@ fn agent_help_card(agent: Option<&AgentSessionSnapshot>) -> gpui::AnyElement {
             .map(|command| format!("/{}", command.name))
             .collect::<Vec<_>>();
         if !commands.is_empty() {
-            card = card.child(agent_help_owned_section("FROM AGENT", &commands));
+            card = card.child(agent_help_owned_section(theme, "From agent", &commands));
         }
     }
     card.into_any_element()
 }
 
-fn agent_help_section(label: &'static str, commands: &[&'static str]) -> gpui::AnyElement {
+fn agent_help_section(
+    theme: &BezelTheme,
+    label: &'static str,
+    commands: &[&'static str],
+) -> gpui::AnyElement {
     let commands = commands
         .iter()
         .map(|command| (*command).to_owned())
         .collect::<Vec<_>>();
-    agent_help_owned_section(label, &commands)
+    agent_help_owned_section(theme, label, &commands)
 }
 
-fn agent_help_owned_section(label: &'static str, commands: &[String]) -> gpui::AnyElement {
+fn agent_help_owned_section(
+    theme: &BezelTheme,
+    label: &'static str,
+    commands: &[String],
+) -> gpui::AnyElement {
     let mut chips = h_flex().w_full().min_w_0().gap_1().flex_wrap();
     for command in commands {
         chips = chips.child(
@@ -3407,10 +3569,11 @@ fn agent_help_owned_section(label: &'static str, commands: &[String]) -> gpui::A
                 .whitespace_nowrap()
                 .px_2()
                 .py_1()
-                .rounded_md()
-                .bg(rgb(SURFACE))
-                .font_family(EMBEDDED_TERMINAL_FONT)
+                .rounded(px(BezelTheme::CONTROL_RADIUS))
+                .bg(theme.code_wash)
+                .font_family(theme.font_mono.clone())
                 .text_xs()
+                .text_color(theme.code_text)
                 .child(command.clone()),
         );
     }
@@ -3420,9 +3583,9 @@ fn agent_help_owned_section(label: &'static str, commands: &[String]) -> gpui::A
         .gap_1p5()
         .child(
             div()
-                .text_size(px(9.0))
+                .text_size(px(10.5))
                 .font_semibold()
-                .text_color(rgb(MUTED_TEXT))
+                .text_color(theme.text_faint)
                 .child(label),
         )
         .child(chips)
@@ -3433,9 +3596,77 @@ fn agent_composer(
     app: &gpui::WeakEntity<MuxApp>,
     this: &MuxApp,
     completion_open: bool,
-) -> impl IntoElement {
+    ready: bool,
+    theme: &BezelTheme,
+) -> gpui::AnyElement {
     let prompt_app = app.clone();
-    v_flex()
+    let send = div()
+        .id("agent-send")
+        .flex_none()
+        .size(px(26.0))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(ready, |send| {
+            send.bg(theme.solid)
+                .cursor_pointer()
+                .hover(|style| style.opacity(0.88))
+                .on_click(move |_, window, cx| {
+                    let _ = prompt_app.update(cx, |this, cx| {
+                        this.submit_agent_prompt(window, cx);
+                    });
+                    window.refresh();
+                })
+        })
+        .when(!ready, |send| send.bg(theme.element_hover))
+        .child(
+            bezel_icons::icon(bezel_icons::ARROW_UP)
+                .size(px(14.0))
+                .text_color(if ready {
+                    theme.on_solid
+                } else {
+                    theme.text_faint
+                }),
+        );
+    let context = match this.agent_context {
+        AgentContextMode::None => "No pane context",
+        AgentContextMode::Tab => "Tab context",
+    };
+    let card = v_flex()
+        .w_full()
+        .min_w_0()
+        .overflow_hidden()
+        .rounded(px(BezelTheme::SURFACE_RADIUS))
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(theme.input_glass_bg())
+        .shadow_sm()
+        .px(px(5.0))
+        .pt(px(4.0))
+        .pb(px(6.0))
+        .child(
+            Textarea::new(&this.agent_input)
+                .appearance(false)
+                .bordered(false)
+                .min_w_0()
+                .w_full(),
+        )
+        .child(
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .items_center()
+                .px(px(7.0))
+                .pt(px(2.0))
+                .gap(px(8.0))
+                .text_size(px(10.5))
+                .text_color(theme.text_faint)
+                .child(context)
+                .child(div().ml_auto().child("Return send · ⇧Return newline"))
+                .child(send),
+        );
+    let composer = v_flex()
         .when(completion_open, |composer| {
             composer.key_context("MuxAgentCompletion")
         })
@@ -3444,28 +3675,12 @@ fn agent_composer(
         .flex_none()
         .overflow_hidden()
         .gap_0()
-        .child(
-            h_flex()
-                .w_full()
-                .min_w_0()
-                .items_end()
-                .gap_2()
-                .child(Input::new(&this.agent_input).min_w_0().flex_1())
-                .child(
-                    Button::new("agent-send")
-                        .flex_none()
-                        .icon(IconName::ArrowUp)
-                        .primary()
-                        .small()
-                        .tooltip("Send · Return")
-                        .on_click(move |_, window, cx| {
-                            let _ = prompt_app.update(cx, |this, cx| {
-                                this.submit_agent_prompt(window, cx);
-                            });
-                            window.refresh();
-                        }),
-                ),
-        )
+        .child(bezel_ui::material::material(
+            BezelTheme::SURFACE_RADIUS,
+            28.0,
+            card,
+        ));
+    composer.into_any_element()
 }
 
 fn input_position_at(text: &str, offset: usize) -> Position {
@@ -3499,6 +3714,7 @@ fn agent_completion_overlay(
     menu: &AgentCompletionMenu,
     bottom: f32,
     motion: MotionPreference,
+    theme: &BezelTheme,
 ) -> gpui::AnyElement {
     let mut items = v_flex().w_full().min_w_0().p_1().gap_0p5();
     for (index, completion) in menu.items.iter().enumerate() {
@@ -3507,6 +3723,7 @@ fn agent_completion_overlay(
             index,
             completion,
             index == menu.selected,
+            theme,
         ));
     }
 
@@ -3518,10 +3735,10 @@ fn agent_completion_overlay(
         .bottom(px(bottom))
         .min_w_0()
         .overflow_hidden()
-        .rounded_lg()
+        .rounded(px(BezelTheme::PANEL_RADIUS))
         .border_1()
-        .border_color(rgb(0x0035_3d4a))
-        .bg(rgb(CHROME))
+        .border_color(theme.border_strong)
+        .bg(theme.glass_overlay())
         .shadow_lg()
         .child(items)
         .child(
@@ -3531,16 +3748,16 @@ fn agent_completion_overlay(
                 .px_2()
                 .gap_3()
                 .border_t_1()
-                .border_color(rgb(BORDER))
-                .bg(rgb(SURFACE))
+                .border_color(theme.border)
+                .bg(theme.band)
                 .text_size(px(9.0))
-                .text_color(rgb(MUTED_TEXT))
+                .text_color(theme.text_faint)
                 .child("↑↓ select")
                 .child("Tab complete")
                 .child("Esc close"),
         );
 
-    if motion == MotionPreference::Reduced {
+    let popup = if motion == MotionPreference::Reduced {
         popup.into_any_element()
     } else {
         popup
@@ -3554,7 +3771,13 @@ fn agent_completion_overlay(
                 },
             )
             .into_any_element()
-    }
+    };
+    bezel_ui::material::material(
+        BezelTheme::PANEL_RADIUS,
+        bezel_ui::material::MENU_BLUR,
+        popup,
+    )
+    .into_any_element()
 }
 
 fn agent_completion_row(
@@ -3562,6 +3785,7 @@ fn agent_completion_row(
     index: usize,
     completion: &AgentCompletion,
     selected: bool,
+    theme: &BezelTheme,
 ) -> gpui::AnyElement {
     let completion_app = app.clone();
     let icon = match completion.kind {
@@ -3580,7 +3804,7 @@ fn agent_completion_row(
                     .w(px(118.0))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .font_family(EMBEDDED_TERMINAL_FONT)
+                    .font_family(theme.font_mono.clone())
                     .text_size(px(12.0))
                     .font_semibold()
                     .child(completion.label.clone()),
@@ -3592,7 +3816,7 @@ fn agent_completion_row(
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_size(px(10.0))
-                    .text_color(rgb(MUTED_TEXT))
+                    .text_color(theme.text_muted)
                     .child(completion.description.clone()),
             )
             .into_any_element(),
@@ -3601,7 +3825,7 @@ fn agent_completion_row(
             .flex_1()
             .overflow_hidden()
             .whitespace_nowrap()
-            .font_family(EMBEDDED_TERMINAL_FONT)
+            .font_family(theme.font_mono.clone())
             .text_size(px(12.0))
             .font_semibold()
             .child(completion.label.clone())
@@ -3615,10 +3839,10 @@ fn agent_completion_row(
         .h(px(34.0))
         .px_2()
         .gap_2()
-        .rounded_md()
+        .rounded(px(BezelTheme::CONTROL_RADIUS))
         .cursor_pointer()
-        .when(selected, |row| row.bg(rgb(0x0025_2b36)))
-        .hover(|row| row.bg(rgb(CHROME_RAISED)))
+        .when(selected, |row| row.bg(theme.element_active))
+        .hover(|row| row.bg(theme.element_hover))
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
             cx.stop_propagation();
             let _ = completion_app.update(cx, |this, cx| {
@@ -3630,19 +3854,19 @@ fn agent_completion_row(
                 .flex_none()
                 .w(px(22.0))
                 .h(px(22.0))
-                .rounded_md()
+                .rounded(px(BezelTheme::CONTROL_RADIUS))
                 .bg(if selected {
-                    rgb(0x0030_3c4a)
+                    theme.element_active
                 } else {
-                    rgb(SURFACE)
+                    theme.surface
                 })
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_color(if selected {
-                    rgb(SIGNAL)
+                    theme.accent
                 } else {
-                    rgb(MUTED_TEXT)
+                    theme.text_muted
                 })
                 .child(Icon::new(icon).xsmall()),
         )
@@ -3651,7 +3875,7 @@ fn agent_completion_row(
             div()
                 .flex_none()
                 .text_size(px(9.0))
-                .text_color(rgb(MUTED_TEXT))
+                .text_color(theme.text_faint)
                 .child(completion.detail.clone()),
         )
         .into_any_element()
@@ -3659,7 +3883,7 @@ fn agent_completion_row(
 
 fn agent_scroll_is_near_bottom(scroll: &ScrollHandle) -> bool {
     let offset = f32::from(scroll.offset().y);
-    let maximum = f32::from(scroll.max_offset().height);
+    let maximum = f32::from(scroll.max_offset().y);
     maximum + offset <= 48.0
 }
 
@@ -3675,8 +3899,9 @@ fn agent_timeline(
     settle_scroll: bool,
     motion: MotionPreference,
     window: &mut Window,
-    _cx: &mut App,
+    cx: &mut App,
 ) -> impl IntoElement {
+    let theme = BezelTheme::of(cx).clone();
     // Keep following streamed content until the user intentionally scrolls up.
     // GPUI applies this request after layout, so newly parsed Markdown height is
     // included instead of leaving the newest response below the viewport.
@@ -3687,7 +3912,7 @@ fn agent_timeline(
         let settled_scroll = scroll.clone();
         window.on_next_frame(move |window, _| {
             let maximum = settled_scroll.max_offset();
-            settled_scroll.set_offset(gpui::point(px(0.0), -maximum.height));
+            settled_scroll.set_offset(gpui::point(px(0.0), -maximum.y));
             window.refresh();
         });
     }
@@ -3702,15 +3927,10 @@ fn agent_timeline(
         .size_full()
         .min_w_0()
         .min_h_0()
-        .gap_2()
         .track_scroll(scroll)
         .overflow_x_hidden()
         .overflow_y_scroll()
         .vertical_scrollbar(scroll)
-        .pr_3()
-        .px_3()
-        .pt_2()
-        .pb_3()
         .on_any_mouse_down(move |event, _, cx| {
             let bounds = scrollbar_scroll.bounds();
             if event.position.x >= bounds.right() - px(18.0) {
@@ -3736,8 +3956,8 @@ fn agent_timeline(
                     this.agent_follow_tail.remove(&tab_id);
                     this.agent_scroll_needs_settle.remove(&tab_id);
                 } else {
-                    let remaining = f32::from(wheel_scroll.max_offset().height)
-                        + f32::from(wheel_scroll.offset().y);
+                    let remaining =
+                        f32::from(wheel_scroll.max_offset().y) + f32::from(wheel_scroll.offset().y);
                     if remaining <= 48.0 + f32::from(delta.y.abs()) {
                         this.agent_follow_tail.insert(tab_id);
                     }
@@ -3745,6 +3965,15 @@ fn agent_timeline(
                 cx.notify();
             });
         });
+    let mut content = v_flex()
+        .w_full()
+        .min_w_0()
+        .flex_none()
+        .gap(px(12.0))
+        .pr(px(20.0))
+        .pl(px(18.0))
+        .pt(px(18.0))
+        .pb(px(28.0));
     if agent.timeline.is_empty() && !show_help {
         timeline = timeline.child(
             v_flex()
@@ -3752,7 +3981,7 @@ fn agent_timeline(
                 .items_center()
                 .justify_center()
                 .text_sm()
-                .text_color(rgb(MUTED_TEXT))
+                .text_color(theme.text_muted)
                 .child("Ready when you are."),
         );
     }
@@ -3760,9 +3989,9 @@ fn agent_timeline(
         if matches!(item, AgentTimelineItem::Context { .. }) {
             continue;
         }
-        let content = match item {
+        let item_content = match item {
             AgentTimelineItem::Message { role, text, .. } if *role != AgentMessageRole::Thought => {
-                agent_message_item(agent, index, *role, text)
+                agent_message_item(agent, index, *role, text, &theme, window, cx)
             }
             AgentTimelineItem::Message { text, .. } => thinking_item(
                 app,
@@ -3771,14 +4000,23 @@ fn agent_timeline(
                 text,
                 expanded_items,
                 index + 1 == agent.timeline.len() && agent.status == AgentSessionStatus::Working,
+                &theme,
+                window,
+                cx,
             ),
             AgentTimelineItem::Tool(tool) => {
-                agent_tool_item(app, agent, index, tool, expanded_items)
+                agent_tool_item(app, agent, index, tool, expanded_items, &theme)
             }
-            _ => agent_event_item(item),
+            _ => agent_event_item(item, &theme),
         };
-        let row = div().w_full().min_w_0().flex_none().child(content);
-        timeline = timeline.child(if motion == MotionPreference::Reduced {
+        let row = div()
+            .w_full()
+            .max_w(px(720.0))
+            .mx_auto()
+            .min_w_0()
+            .flex_none()
+            .child(item_content);
+        content = content.child(if motion == MotionPreference::Reduced {
             row.into_any_element()
         } else {
             row.with_animation(
@@ -3797,7 +4035,16 @@ fn agent_timeline(
         });
     }
     if show_help {
-        timeline = timeline.child(agent_help_card(Some(agent)));
+        content = content.child(
+            div()
+                .w_full()
+                .max_w(px(720.0))
+                .mx_auto()
+                .child(agent_help_card(Some(agent), &theme)),
+        );
+    }
+    if !agent.timeline.is_empty() || show_help {
+        timeline = timeline.child(content);
     }
     let latest_app = app.clone();
     div()
@@ -3835,33 +4082,39 @@ fn agent_message_item(
     _index: usize,
     role: AgentMessageRole,
     text: &str,
+    theme: &BezelTheme,
+    window: &mut Window,
+    cx: &mut App,
 ) -> gpui::AnyElement {
-    let mut message = v_flex()
-        .w_full()
-        .max_w_full()
-        .min_w_0()
-        .flex_none()
-        .overflow_hidden()
-        .gap_0()
-        .px_2()
-        .py_1p5()
-        .rounded_lg();
     if role == AgentMessageRole::User {
-        message = message.bg(rgb(CHROME_RAISED)).child(
-            div()
-                .w_full()
-                .max_w_full()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_normal()
-                .text_sm()
-                .line_height(px(20.0))
-                .child(text.trim().to_owned()),
-        );
-    } else {
-        message = message.child(agent_rich_text(text));
+        return h_flex()
+            .w_full()
+            .min_w_0()
+            .justify_end()
+            .child(
+                div()
+                    .max_w(px(600.0))
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_normal()
+                    .px(px(14.0))
+                    .py(px(9.0))
+                    .rounded(px(BezelTheme::SURFACE_RADIUS))
+                    .bg(bezel_theme::user_bubble_bg())
+                    .text_sm()
+                    .line_height(px(20.0))
+                    .text_color(theme.text)
+                    .child(text.trim().to_owned()),
+            )
+            .into_any_element();
     }
-    message.into_any_element()
+    div()
+        .w_full()
+        .min_w_0()
+        .overflow_hidden()
+        .px(px(2.0))
+        .child(bezel_markdown::markdown(text.trim(), window, cx))
+        .into_any_element()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3872,39 +4125,31 @@ fn thinking_item(
     text: &str,
     expanded_items: &HashSet<String>,
     running: bool,
+    theme: &BezelTheme,
+    window: &mut Window,
+    cx: &mut App,
 ) -> gpui::AnyElement {
     let summary = thought_summary(text);
     let detail = thought_detail(text, &summary);
     let key = agent_item_key(agent, index, &agent.timeline[index]);
     let expanded = detail.is_some() && expanded_items.contains(&key);
-    let mut header = h_flex()
+    let mut header = theme
+        .step_row(
+            bezel_icons::CPU,
+            "Thinking",
+            Some(summary.into()),
+            running.then(|| SharedString::from("working")),
+            false,
+            detail.map(|_| expanded),
+        )
         .id(SharedString::from(format!("thought-{key}")))
         .w_full()
-        .max_w_full()
-        .min_w_0()
-        .gap_2()
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .text_color(rgb(MUTED_TEXT))
-        .child(if running {
-            Icon::new(IconName::LoaderCircle)
-                .xsmall()
-                .text_color(rgb(MUTED_TEXT))
-                .into_any_element()
-        } else {
-            Icon::new(IconName::Asterisk)
-                .xsmall()
-                .text_color(rgb(MUTED_TEXT))
-                .into_any_element()
-        })
-        .child(div().text_xs().font_semibold().child("Thinking"))
-        .child(div().min_w_0().flex_1().truncate().text_sm().child(summary));
+        .min_w_0();
     if detail.is_some() {
         let toggle_app = app.clone();
         let toggle_key = key.clone();
         header = header
-            .hover(|style| style.bg(rgb(CHROME_RAISED)))
+            .hover(bezel_widgets::step_row_hover)
             .on_click(move |_, window, cx| {
                 let toggle_key = toggle_key.clone();
                 let _ = toggle_app.update(cx, |this, cx| {
@@ -3914,16 +4159,7 @@ fn thinking_item(
                     cx.notify();
                 });
                 window.refresh();
-            })
-            .child(
-                Icon::new(if expanded {
-                    IconName::ChevronUp
-                } else {
-                    IconName::ChevronDown
-                })
-                .xsmall()
-                .text_color(rgb(MUTED_TEXT)),
-            );
+            });
     }
     let mut item = v_flex()
         .w_full()
@@ -3931,25 +4167,28 @@ fn thinking_item(
         .min_w_0()
         .flex_none()
         .overflow_hidden()
-        .gap_1()
+        .border_l_1()
+        .border_color(theme.border)
+        .pl(px(6.0))
+        .gap(px(4.0))
         .child(header);
     if expanded {
+        let detail = bezel_markdown::markdown(detail.unwrap_or_default(), window, cx);
         item = item.child(
             div()
                 .w_full()
                 .min_w_0()
                 .overflow_hidden()
-                .pl_6()
-                .pr_2()
+                .pl(px(34.0))
+                .pr(px(8.0))
+                .pb(px(6.0))
                 .child(
                     div()
                         .w_full()
                         .min_w_0()
                         .overflow_hidden()
-                        .pl_3()
-                        .border_l_1()
-                        .border_color(rgb(BORDER))
-                        .child(agent_rich_text(detail.unwrap_or_default())),
+                        .text_color(theme.text_muted)
+                        .child(detail),
                 ),
         );
     }
@@ -3962,24 +4201,26 @@ fn agent_tool_item(
     index: usize,
     tool: &AgentTool,
     expanded_items: &HashSet<String>,
+    theme: &BezelTheme,
 ) -> gpui::AnyElement {
     let key = agent_item_key(agent, index, &agent.timeline[index]);
     let expanded = expanded_items.contains(&key);
     let toggle_app = app.clone();
     let toggle_key = key.clone();
-    let header = h_flex()
+    let header = theme
+        .step_row(
+            tool_kind_icon(tool.kind),
+            tool_kind_label(tool.kind),
+            (!tool.title.trim().is_empty())
+                .then(|| SharedString::from(tool.title.trim().to_owned())),
+            Some(SharedString::from(tool_status_label(tool.status))),
+            tool.status == ToolStatus::Failed,
+            Some(expanded),
+        )
         .id(SharedString::from(format!("tool-{key}")))
         .w_full()
-        .max_w_full()
         .min_w_0()
-        .gap_2()
-        .px_2()
-        .py_1p5()
-        .rounded_lg()
-        .border_1()
-        .border_color(rgb(BORDER))
-        .bg(rgb(CHROME_RAISED))
-        .hover(|style| style.bg(rgb(0x0022_2732)))
+        .hover(bezel_widgets::step_row_hover)
         .on_click(move |_, window, cx| {
             let toggle_key = toggle_key.clone();
             let _ = toggle_app.update(cx, |this, cx| {
@@ -3989,39 +4230,7 @@ fn agent_tool_item(
                 cx.notify();
             });
             window.refresh();
-        })
-        .child(
-            Icon::new(tool_kind_icon(tool.kind))
-                .small()
-                .text_color(tool_accent(tool.status)),
-        )
-        .child(
-            div()
-                .w(px(52.0))
-                .flex_none()
-                .text_size(px(9.0))
-                .font_semibold()
-                .text_color(rgb(MUTED_TEXT))
-                .child(tool_kind_label(tool.kind)),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .truncate()
-                .text_sm()
-                .child(tool.title.trim().to_owned()),
-        )
-        .child(tool_status_element(tool.status))
-        .child(
-            Icon::new(if expanded {
-                IconName::ChevronUp
-            } else {
-                IconName::ChevronDown
-            })
-            .xsmall()
-            .text_color(rgb(MUTED_TEXT)),
-        );
+        });
 
     let mut item = v_flex()
         .w_full()
@@ -4029,34 +4238,26 @@ fn agent_tool_item(
         .min_w_0()
         .flex_none()
         .overflow_hidden()
-        .gap_1()
+        .rounded(px(BezelTheme::PANEL_RADIUS))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface_card)
+        .gap_0()
         .child(header);
     if expanded {
-        item = item.child(agent_tool_details(tool));
+        item = item.child(agent_tool_details(tool, theme, &key));
     }
     item.into_any_element()
 }
 
-fn agent_tool_details(tool: &AgentTool) -> gpui::AnyElement {
-    let mut details = v_flex()
-        .w_full()
-        .max_w_full()
-        .min_w_0()
-        .pl_4()
-        .pr_1()
-        .overflow_hidden()
-        .gap_2()
-        .p_3()
-        .rounded_b_lg()
-        .border_l_1()
-        .border_color(rgb(BORDER))
-        .bg(rgb(0x0014_171e));
+fn agent_tool_details(tool: &AgentTool, theme: &BezelTheme, key: &str) -> gpui::AnyElement {
+    let mut sections = Vec::new();
     let input =
         tool.raw_input.as_ref().map(format_tool_value).or_else(|| {
             (tool.kind == AgentToolKind::Execute).then(|| tool.title.trim().to_owned())
         });
     if let Some(input) = input.filter(|input| !input.is_empty()) {
-        details = details.child(tool_detail_section("Input", &input));
+        sections.push(format!("INPUT\n{}", truncate_tool_detail(&input, 24_000)));
     }
     let output = tool.raw_output.as_ref().map(format_tool_value).or_else(|| {
         tool.detail
@@ -4065,52 +4266,20 @@ fn agent_tool_details(tool: &AgentTool) -> gpui::AnyElement {
             .map(ToOwned::to_owned)
     });
     if let Some(output) = output.filter(|output| !output.is_empty()) {
-        details = details.child(tool_detail_section("Output", &output));
-    } else {
-        details = details.child(
-            div()
-                .w_full()
-                .min_w_0()
-                .whitespace_normal()
-                .text_xs()
-                .text_color(rgb(MUTED_TEXT))
-                .child("This agent did not publish captured output over ACP."),
-        );
+        sections.push(format!("OUTPUT\n{}", truncate_tool_detail(&output, 24_000)));
     }
-    details.into_any_element()
-}
-
-fn tool_detail_section(label: &'static str, value: &str) -> gpui::AnyElement {
-    v_flex()
-        .w_full()
-        .min_w_0()
-        .gap_1()
-        .child(
-            div()
-                .text_size(px(9.0))
-                .font_semibold()
-                .text_color(rgb(MUTED_TEXT))
-                .child(label),
-        )
-        .child(
-            div()
-                .w_full()
-                .max_w_full()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_normal()
-                .p_2()
-                .rounded_md()
-                .bg(rgb(SURFACE))
-                .font_family(EMBEDDED_TERMINAL_FONT)
-                .text_xs()
-                .line_height(px(17.0))
-                .child(truncate_tool_detail(value, 24_000)),
+    if sections.is_empty() {
+        sections.push("This agent did not publish captured output over ACP.".to_owned());
+    }
+    theme
+        .step_output(
+            SharedString::from(format!("tool-output-{key}")),
+            sections.join("\n\n"),
         )
         .into_any_element()
 }
 
-fn agent_event_item(item: &AgentTimelineItem) -> gpui::AnyElement {
+fn agent_event_item(item: &AgentTimelineItem, theme: &BezelTheme) -> gpui::AnyElement {
     let (label, text, color) = timeline_item(item);
     v_flex()
         .w_full()
@@ -4125,7 +4294,11 @@ fn agent_event_item(item: &AgentTimelineItem) -> gpui::AnyElement {
             div()
                 .text_size(px(10.0))
                 .font_semibold()
-                .text_color(color)
+                .text_color(if color == rgb(MUTED_TEXT) {
+                    theme.text_muted
+                } else {
+                    color.into()
+                })
                 .child(label),
         )
         .child(
@@ -4139,141 +4312,6 @@ fn agent_event_item(item: &AgentTimelineItem) -> gpui::AnyElement {
                 .child(text),
         )
         .into_any_element()
-}
-
-fn agent_rich_text(markdown: &str) -> gpui::AnyElement {
-    let minimum_lines = markdown
-        .lines()
-        .filter(|line| !line.trim().starts_with("```"))
-        .count()
-        .max(1);
-    let mut blocks = Vec::new();
-    let mut code_lines = Vec::new();
-    let mut in_code = false;
-    let mut previous_was_blank = false;
-
-    for line in markdown.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            if in_code {
-                push_agent_code_block(&mut blocks, &mut code_lines);
-            }
-            in_code = !in_code;
-            previous_was_blank = false;
-            continue;
-        }
-        if in_code {
-            code_lines.push(line.to_owned());
-            continue;
-        }
-        if trimmed.is_empty() {
-            if !previous_was_blank {
-                blocks.push(div().h(px(4.0)).flex_none().into_any_element());
-            }
-            previous_was_blank = true;
-            continue;
-        }
-        previous_was_blank = false;
-        blocks.push(agent_rich_text_line(trimmed));
-    }
-    push_agent_code_block(&mut blocks, &mut code_lines);
-
-    v_flex()
-        .w_full()
-        .max_w_full()
-        .min_w_0()
-        .min_h(px(minimum_lines as f32 * 20.0))
-        .flex_none()
-        .overflow_hidden()
-        .gap_1()
-        .text_sm()
-        .line_height(px(20.0))
-        .children(blocks)
-        .into_any_element()
-}
-
-fn agent_rich_text_line(line: &str) -> gpui::AnyElement {
-    let (text, heading) = if let Some(text) = line.strip_prefix("### ") {
-        (text, true)
-    } else if let Some(text) = line.strip_prefix("## ") {
-        (text, true)
-    } else if let Some(text) = line.strip_prefix("# ") {
-        (text, true)
-    } else if let Some(text) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-        return div()
-            .w_full()
-            .min_w_0()
-            .flex_none()
-            .whitespace_normal()
-            .child(format!("• {}", clean_inline_markdown(text)))
-            .into_any_element();
-    } else if let Some(text) = line.strip_prefix("> ") {
-        return div()
-            .w_full()
-            .min_w_0()
-            .flex_none()
-            .pl_2()
-            .border_l_1()
-            .border_color(rgb(BORDER))
-            .whitespace_normal()
-            .text_color(rgb(MUTED_TEXT))
-            .child(clean_inline_markdown(text))
-            .into_any_element();
-    } else {
-        (line, false)
-    };
-    div()
-        .w_full()
-        .max_w_full()
-        .min_w_0()
-        .flex_none()
-        .overflow_hidden()
-        .whitespace_normal()
-        .when(heading, |line| line.font_semibold().text_color(rgb(TEXT)))
-        .child(clean_inline_markdown(text))
-        .into_any_element()
-}
-
-fn push_agent_code_block(blocks: &mut Vec<gpui::AnyElement>, lines: &mut Vec<String>) {
-    if lines.is_empty() {
-        return;
-    }
-    let mut code = v_flex()
-        .w_full()
-        .max_w_full()
-        .min_w_0()
-        .flex_none()
-        .overflow_hidden()
-        .gap_0()
-        .p_2()
-        .rounded_md()
-        .bg(rgb(SURFACE))
-        .font_family(EMBEDDED_TERMINAL_FONT)
-        .text_xs()
-        .line_height(px(18.0));
-    for line in lines.drain(..) {
-        code = code.child(
-            div()
-                .w_full()
-                .min_w_0()
-                .flex_none()
-                .overflow_hidden()
-                .whitespace_normal()
-                .child(if line.is_empty() {
-                    " ".to_owned()
-                } else {
-                    line
-                }),
-        );
-    }
-    blocks.push(code.into_any_element());
-}
-
-fn clean_inline_markdown(text: &str) -> String {
-    text.replace("**", "")
-        .replace("__", "")
-        .replace("~~", "")
-        .replace('`', "")
 }
 
 fn agent_item_key(agent: &AgentSessionSnapshot, index: usize, item: &AgentTimelineItem) -> String {
@@ -4347,83 +4385,56 @@ fn truncate_tool_detail(value: &str, limit: usize) -> String {
 
 fn tool_kind_label(kind: AgentToolKind) -> &'static str {
     match kind {
-        AgentToolKind::Read => "READ",
-        AgentToolKind::Edit => "EDIT",
-        AgentToolKind::Delete => "DELETE",
-        AgentToolKind::Move => "MOVE",
-        AgentToolKind::Search => "SEARCH",
-        AgentToolKind::Execute => "EXECUTE",
-        AgentToolKind::Think => "THINK",
-        AgentToolKind::Fetch => "FETCH",
-        AgentToolKind::SwitchMode => "MODE",
-        AgentToolKind::Other => "ACTION",
+        AgentToolKind::Read => "Read",
+        AgentToolKind::Edit => "Edit",
+        AgentToolKind::Delete => "Delete",
+        AgentToolKind::Move => "Move",
+        AgentToolKind::Search => "Search",
+        AgentToolKind::Execute => "Run",
+        AgentToolKind::Think => "Think",
+        AgentToolKind::Fetch => "Fetch",
+        AgentToolKind::SwitchMode => "Mode",
+        AgentToolKind::Other => "Action",
     }
 }
 
-fn tool_kind_icon(kind: AgentToolKind) -> IconName {
+fn tool_kind_icon(kind: AgentToolKind) -> &'static str {
     match kind {
-        AgentToolKind::Read => IconName::File,
-        AgentToolKind::Edit | AgentToolKind::SwitchMode => IconName::Replace,
-        AgentToolKind::Delete => IconName::Delete,
-        AgentToolKind::Move => IconName::ArrowRight,
-        AgentToolKind::Search => IconName::Search,
-        AgentToolKind::Execute => IconName::SquareTerminal,
-        AgentToolKind::Think => IconName::Asterisk,
-        AgentToolKind::Fetch => IconName::Globe,
-        AgentToolKind::Other => IconName::Ellipsis,
+        AgentToolKind::Read => bezel_icons::BOOK,
+        AgentToolKind::Edit => bezel_icons::PEN,
+        AgentToolKind::Delete => bezel_icons::TRASH_BIN_MINIMALISTIC,
+        AgentToolKind::Move => bezel_icons::ARROW_RIGHT,
+        AgentToolKind::Search => bezel_icons::MAGNIFER,
+        AgentToolKind::Execute => bezel_icons::TERMINAL,
+        AgentToolKind::Think => bezel_icons::CPU,
+        AgentToolKind::Fetch => bezel_icons::DOWNLOAD,
+        AgentToolKind::SwitchMode => bezel_icons::TUNING,
+        AgentToolKind::Other => bezel_icons::WIDGET,
     }
 }
 
-fn tool_status_element(status: ToolStatus) -> gpui::AnyElement {
+const fn tool_status_label(status: ToolStatus) -> &'static str {
     match status {
-        ToolStatus::Pending => Icon::new(IconName::Dash)
-            .xsmall()
-            .text_color(rgb(MUTED_TEXT))
-            .into_any_element(),
-        ToolStatus::Running => Icon::new(IconName::LoaderCircle)
-            .xsmall()
-            .text_color(tool_accent(status))
-            .into_any_element(),
-        ToolStatus::Completed => Icon::new(IconName::CircleCheck)
-            .xsmall()
-            .text_color(tool_accent(status))
-            .into_any_element(),
-        ToolStatus::Failed => Icon::new(IconName::CircleX)
-            .xsmall()
-            .text_color(tool_accent(status))
-            .into_any_element(),
-    }
-}
-
-fn tool_accent(status: ToolStatus) -> gpui::Rgba {
-    match status {
-        ToolStatus::Pending => rgb(MUTED_TEXT),
-        ToolStatus::Running => rgb(SIGNAL),
-        ToolStatus::Completed => rgb(0x0078_d6a3),
-        ToolStatus::Failed => rgb(0x00ef_7d7d),
+        ToolStatus::Pending => "queued",
+        ToolStatus::Running => "running",
+        ToolStatus::Completed => "done",
+        ToolStatus::Failed => "failed",
     }
 }
 
 fn agent_permission_controls(
     app: &gpui::WeakEntity<MuxApp>,
     agent: &AgentSessionSnapshot,
+    theme: &BezelTheme,
 ) -> impl IntoElement {
-    let mut controls = v_flex().w_full().min_w_0();
+    let mut controls = v_flex().w_full().min_w_0().px(px(18.0)).pb(px(8.0));
     if let Some(permission) = agent.pending_permission() {
-        controls = controls
+        let mut prompt = v_flex()
+            .w_full()
+            .max_w(px(720.0))
+            .mx_auto()
             .gap_2()
-            .p_3()
-            .rounded_lg()
-            .border_1()
-            .border_color(rgb(0x009f_7aea))
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .whitespace_normal()
-                    .font_semibold()
-                    .child(permission.title.clone()),
-            );
+            .child(theme.warning_strip(permission.title.clone()));
         let mut buttons = h_flex().w_full().min_w_0().gap_2().flex_wrap();
         for option in &permission.options {
             let resolve_app = app.clone();
@@ -4448,7 +4459,8 @@ fn agent_permission_controls(
                     }),
             );
         }
-        controls = controls.child(buttons);
+        prompt = prompt.child(buttons);
+        controls = controls.child(prompt);
     }
     controls
 }
@@ -4456,14 +4468,24 @@ fn agent_permission_controls(
 fn agent_auth_controls(
     app: &gpui::WeakEntity<MuxApp>,
     agent: &AgentSessionSnapshot,
+    theme: &BezelTheme,
 ) -> impl IntoElement {
-    let mut controls = h_flex().w_full().min_w_0().gap_2().flex_wrap();
+    let mut controls = v_flex()
+        .w_full()
+        .max_w(px(720.0))
+        .mx_auto()
+        .min_w_0()
+        .gap_2()
+        .px(px(18.0))
+        .pb(px(8.0));
     if agent.status == AgentSessionStatus::WaitingForAuthentication {
+        controls = controls.child(theme.warning_strip("This agent needs you to sign in."));
+        let mut methods = h_flex().w_full().min_w_0().gap_2().flex_wrap();
         for method in &agent.auth_methods {
             let auth_app = app.clone();
             let session_id = agent.id;
             let method_id = method.id.clone();
-            controls = controls.child(
+            methods = methods.child(
                 Button::new(SharedString::from(format!("agent-auth-{}", method.id)))
                     .label(format!("Sign in with {}", method.name))
                     .primary()
@@ -4479,6 +4501,7 @@ fn agent_auth_controls(
                     }),
             );
         }
+        controls = controls.child(methods);
     }
     controls
 }
@@ -4516,13 +4539,15 @@ fn timeline_item(item: &AgentTimelineItem) -> (&'static str, String, gpui::Rgba)
     }
 }
 
-fn status_color(status: AgentSessionStatus) -> gpui::Rgba {
+fn agent_status_tone(status: AgentSessionStatus, theme: &BezelTheme) -> Hsla {
     match status {
-        AgentSessionStatus::Idle => rgb(0x0078_d6a3),
-        AgentSessionStatus::Working | AgentSessionStatus::Starting => rgb(SIGNAL),
-        AgentSessionStatus::WaitingForPermission => rgb(0x00d9_9bea),
-        AgentSessionStatus::Failed => rgb(0x00ef_7d7d),
-        _ => rgb(MUTED_TEXT),
+        AgentSessionStatus::Idle => theme.success,
+        AgentSessionStatus::Working | AgentSessionStatus::Starting => theme.accent,
+        AgentSessionStatus::WaitingForAuthentication
+        | AgentSessionStatus::Authenticating
+        | AgentSessionStatus::WaitingForPermission => theme.warning,
+        AgentSessionStatus::Failed => theme.danger,
+        AgentSessionStatus::Closed => theme.text_faint,
     }
 }
 
@@ -4830,6 +4855,7 @@ fn quit_mux(_: &QuitMux, cx: &mut App) {
 fn configure_application_menu(cx: &mut App) {
     cx.set_menus(vec![Menu {
         name: "Mux".into(),
+        disabled: false,
         items: vec![
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
@@ -4897,50 +4923,71 @@ fn configure_application_actions(cx: &mut App) {
     configure_application_menu(cx);
 }
 
+fn mux_bezel_palette(appearance: BezelAppearance) -> BezelTheme {
+    let mut theme = BezelTheme::for_appearance(appearance);
+    theme.accent = color(if appearance.is_dark() {
+        SIGNAL
+    } else {
+        0x0018_719b
+    });
+    theme.accent_strong = theme.accent;
+    theme.on_accent = color(if appearance.is_dark() {
+        0x0006_151c
+    } else {
+        0x00f6_fbfe
+    });
+    theme.caret = theme.accent;
+    theme.selection = theme
+        .accent
+        .opacity(if appearance.is_dark() { 0.28 } else { 0.18 });
+    theme
+}
+
 fn configure_theme(cx: &mut App) {
-    Theme::change(ThemeMode::Dark, None, cx);
-    let theme = Theme::global_mut(cx);
-    theme.font_family = ".SystemUIFont".into();
+    ComponentTheme::change(ThemeMode::Dark, None, cx);
+    let bezel = BezelTheme::of(cx).clone();
+    let theme = ComponentTheme::global_mut(cx);
+    theme.font_family = bezel.font_sans.clone();
     theme.font_size = px(14.0);
-    theme.radius = px(7.0);
-    theme.radius_lg = px(11.0);
-    theme.background = color(CHROME);
-    theme.foreground = color(TEXT);
-    theme.muted = color(CHROME_RAISED);
-    theme.muted_foreground = color(MUTED_TEXT);
-    theme.primary = color(SIGNAL);
-    theme.primary_hover = color(0x0072_c4ef);
-    theme.primary_active = color(0x0049_9ccb);
-    theme.primary_foreground = color(0x0007_1017);
-    theme.secondary = color(CHROME_RAISED);
-    theme.secondary_hover = color(0x0027_2d39);
-    theme.secondary_active = color(0x0031_3846);
-    theme.secondary_foreground = color(TEXT);
-    theme.accent = color(0x0025_2b36);
-    theme.accent_foreground = color(TEXT);
-    theme.popover = color(CHROME);
-    theme.popover_foreground = color(TEXT);
-    theme.border = color(BORDER);
-    theme.input = color(0x0034_3a48);
-    theme.ring = color(SIGNAL);
-    theme.switch = color(0x0034_3a48);
-    theme.switch_thumb = color(0x00e9_eef5);
-    theme.tab_bar = color(CHROME);
-    theme.tab = color(CHROME);
-    theme.tab_active = color(CHROME_RAISED);
-    theme.tab_foreground = color(MUTED_TEXT);
-    theme.tab_active_foreground = color(TEXT);
-    theme.title_bar = color(CHROME);
-    theme.title_bar_border = color(BORDER);
-    theme.overlay = gpui::rgba(0x0000_009e).into();
-    theme.danger = color(0x00ef_7d7d);
-    theme.danger_foreground = color(0x0016_0808);
-    theme.warning = color(0x00d6_ad6b);
-    theme.warning_foreground = color(0x0017_1005);
-    theme.success = color(0x0078_d6a3);
-    theme.success_foreground = color(0x0007_130c);
-    theme.info = color(SIGNAL);
-    theme.info_foreground = color(0x0007_1017);
+    theme.radius = px(BezelTheme::CONTROL_RADIUS);
+    theme.radius_lg = px(BezelTheme::SURFACE_RADIUS);
+    theme.background = bezel.surface;
+    theme.foreground = bezel.text;
+    theme.muted = bezel.surface_raised;
+    theme.muted_foreground = bezel.text_muted;
+    theme.primary = bezel.accent_strong;
+    theme.primary_hover = bezel.accent_strong.opacity(0.88);
+    theme.primary_active = bezel.accent_strong.opacity(0.72);
+    theme.primary_foreground = bezel.on_accent;
+    theme.secondary = bezel.surface_raised;
+    theme.secondary_hover = bezel.surface_raised_hover;
+    theme.secondary_active = bezel.element_active;
+    theme.secondary_foreground = bezel.text;
+    theme.accent = bezel.element_hover;
+    theme.accent_foreground = bezel.text;
+    theme.popover = bezel.surface_overlay;
+    theme.popover_foreground = bezel.text;
+    theme.border = bezel.border;
+    theme.input = bezel.border_strong;
+    theme.ring = bezel.accent;
+    theme.switch = bezel.border_strong;
+    theme.switch_thumb = bezel.text;
+    theme.tab_bar = bezel.glass();
+    theme.tab = bezel.glass();
+    theme.tab_active = bezel.element_active;
+    theme.tab_foreground = bezel.text_muted;
+    theme.tab_active_foreground = bezel.text;
+    theme.title_bar = bezel.glass();
+    theme.title_bar_border = bezel.border;
+    theme.overlay = bezel.scrim();
+    theme.danger = bezel.danger;
+    theme.danger_foreground = bezel.on_accent;
+    theme.warning = bezel.warning;
+    theme.warning_foreground = bezel.on_accent;
+    theme.success = bezel.success;
+    theme.success_foreground = bezel.on_accent;
+    theme.info = bezel.accent;
+    theme.info_foreground = bezel.on_accent;
 }
 
 fn color(value: u32) -> Hsla {
@@ -4992,6 +5039,95 @@ fn application_state_dir() -> Option<PathBuf> {
         .or_else(mux_client::default_state_dir)
 }
 
+fn initialize_graphical_application(cx: &mut App) {
+    gpui_component::init(cx);
+    bezel_theme::set_palette(mux_bezel_palette, cx);
+    bezel_theme::appearance::init(bezel_theme::appearance::AppearanceMode::Dark, cx);
+    if let Err(error) = bezel_ui::register_fonts(cx) {
+        error!(%error, "failed to register Bezel interface fonts");
+    }
+    configure_application_actions(cx);
+    cx.bind_keys([KeyBinding::new(
+        "shift-enter",
+        Enter {
+            secondary: true,
+            shift: true,
+        },
+        Some("Input"),
+    )]);
+    cx.bind_keys([KeyBinding::new(
+        "escape",
+        CancelAgentTurn,
+        Some("MuxAgentPane"),
+    )]);
+    configure_theme(cx);
+    if let Err(error) = cx.text_system().add_fonts(vec![
+        Cow::Borrowed(
+            include_bytes!("../assets/fonts/JetBrainsMonoNerdFontMono-Regular.ttf").as_slice(),
+        ),
+        Cow::Borrowed(
+            include_bytes!("../assets/fonts/JetBrainsMonoNerdFontMono-Bold.ttf").as_slice(),
+        ),
+        Cow::Borrowed(
+            include_bytes!("../assets/fonts/JetBrainsMonoNerdFontMono-Italic.ttf").as_slice(),
+        ),
+        Cow::Borrowed(
+            include_bytes!("../assets/fonts/JetBrainsMonoNerdFontMono-BoldItalic.ttf").as_slice(),
+        ),
+    ]) {
+        error!(%error, "failed to register embedded terminal fonts");
+    }
+}
+
+fn run_graphical_application(
+    state_dir: Option<PathBuf>,
+    settings: AppSettings,
+    settings_error: Option<String>,
+) {
+    gpui_platform::application()
+        .with_assets(MuxAssets)
+        .run(move |cx: &mut App| {
+            initialize_graphical_application(cx);
+            let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
+            let window = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(560.0), px(360.0))),
+                    // Keep a native titled/resizable AppKit window while drawing content through
+                    // its transparent titlebar. A missing GPUI titlebar drops the standard
+                    // resizable/minimizable/closable style masks on macOS, which also prevents
+                    // window managers such as Rectangle from applying a requested frame.
+                    titlebar: Some(TitleBar::title_bar_options()),
+                    window_background: BezelTheme::of(cx).window_background_appearance(),
+                    app_id: Some("dev.mux.terminal".to_owned()),
+                    ..Default::default()
+                },
+                {
+                    let state_dir = state_dir.clone();
+                    move |window, cx| {
+                        bezel_theme::appearance::observe_window(window, cx).detach();
+                        let view = cx
+                            .new(|cx| MuxApp::new(window, cx, state_dir, settings, settings_error));
+                        let host = cx.new(|_| MuxLayerHost { view });
+                        cx.new(|cx| gpui_component::Root::new(host, window, cx))
+                    }
+                },
+            );
+            match window {
+                Ok(window) => {
+                    window
+                        .update(cx, |_, window, _| window.set_window_title("Mux"))
+                        .ok();
+                    cx.activate(true);
+                }
+                Err(error) => {
+                    error!(%error, "failed to open GPUI window");
+                    cx.quit();
+                }
+            }
+        });
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -5027,78 +5163,7 @@ fn main() -> Result<()> {
         },
     );
 
-    Application::new()
-        .with_assets(gpui_component_assets::Assets)
-        .run(move |cx: &mut App| {
-            gpui_component::init(cx);
-            configure_application_actions(cx);
-            cx.bind_keys([KeyBinding::new(
-                "shift-enter",
-                Enter { secondary: true },
-                Some("Input"),
-            )]);
-            cx.bind_keys([KeyBinding::new(
-                "escape",
-                CancelAgentTurn,
-                Some("MuxAgentPane"),
-            )]);
-            configure_theme(cx);
-            if let Err(error) = cx.text_system().add_fonts(vec![
-                Cow::Borrowed(
-                    include_bytes!("../assets/fonts/JetBrainsMonoNerdFontMono-Regular.ttf")
-                        .as_slice(),
-                ),
-                Cow::Borrowed(
-                    include_bytes!("../assets/fonts/JetBrainsMonoNerdFontMono-Bold.ttf").as_slice(),
-                ),
-                Cow::Borrowed(
-                    include_bytes!("../assets/fonts/JetBrainsMonoNerdFontMono-Italic.ttf")
-                        .as_slice(),
-                ),
-                Cow::Borrowed(
-                    include_bytes!("../assets/fonts/JetBrainsMonoNerdFontMono-BoldItalic.ttf")
-                        .as_slice(),
-                ),
-            ]) {
-                error!(%error, "failed to register embedded terminal fonts");
-            }
-            let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
-            let window = cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(560.0), px(360.0))),
-                    // Keep a native titled/resizable AppKit window while drawing content through
-                    // its transparent titlebar. A missing GPUI titlebar drops the standard
-                    // resizable/minimizable/closable style masks on macOS, which also prevents
-                    // window managers such as Rectangle from applying a requested frame.
-                    titlebar: Some(TitleBar::title_bar_options()),
-                    window_background: WindowBackgroundAppearance::Opaque,
-                    app_id: Some("dev.mux.terminal".to_owned()),
-                    ..Default::default()
-                },
-                {
-                    let state_dir = state_dir.clone();
-                    move |window, cx| {
-                        let view = cx
-                            .new(|cx| MuxApp::new(window, cx, state_dir, settings, settings_error));
-                        let host = cx.new(|_| MuxLayerHost { view });
-                        cx.new(|cx| gpui_component::Root::new(host, window, cx))
-                    }
-                },
-            );
-            match window {
-                Ok(window) => {
-                    window
-                        .update(cx, |_, window, _| window.set_window_title("Mux"))
-                        .ok();
-                    cx.activate(true);
-                }
-                Err(error) => {
-                    error!(%error, "failed to open GPUI window");
-                    cx.quit();
-                }
-            }
-        });
+    run_graphical_application(state_dir, settings, settings_error);
     Ok(())
 }
 
@@ -5217,11 +5282,7 @@ mod tests {
         })
         .expect("new terminal");
         let frame = engine.render_frame().expect("initial frame");
-        let next_sequence = engine
-            .attachment()
-            .expect("initial attachment")
-            .next_sequence;
-        let mut pane = PaneReplica::new(engine, frame, next_sequence);
+        let mut pane = PaneReplica::new(engine, frame);
         let displayed = Rc::clone(&pane.frame);
 
         assert_eq!(
@@ -5263,11 +5324,7 @@ mod tests {
             }))
             .expect("local selection");
         let local_frame = local_engine.render_frame().expect("local frame");
-        let local_next_sequence = local_engine
-            .attachment()
-            .expect("local attachment")
-            .next_sequence;
-        let local_replica = PaneReplica::new(local_engine, local_frame, local_next_sequence);
+        let local_replica = PaneReplica::new(local_engine, local_frame);
         let displayed = Rc::clone(&local_replica.frame);
 
         let mut daemon_engine = GhosttyEngine::new(TerminalSize {
@@ -5310,11 +5367,7 @@ mod tests {
         let mut local_engine = GhosttyEngine::new(size).expect("local terminal");
         local_engine.apply_output(1, b"one ").expect("local output");
         let local_frame = local_engine.render_frame().expect("local frame");
-        let local_next_sequence = local_engine
-            .attachment()
-            .expect("local attachment")
-            .next_sequence;
-        let local_replica = PaneReplica::new(local_engine, local_frame, local_next_sequence);
+        let local_replica = PaneReplica::new(local_engine, local_frame);
         let displayed = Rc::clone(&local_replica.frame);
 
         let mut daemon_engine = GhosttyEngine::new(size).expect("daemon terminal");
@@ -5353,14 +5406,53 @@ mod tests {
         let mut engine = GhosttyEngine::new(TerminalSize::default()).expect("terminal");
         engine.apply_output(1, b"once").expect("initial output");
         let frame = engine.render_frame().expect("frame");
-        let next_sequence = engine.attachment().expect("attachment").next_sequence;
-        let mut pane = PaneReplica::new(engine, frame, next_sequence);
+        let mut pane = PaneReplica::new(engine, frame);
 
         assert_eq!(
             pane.apply_output(1, b"once").expect("duplicate output"),
             PaneOutputUpdate::Duplicate
         );
-        assert_eq!(pane.next_output_sequence, 2);
+        assert_eq!(pane.engine.next_output_sequence(), 2);
+    }
+
+    #[test]
+    fn terminal_replicas_report_a_gap_without_advancing_the_engine() {
+        let mut engine = GhosttyEngine::new(TerminalSize::default()).expect("terminal");
+        let frame = engine.render_frame().expect("frame");
+        let mut pane = PaneReplica::new(engine, frame);
+
+        assert_eq!(
+            pane.apply_output(2, b"late").expect("detect gap"),
+            PaneOutputUpdate::Gap {
+                expected: 1,
+                actual: 2,
+            }
+        );
+        assert_eq!(pane.engine.next_output_sequence(), 1);
+        assert_eq!(
+            pane.apply_output(1, b"on time").expect("recover in order"),
+            PaneOutputUpdate::Applied
+        );
+        assert_eq!(pane.engine.next_output_sequence(), 2);
+    }
+
+    #[test]
+    fn inconsistent_attachment_sequence_is_rejected() {
+        let pane_id = PaneId::new();
+        let mut engine = GhosttyEngine::new(TerminalSize::default()).expect("terminal");
+        engine.apply_output(1, b"checkpointed").expect("output");
+        let mut terminal = engine.attachment().expect("attachment");
+        terminal.next_sequence = 1;
+        let pane = PaneAttachment {
+            pane_id,
+            terminal,
+            exit_status: None,
+        };
+
+        let Err(error) = super::restore_pane_replica(&pane, &GhosttyTheme::default()) else {
+            panic!("an attachment cursor that disagrees with its checkpoint must be rejected");
+        };
+        assert!(error.to_string().contains("invalid terminal attachment"));
     }
 
     #[test]

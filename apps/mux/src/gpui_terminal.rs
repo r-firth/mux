@@ -337,9 +337,14 @@ fn paint_terminal(
             origin.x + px(metrics.cell_width) * run.column,
             origin.y + px(metrics.cell_height) * run.row,
         );
-        let _ = run
-            .line
-            .paint(position, px(metrics.cell_height), window, cx);
+        let _ = run.line.paint(
+            position,
+            px(metrics.cell_height),
+            gpui::TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
     }
 
     if focused

@@ -2129,6 +2129,22 @@ mod linked {
                 engine.encode_mouse(&event).expect("mouse wheel up"),
                 b"\x1b[<64;1;1M"
             );
+
+            event.action = TerminalMouseAction::Motion;
+            event.button = None;
+            assert!(
+                engine
+                    .encode_mouse(&event)
+                    .expect("motion outside any-event mode")
+                    .is_empty()
+            );
+            engine
+                .apply_output(2, b"\x1b[?1003h")
+                .expect("enable any-event mouse tracking");
+            assert_eq!(
+                engine.encode_mouse(&event).expect("unpressed mouse motion"),
+                b"\x1b[<35;1;1M"
+            );
         }
 
         #[test]

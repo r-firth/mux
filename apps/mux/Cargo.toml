@@ -16,10 +16,13 @@ product = [
 anyhow.workspace = true
 arboard.workspace = true
 async-channel.workspace = true
+bezel.workspace = true
+bezel-markdown.workspace = true
 directories.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
 gpui-component-assets.workspace = true
+gpui_platform.workspace = true
 ignore.workspace = true
 mux-acp = { path = "../../crates/mux-acp" }
 mux-client = { path = "../../crates/mux-client" }
