@@ -88,6 +88,9 @@ fn set_private_socket_permissions(path: &Path) -> io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
+// One task owns each socket and its subscriptions; keeping the select loop in
+// one place makes response/event wire ordering auditable.
+#[allow(clippy::cognitive_complexity)]
 async fn handle_connection(
     stream: UnixStream,
     state: Arc<DaemonState>,

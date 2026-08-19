@@ -184,6 +184,9 @@ fn create_terminal_engine(
     Ok(Box::new(ReplayEngine::new(size, replay_bytes)))
 }
 
+// Keep PTY reads, batching, terminal mutation, response writes, and event
+// publication together so their ordering remains explicit and single-owner.
+#[allow(clippy::cognitive_complexity)]
 fn spawn_reader(
     session_id: SessionId,
     pane_id: PaneId,
