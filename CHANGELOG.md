@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0](https://github.com/r-firth/mux/compare/v0.8.0...v0.9.0) (2026-08-19)
+
+
+### Features
+
+* add ACP authentication flow ([80c3406](https://github.com/r-firth/mux/commit/80c3406319cea9445582f4092063658ec5b8ffbf))
+* add configurable ACP integrations ([c938ccc](https://github.com/r-firth/mux/commit/c938ccce6b4456eedff0f97210d243dcd6163d15))
+* add native terminal hyperlinks ([253f3f9](https://github.com/r-firth/mux/commit/253f3f9837b30258f4761f8ed3b51fc56b4444b2))
+* adopt Bezel and refine terminal interaction ([8e006de](https://github.com/r-firth/mux/commit/8e006de38d6cc33c572107c3b15713b1477ffcae))
+* adopt Ghostty selection gestures ([fdc5fcf](https://github.com/r-firth/mux/commit/fdc5fcfd069414de31f1f6fcfe02ce4b238f1c85))
+* build persistent native terminal with ACP agents ([235e1a3](https://github.com/r-firth/mux/commit/235e1a3355495a2c595358837fcaf8f1603c9b7f))
+* complete native session lifecycle ([6a5f98a](https://github.com/r-firth/mux/commit/6a5f98ac602d3436c2d061ac70226818267ff5fb))
+* expose Zellij resize behind pane mode ([c5e4514](https://github.com/r-firth/mux/commit/c5e45140a3b774a9f888bec79220ff627fff7516))
+* make ACP agents first-class panes ([b9d91cd](https://github.com/r-firth/mux/commit/b9d91cd02d95e22282d283c38b70f908cf24e9c0))
+* make ACP agents keyboard-first ([ec8cc37](https://github.com/r-firth/mux/commit/ec8cc37b9cba3519fe0c396b56f90eaba2660ff8))
+* make agent pane keyboard first ([be28184](https://github.com/r-firth/mux/commit/be28184bf7e955a49ba75435de0971cc160acc62))
+* make session switching feel durable ([063bb48](https://github.com/r-firth/mux/commit/063bb48bc085ac914412cb4d89d7df806cada9eb))
+* migrate native UI to GPUI ([f1e9c9e](https://github.com/r-firth/mux/commit/f1e9c9e6169661802cdd9c306a55c251023b1b50))
+* polish ACP agent timeline ([6bfaba0](https://github.com/r-firth/mux/commit/6bfaba05ee303c6984f59cc2e1a26051fa729553))
+* polish native tab renaming ([6e4651b](https://github.com/r-firth/mux/commit/6e4651b6e686d74d7ab16d0ce456b8ca65d1a0b5))
+* polish terminal performance and app identity ([3165cde](https://github.com/r-firth/mux/commit/3165cdedf2bb236ab78120a34b909fc719450516))
+* scope ACP agents to tabs ([224c40a](https://github.com/r-firth/mux/commit/224c40a62c3de727f5e0ffd2b907ce94790426d7))
+* surface ACP slash commands ([d44f303](https://github.com/r-firth/mux/commit/d44f30362ec5cfd22651a09acef45664f116d5c9))
+* surface agent attention in tabs ([76de753](https://github.com/r-firth/mux/commit/76de75329dd7c7ac9f8e3845248998684c6e787f))
+* turn agents into durable workspaces ([c225e89](https://github.com/r-firth/mux/commit/c225e8966c2b009e0c39b26fabb0dcbdbf750379))
+
+
+### Bug Fixes
+
+* attach safely to legacy workspaces ([16b59dc](https://github.com/r-firth/mux/commit/16b59dcf26185575b604a326e1bcae73e3570ba3))
+* complete release PR lifecycle ([60a4659](https://github.com/r-firth/mux/commit/60a46599e4cec787007ef346c7354055d76245c6))
+* enable native IME composition ([045f19c](https://github.com/r-firth/mux/commit/045f19c1d60ebfeac57d66137d5aa8890303d174))
+* harden tab and terminal synchronization ([9db3165](https://github.com/r-firth/mux/commit/9db3165268ed506b905b281a75be20ec02a62a7b))
+* honor Ghostty cursor blinking ([7ea2e3f](https://github.com/r-firth/mux/commit/7ea2e3ff13dd00365a01474a614ed88075e3e283))
+* honor Ghostty font settings ([c6ec19c](https://github.com/r-firth/mux/commit/c6ec19cdde4650de208781c35a54683c5f392d27))
+* honor macOS package target architecture ([70eb7b9](https://github.com/r-firth/mux/commit/70eb7b9cd4bca867f64e625b8457ca5908322eaa))
+* isolate preview workspaces ([870f8e5](https://github.com/r-firth/mux/commit/870f8e5ad3b5fd3832aed717058f6e849b8da457))
+* keep terminal grids aligned ([f2d9acf](https://github.com/r-firth/mux/commit/f2d9acfa355d5d8e6eca81d6daa02e7ed9488630))
+* make local macOS signing distribution-safe ([77fccac](https://github.com/r-firth/mux/commit/77fccac72bf8c89f03a0e53dd2bd3c3590e200b1))
+* make terminal output sequencing authoritative ([a4eb965](https://github.com/r-firth/mux/commit/a4eb965e938a4a79f7a42e153fd59d5af4210bc6))
+* preserve terminal interaction across workspace updates ([a0b67b6](https://github.com/r-firth/mux/commit/a0b67b66b7de755d18106e11a76663f6f98602bd))
+* recover from missing ACP runtimes ([3130a77](https://github.com/r-firth/mux/commit/3130a77bd7a502c20d9ef98c1b98d7adaebcb331))
+* recover orphaned terminal keyboard state ([dc621c9](https://github.com/r-firth/mux/commit/dc621c96663e3905e48d3c979ae54d5dc8769a95))
+* report the current terminal version ([c4174f5](https://github.com/r-firth/mux/commit/c4174f56f8b056086f1d2f3d539c13b3ecb13bb0))
+* resolve ACP runtimes across daemon boundary ([75ca22f](https://github.com/r-firth/mux/commit/75ca22f30fc55cab09034418687b7bb61e2ee9ce))
+* restore native app shortcuts and agent help ([3153140](https://github.com/r-firth/mux/commit/31531408b30a71e49bbf53afdc1a32c7d0d89373))
+* restore terminal Tab and Caps Lock input ([4cb0251](https://github.com/r-firth/mux/commit/4cb025124ab232c7f20c5e4443c425ef0f56f746))
+
+
+### Performance Improvements
+
+* coalesce agent surface updates ([b5df79b](https://github.com/r-firth/mux/commit/b5df79b374430ec7006f0a70636244be1d110387))
+* coalesce terminal output and tighten internals ([a013b6d](https://github.com/r-firth/mux/commit/a013b6d5d7820f85716388fde6ea8265ee513818))
+* reuse terminal render storage ([defc8f5](https://github.com/r-firth/mux/commit/defc8f5f25cc5f23a1fb5ef85b0309d94ae2857f))
+
+
+### Reverts
+
+* remove legacy workspace fallback ([fa2be8a](https://github.com/r-firth/mux/commit/fa2be8ae7371dbe5e983a17b4edfed83f9da8fe3))
+
 ## [0.8.0](https://github.com/r-firth/mux/compare/v0.7.0...v0.8.0) (2026-08-19)
 
 

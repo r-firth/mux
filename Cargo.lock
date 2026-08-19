@@ -4390,7 +4390,7 @@ dependencies = [
 
 [[package]]
 name = "mux"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4421,7 +4421,7 @@ dependencies = [
 
 [[package]]
 name = "mux-acp"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "agent-client-protocol",
  "indexmap 2.14.0",
@@ -4436,7 +4436,7 @@ dependencies = [
 
 [[package]]
 name = "mux-client"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "directories",
  "mux-acp",
@@ -4450,7 +4450,7 @@ dependencies = [
 
 [[package]]
 name = "mux-daemon"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4475,7 +4475,7 @@ dependencies = [
 
 [[package]]
 name = "mux-protocol"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "mux-acp",
  "mux-terminal",
@@ -4489,7 +4489,7 @@ dependencies = [
 
 [[package]]
 name = "mux-terminal"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -4497,7 +4497,7 @@ dependencies = [
 
 [[package]]
 name = "mux-terminal-ghostty"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "cc",
  "directories",
@@ -4508,7 +4508,7 @@ dependencies = [
 
 [[package]]
 name = "mux-workspace"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -4517,7 +4517,7 @@ dependencies = [
 
 [[package]]
 name = "muxctl"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "clap",
