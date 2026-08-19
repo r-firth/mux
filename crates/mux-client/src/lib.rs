@@ -686,7 +686,12 @@ mod tests {
         let preview = state_dir_for("MuxPreview").expect("preview state directory");
 
         assert_ne!(preview, product);
-        assert!(preview.to_string_lossy().contains("MuxPreview"));
+        assert!(
+            preview
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .contains("muxpreview")
+        );
     }
 
     #[test]
