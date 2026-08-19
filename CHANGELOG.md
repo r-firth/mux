@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0](https://github.com/r-firth/mux/compare/v0.6.0...v0.7.0) (2026-08-19)
+
+
+### Features
+
+* adopt Bezel and refine terminal interaction ([8e006de](https://github.com/r-firth/mux/commit/8e006de38d6cc33c572107c3b15713b1477ffcae))
+
+
+### Bug Fixes
+
+* harden tab and terminal synchronization ([9db3165](https://github.com/r-firth/mux/commit/9db3165268ed506b905b281a75be20ec02a62a7b))
+* make local macOS signing distribution-safe ([77fccac](https://github.com/r-firth/mux/commit/77fccac72bf8c89f03a0e53dd2bd3c3590e200b1))
+* make terminal output sequencing authoritative ([a4eb965](https://github.com/r-firth/mux/commit/a4eb965e938a4a79f7a42e153fd59d5af4210bc6))
+* preserve terminal interaction across workspace updates ([a0b67b6](https://github.com/r-firth/mux/commit/a0b67b66b7de755d18106e11a76663f6f98602bd))
+
 ## [0.6.0](https://github.com/r-firth/mux/compare/v0.5.2...v0.6.0) (2026-08-14)
 
 ### Features
