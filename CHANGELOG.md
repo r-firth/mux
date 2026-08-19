@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0](https://github.com/r-firth/mux/compare/v0.7.0...v0.8.0) (2026-08-19)
+
+
+### Features
+
+* make session switching feel durable ([063bb48](https://github.com/r-firth/mux/commit/063bb48bc085ac914412cb4d89d7df806cada9eb))
+* surface agent attention in tabs ([76de753](https://github.com/r-firth/mux/commit/76de75329dd7c7ac9f8e3845248998684c6e787f))
+* turn agents into durable workspaces ([c225e89](https://github.com/r-firth/mux/commit/c225e8966c2b009e0c39b26fabb0dcbdbf750379))
+
+
+### Bug Fixes
+
+* recover orphaned terminal keyboard state ([dc621c9](https://github.com/r-firth/mux/commit/dc621c96663e3905e48d3c979ae54d5dc8769a95))
+
 ## [0.7.0](https://github.com/r-firth/mux/compare/v0.6.0...v0.7.0) (2026-08-19)
 
 
