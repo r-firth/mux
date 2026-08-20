@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/demo.gif" alt="Mux panes, tabs, Neovim, and htop" width="1200">
+  <img src="assets/demo.gif" alt="Mux running terminals, Neovim, and a native Codex agent pane" width="1200">
 </p>
 
 ## What is Mux?
@@ -99,7 +99,8 @@ that for subsequent prompts.
 `/new` starts another agent session in the same tab. Option+Left/Right moves
 through those sessions, then continues into neighboring terminal panes or tabs
 at the edge. `Ctrl+a` returns the pane to its terminal without ending the agent,
-Escape cancels a running turn, and `/end` ends the selected agent session.
+Escape cancels a running turn, and `/end` ends the selected agent session and
+removes it from the session picker.
 
 Mux includes launch profiles for Codex, Claude Agent, Gemini CLI, and GitHub
 Copilot CLI. Custom ACP agents use the same `agent_servers` shape as Zed. Add an

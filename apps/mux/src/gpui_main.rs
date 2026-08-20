@@ -1090,18 +1090,18 @@ impl MuxApp {
 
     fn agents_for_active_tab(&self) -> impl Iterator<Item = &AgentSessionSnapshot> {
         let tab_id = self.active_tab_id();
-        self.agents
-            .iter()
-            .filter(move |agent| agent.tab_id == tab_id && tab_id.is_some())
+        self.agents.iter().filter(move |agent| {
+            agent.tab_id == tab_id && tab_id.is_some() && agent_session_is_visible(agent.status)
+        })
     }
 
     fn active_agent(&self) -> Option<&AgentSessionSnapshot> {
         let tab_id = self.active_tab_id()?;
         match self.selected_agents.get(&tab_id) {
             Some(Some(session_id)) => self
-                .agents
-                .iter()
-                .find(|agent| agent.tab_id == Some(tab_id) && agent.id == *session_id),
+                .agents_for_active_tab()
+                .find(|agent| agent.id == *session_id)
+                .or_else(|| self.agents_for_active_tab().next()),
             Some(None) => None,
             None => self.agents_for_active_tab().next(),
         }
@@ -3447,6 +3447,10 @@ fn agent_session_picker_label(agent: &AgentSessionSnapshot) -> String {
     )
 }
 
+const fn agent_session_is_visible(status: AgentSessionStatus) -> bool {
+    !matches!(status, AgentSessionStatus::Closed)
+}
+
 fn agent_display_name(agent: &AgentSessionSnapshot) -> &str {
     agent.agent_name.as_deref().unwrap_or(agent.name.as_str())
 }
@@ -4219,7 +4223,7 @@ fn agent_session_empty_copy(
         AgentSessionStatus::Closed => (
             "SESSION ENDED",
             format!("{name} has stopped."),
-            "The transcript remains available here; use /new when you want another session.",
+            "This session is no longer shown in the picker; use /new when you want another session.",
         ),
     }
 }
@@ -5671,12 +5675,12 @@ mod tests {
     use super::{
         AgentTabActivity, GridMetrics, PaneOutputUpdate, PaneReplica, PaneScrollState,
         agent_composer_height, agent_pane_is_compact, agent_session_empty_copy,
-        agent_surface_inset, agent_tab_activity, agent_tab_activity_label,
-        format_agent_context_usage, format_session_pane_count, format_tab_pane_count,
-        input_position_at, layout, pane_needs_live_frame, reconcile_pane_replicas,
-        take_terminal_key_release, terminal_frame_text, terminal_input_pane,
-        terminal_key_down_target, terminal_key_event, terminal_sizes_for_geometry,
-        terminal_tab_keystroke,
+        agent_session_is_visible, agent_surface_inset, agent_tab_activity,
+        agent_tab_activity_label, format_agent_context_usage, format_session_pane_count,
+        format_tab_pane_count, input_position_at, layout, pane_needs_live_frame,
+        reconcile_pane_replicas, take_terminal_key_release, terminal_frame_text,
+        terminal_input_pane, terminal_key_down_target, terminal_key_event,
+        terminal_sizes_for_geometry, terminal_tab_keystroke,
     };
     use mux_acp::AgentSessionStatus;
 
@@ -5749,6 +5753,13 @@ mod tests {
             agent_tab_activity_label(AgentTabActivity::Attention),
             "agent needs attention"
         );
+    }
+
+    #[test]
+    fn ended_agent_sessions_are_hidden_from_the_picker() {
+        assert!(agent_session_is_visible(AgentSessionStatus::Idle));
+        assert!(agent_session_is_visible(AgentSessionStatus::Failed));
+        assert!(!agent_session_is_visible(AgentSessionStatus::Closed));
     }
 
     #[test]

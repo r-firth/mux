@@ -76,6 +76,7 @@ used throughout.
 | Option+Left / Right | Move through tab-local agent sessions, then panes/tabs at the edge |
 | Option+Up / Down | Focus the terminal pane above or below |
 
-`/new [agent] [cwd]` starts another session, `/end` ends the selected session,
-and `/help` renders the full local and agent-advertised command reference in the
-conversation. Native controls remain an optional mouse path.
+`/new [agent] [cwd]` starts another session, `/end` ends the selected session
+and removes it from the session picker, and `/help` renders the full local and
+agent-advertised command reference in the conversation. Native controls remain
+an optional mouse path.

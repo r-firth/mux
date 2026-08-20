@@ -98,9 +98,10 @@ This keeps durable checkpoints and every attached client in agreement while
 preserving enhanced keyboard input for live TUIs.
 
 The daemon also owns ACP processes. Closing the native agent surface only
-detaches that view; explicit `/end` closes the selected process. A new agent is
-started for a pane ID rather than a GUI-supplied guessed path, so the daemon can
-resolve the foreground shell's current directory at the moment of launch.
+detaches that view; explicit `/end` closes the selected process and the GUI
+hides its closed snapshot from the session picker. A new agent is started for a
+pane ID rather than a GUI-supplied guessed path, so the daemon can resolve the
+foreground shell's current directory at the moment of launch.
 
 ## Agent boundary
 
