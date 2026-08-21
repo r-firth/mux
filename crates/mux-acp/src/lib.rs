@@ -166,7 +166,7 @@ pub struct AgentProfile {
     pub spec: AgentSpec,
 }
 
-/// Small, high-quality default set sourced from the official ACP registry.
+/// Small default set sourced from the official ACP registry.
 /// Registry installation/caching can replace these launch recipes without
 /// changing the daemon or UI contracts.
 #[must_use]
