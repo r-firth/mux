@@ -845,7 +845,13 @@ impl MuxApp {
     /// long enough to read it. Clicking it, or the next thing said, clears it.
     fn say_in_strip(&mut self, text: impl Into<String>, problem: bool, cx: &mut Context<Self>) {
         let text = text.into();
-        let seconds = 4 + (text.chars().count() / 20).min(8) as u64;
+        // Long enough to read: problems linger, confirmations don't.
+        let length = text.chars().count() as u64;
+        let millis = if problem {
+            4_000 + (length * 50).min(8_000)
+        } else {
+            2_000 + (length * 30).min(3_000)
+        };
         self.strip_serial += 1;
         let serial = self.strip_serial;
         self.strip_message = Some(StripMessage {
@@ -855,7 +861,7 @@ impl MuxApp {
         });
         cx.spawn(async move |entity, cx| {
             cx.background_executor()
-                .timer(Duration::from_secs(seconds))
+                .timer(Duration::from_millis(millis))
                 .await;
             let _ = entity.update(cx, |this, cx| {
                 if this
@@ -1506,7 +1512,7 @@ impl MuxApp {
         }
 
         let Some(chord) = key_chord(&event.keystroke) else {
-            self.send_terminal_key_down(&event.keystroke, event.is_held, window.capslock().on);
+            self.send_terminal_key_down(&event.keystroke, event.is_held, window.capslock().on, cx);
             cx.stop_propagation();
             return;
         };
@@ -1520,7 +1526,7 @@ impl MuxApp {
             self.perform_action(action, window, cx);
             cx.stop_propagation();
         } else {
-            self.send_terminal_key_down(&event.keystroke, event.is_held, window.capslock().on);
+            self.send_terminal_key_down(&event.keystroke, event.is_held, window.capslock().on, cx);
             cx.stop_propagation();
         }
     }
@@ -1538,7 +1544,13 @@ impl MuxApp {
         cx.stop_propagation();
     }
 
-    fn send_terminal_key_down(&mut self, keystroke: &gpui::Keystroke, held: bool, caps_lock: bool) {
+    fn send_terminal_key_down(
+        &mut self,
+        keystroke: &gpui::Keystroke,
+        held: bool,
+        caps_lock: bool,
+        cx: &mut Context<Self>,
+    ) {
         if keystroke.modifiers.platform && keystroke.key == "c" {
             let selected = self.selected_pane.or_else(|| self.focused_pane_id());
             if let Some(text) = selected
@@ -1546,7 +1558,15 @@ impl MuxApp {
                 .and_then(|pane| pane.engine.selected_text().ok().flatten())
                 && let Some(clipboard) = &mut self.clipboard
             {
-                let _ = clipboard.set_text(text);
+                let lines = text.lines().count().max(1);
+                if clipboard.set_text(text).is_ok() {
+                    let copied = if lines == 1 {
+                        "copied 1 line".to_owned()
+                    } else {
+                        format!("copied {lines} lines")
+                    };
+                    self.say_in_strip(copied, false, cx);
+                }
             }
             return;
         }
@@ -1609,7 +1629,7 @@ impl MuxApp {
         }
         let keystroke = terminal_tab_keystroke(shift);
         self.terminal_key_presses.remove(&keystroke.key);
-        self.send_terminal_key_down(&keystroke, false, window.capslock().on);
+        self.send_terminal_key_down(&keystroke, false, window.capslock().on, cx);
         cx.stop_propagation();
     }
 
