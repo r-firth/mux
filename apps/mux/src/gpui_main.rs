@@ -6,6 +6,7 @@
 
 mod agent_completion;
 mod backend;
+mod chrome;
 mod gpui_terminal;
 mod layout;
 mod settings;
@@ -31,13 +32,15 @@ use bezel::{
         widgets::{self as bezel_widgets, Content as _, Scaffolding as _, Status as _},
     },
 };
+use chrome::{Ink, TitleScanner};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Animation, AnimationExt as _, App, AppContext as _, AssetSource, Bounds, Context, Entity,
-    FocusHandle, Hsla, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent,
-    Menu, MenuItem, ParentElement as _, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled, SystemMenuType, Window, WindowBounds, WindowOptions,
-    div, px, rgb, size,
+    Animation, AnimationExt as _, App, AppContext as _, AssetSource, Bounds, BoxShadow, Context,
+    Entity, FocusHandle, FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyBinding,
+    KeyDownEvent, KeyUpEvent, Menu, MenuItem, ObjectFit, ParentElement as _, Render, ScrollHandle,
+    SharedString, StatefulInteractiveElement as _, Styled, StyledImage as _, SystemMenuType,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, div, img, linear_color_stop,
+    linear_gradient, point, px, rgb, size,
 };
 use gpui_component::{
     Icon, IconName, InteractiveElementExt as _, Selectable as _, Sizable as _, StyledExt as _,
@@ -77,10 +80,16 @@ use tracing::{debug, error, info, warn};
 
 const WINDOW_WIDTH: f32 = 1120.0;
 const WINDOW_HEIGHT: f32 = 720.0;
-const SURFACE: u32 = 0x0011_131a;
-const MUTED_TEXT: u32 = 0x008c_96a8;
-const SIGNAL: u32 = 0x005e_b6e8;
-const HEADER_ACTIONS_WIDTH: f32 = 142.0;
+/// gofer's warm ink: the ground the slabs sit on.
+const GROUND: u32 = 0x000c_0a09;
+/// Pane slabs and the terminal surface inside them.
+const SURFACE: u32 = 0x0015_1210;
+const TEXT: u32 = 0x00ec_e8df;
+const MUTED_TEXT: u32 = 0x00aa_a397;
+const FAINT_TEXT: u32 = 0x0084_7d71;
+const SAGE: u32 = 0x00a7_b89c;
+const SIGNAL: u32 = 0x00f2_9a6b;
+const HEADER_ACTIONS_WIDTH: f32 = 72.0;
 const EMBEDDED_TERMINAL_FONT: &str = "JetBrainsMono Nerd Font Mono";
 const INITIAL_USER_EVENT_BATCH_CAPACITY: usize = 8;
 const MAX_USER_EVENT_BATCH: usize = 256;
@@ -89,6 +98,9 @@ struct MuxAssets;
 
 impl AssetSource for MuxAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        if let Some(ground) = chrome::ground_asset(path) {
+            return Ok(Some(Cow::Borrowed(ground)));
+        }
         let bezel_assets = bezel_icons::Assets;
         if let Some(asset) = bezel_assets.load(path)? {
             return Ok(Some(asset));
@@ -99,6 +111,11 @@ impl AssetSource for MuxAssets {
     fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
         let mut assets = bezel_icons::Assets.list(path)?;
         assets.extend(gpui_component_assets::Assets.list(path)?);
+        assets.extend(
+            chrome::ground_assets()
+                .into_iter()
+                .filter(|asset| asset.starts_with(path)),
+        );
         assets.sort_unstable();
         assets.dedup();
         Ok(assets)
@@ -156,6 +173,7 @@ struct PaneReplica {
     engine: GhosttyEngine,
     frame: Rc<RenderFrame>,
     render_cache: Rc<RefCell<TerminalRenderCache>>,
+    title: TitleScanner,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -178,6 +196,7 @@ impl PaneReplica {
             engine,
             frame: Rc::new(frame),
             render_cache: Rc::new(RefCell::new(TerminalRenderCache::default())),
+            title: TitleScanner::default(),
         }
     }
 
@@ -193,6 +212,7 @@ impl PaneReplica {
             });
         }
         self.engine.apply_output(sequence, bytes)?;
+        self.title.scan(bytes);
         Ok(PaneOutputUpdate::Applied)
     }
 
@@ -222,6 +242,7 @@ fn restore_pane_replica(
         .ok_or_else(|| anyhow!("daemon returned a non-libghostty terminal attachment"))?;
     let mut engine = GhosttyEngine::restore(checkpoint)
         .with_context(|| format!("restore terminal pane {}", pane.pane_id))?;
+    let mut title = TitleScanner::default();
     let mut frame = engine.render_frame()?;
     if frame.background == Rgb::default() && !ghostty_theme.is_empty() {
         engine.apply_theme(ghostty_theme)?;
@@ -229,6 +250,7 @@ fn restore_pane_replica(
     }
     for chunk in &pane.terminal.replay {
         engine.apply_output(chunk.sequence, &chunk.bytes)?;
+        title.scan(&chunk.bytes);
     }
     let restored_next_sequence = engine.next_output_sequence();
     if restored_next_sequence != pane.terminal.next_sequence {
@@ -242,7 +264,9 @@ fn restore_pane_replica(
     if !pane.terminal.replay.is_empty() {
         engine.render_frame_into(&mut frame)?;
     }
-    Ok(PaneReplica::new(engine, frame))
+    let mut replica = PaneReplica::new(engine, frame);
+    replica.title = title;
+    Ok(replica)
 }
 
 fn restore_pane_replicas(
@@ -349,6 +373,9 @@ struct MuxApp {
     agent_help_tabs: HashSet<TabId>,
     expanded_agent_items: HashSet<String>,
     agent_context: AgentContextMode,
+    /// GUI-local tab colours. New tabs take the next ink by position and keep
+    /// it, so closing a tab never repaints its neighbours.
+    tab_inks: HashMap<TabId, Ink>,
     selected_pane: Option<PaneId>,
     pending_focused_pane: Option<PaneId>,
     selection_drag: Option<TerminalPointerCapture>,
@@ -479,6 +506,7 @@ impl MuxApp {
             agent_help_tabs: HashSet::new(),
             expanded_agent_items: HashSet::new(),
             agent_context: AgentContextMode::Tab,
+            tab_inks: HashMap::new(),
             selected_pane: None,
             pending_focused_pane: None,
             selection_drag: None,
@@ -797,6 +825,34 @@ impl MuxApp {
             })
             .collect::<HashMap<_, _>>();
         self.agent_panes = valid_agent_panes;
+
+        let tabs = self
+            .session
+            .as_ref()
+            .map(|session| session.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>())
+            .unwrap_or_default();
+        self.tab_inks.retain(|tab_id, _| tabs.contains(tab_id));
+        for (position, tab_id) in tabs.into_iter().enumerate() {
+            self.tab_inks
+                .entry(tab_id)
+                .or_insert_with(|| Ink::for_position(position));
+        }
+    }
+
+    fn tab_ink(&self, tab_id: TabId) -> Ink {
+        self.tab_inks.get(&tab_id).copied().unwrap_or(Ink::Peach)
+    }
+
+    fn active_ink(&self) -> Ink {
+        self.active_tab_id()
+            .map_or(Ink::Peach, |tab_id| self.tab_ink(tab_id))
+    }
+
+    fn cycle_active_tab_ink(&mut self) {
+        if let Some(tab_id) = self.active_tab_id() {
+            let next = self.tab_ink(tab_id).next();
+            self.tab_inks.insert(tab_id, next);
+        }
     }
 
     fn apply_server_event(&mut self, event: ServerEvent) -> Result<()> {
@@ -1164,6 +1220,12 @@ impl MuxApp {
             cx.stop_propagation();
             return;
         };
+        if self.mode == InputMode::Tab && chord == KeyChord::plain(MuxKey::Character('c')) {
+            self.cycle_active_tab_ink();
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
         if let Some(action) = self.keymap.resolve(self.mode, chord).cloned() {
             self.perform_action(action, window, cx);
             cx.stop_propagation();
@@ -2791,137 +2853,358 @@ impl MuxApp {
         }
     }
 
-    fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = BezelTheme::of(cx).clone();
-        let mut bar = h_flex()
-            .h(px(layout::TAB_BAR_HEIGHT))
-            .w_full()
+    fn render_tab_chip(
+        &self,
+        position: usize,
+        tab: &mux_workspace::Tab,
+        active: bool,
+        theme: &BezelTheme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let tab_id = tab.id;
+        let tab_mode = self.mode == InputMode::Tab;
+        let ink = self.tab_ink(tab_id);
+        let activity = agent_tab_activity(
+            self.agents
+                .iter()
+                .filter(|agent| agent.tab_id == Some(tab_id))
+                .map(|agent| agent.status),
+        );
+        let mut chip = h_flex()
+            .id(SharedString::from(format!("tab-{tab_id}")))
+            .flex_none()
+            .h(px(24.0))
+            .px(px(9.0))
+            .gap(px(8.0))
             .items_center()
-            .gap_1()
-            .px_1()
-            .border_b_1()
-            .border_color(theme.border)
-            .bg(theme.glass())
-            .font_family(theme.font_sans.clone());
-        if cfg!(target_os = "macos") {
-            bar = bar.child(div().w(px(70.0)).h_full());
-        }
-        if let Some(session) = &self.session {
-            for tab in &session.tabs {
-                let tab_id = tab.id;
-                let active = tab_id == session.active_tab;
-                let activity = agent_tab_activity(
-                    self.agents
-                        .iter()
-                        .filter(|agent| agent.tab_id == Some(tab_id))
-                        .map(|agent| agent.status),
-                );
-                let title = tab.title.clone();
-                let mut button = Button::new(SharedString::from(format!("tab-{tab_id}")))
-                    .label(title.clone())
-                    .ghost()
-                    .small()
-                    .compact()
-                    .selected(active)
-                    .on_click(cx.listener(move |this, _, _, _| {
-                        this.send_workspace(WorkspaceCommand::SelectTab(tab_id));
-                    }));
-                if let Some(activity) = activity {
-                    button = button
-                        .tooltip(format!("{title} · {}", agent_tab_activity_label(activity)))
-                        .child(
-                            div()
-                                .flex_none()
-                                .size(px(5.0))
-                                .rounded_full()
-                                .bg(agent_tab_activity_tone(activity, &theme)),
-                        );
-                }
-                bar = bar.child(button);
-            }
-        }
-        bar.child(
-            Button::new("tab-new")
-                .icon(IconName::Plus)
-                .label("New")
-                .ghost()
-                .xsmall()
-                .compact()
-                .tooltip("New terminal tab")
-                .on_click(cx.listener(|this, _, _, _| {
-                    this.send_workspace(WorkspaceCommand::NewTab);
-                })),
-        )
-        .child(
-            div()
-                .id("window-drag-region")
-                .flex_1()
-                .h_full()
-                .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
-                    cx.stop_propagation();
-                    window.start_window_move();
-                })
-                .on_double_click(|_, window, cx| {
-                    cx.stop_propagation();
-                    window.zoom_window();
-                }),
-        )
-        .child(div().w(px(HEADER_ACTIONS_WIDTH)).h_full())
-    }
-
-    fn render_mode_bar(&self, theme: &BezelTheme) -> gpui::AnyElement {
-        let (label, help) = match self.mode {
-            InputMode::Normal => ("NORMAL", ""),
-            InputMode::Pane => (
-                "PANE",
-                "d down · r right · arrows focus · a agent · x close · f zoom",
-            ),
-            InputMode::Tab => (
-                "TAB",
-                "n new · x close · r rename · 1–9 select · arrows switch",
-            ),
-            InputMode::Session => ("SESSION", "w switch · d detach"),
-            InputMode::Resize => ("RESIZE", "arrows resize · Enter finish"),
-        };
-        let bar = h_flex()
-            .absolute()
-            .left_0()
-            .right_0()
-            .bottom_0()
-            .h(px(30.0))
-            .px_3()
-            .gap_3()
-            .bg(theme.glass())
-            .border_t_1()
-            .border_color(theme.border)
-            .font_family(theme.font_sans.clone())
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .cursor_pointer()
             .child(
                 div()
-                    .text_xs()
-                    .font_semibold()
-                    .text_color(theme.accent)
-                    .child(label),
+                    .font_weight(FontWeight::NORMAL)
+                    .text_color(if active {
+                        ink.color()
+                    } else {
+                        color(FAINT_TEXT)
+                    })
+                    .child((position + 1).to_string()),
             )
-            .child(div().text_xs().text_color(theme.text_muted).child(help));
-        if self.motion == MotionPreference::Reduced {
-            bar.into_any_element()
+            .child(div().child(tab.title.clone()))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(8.0))
+                    .rounded(px(2.0))
+                    .bg(ink.color()),
+            )
+            .on_click(cx.listener(move |this, _, _, _| {
+                this.send_workspace(WorkspaceCommand::SelectTab(tab_id));
+            }));
+        if let Some(activity) = activity {
+            let tooltip: SharedString =
+                format!("{} · {}", tab.title, agent_tab_activity_label(activity)).into();
+            chip = chip
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+                })
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(6.0))
+                        .rounded_full()
+                        .bg(agent_tab_activity_tone(activity, theme)),
+                );
+        }
+        if active {
+            chip.bg(color(SURFACE))
+                .text_color(color(TEXT))
+                .font_weight(FontWeight::BOLD)
+                .border_color(ink.color().opacity(if tab_mode { 1.0 } else { 0.5 }))
+                .when(tab_mode, |chip| {
+                    chip.shadow(vec![
+                        BoxShadow::new(px(0.0), px(0.0), ink.wash()).spread_radius(px(3.0)),
+                    ])
+                })
         } else {
-            bar.with_animation(
-                SharedString::from(format!("mode-bar-enter-{label}")),
-                interface_animation(140),
-                |bar, delta| {
-                    bar.bottom(px(-6.0 + delta * 6.0))
-                        .opacity(0.4 + delta * 0.6)
-                },
+            chip.when(tab_mode, |chip| chip.border_color(hairline(0.12)))
+                .hover(|style| style.bg(hairline(0.04)))
+        }
+    }
+
+    fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = BezelTheme::of(cx).clone();
+        let mut tabs = h_flex().flex_none().items_center().gap(px(2.0));
+        if let Some(session) = &self.session {
+            for (position, tab) in session.tabs.iter().enumerate() {
+                let active = tab.id == session.active_tab;
+                tabs = tabs.child(self.render_tab_chip(position, tab, active, &theme, cx));
+            }
+        }
+
+        let ground = color(GROUND);
+        let mut strip = h_flex()
+            .h(px(layout::TAB_BAR_HEIGHT))
+            .w_full()
+            .flex_none()
+            .items_center()
+            .gap(px(12.0))
+            .pl(px(10.0))
+            .bg(linear_gradient(
+                180.0,
+                linear_color_stop(ground.opacity(0.86), 0.0),
+                linear_color_stop(ground.opacity(0.55), 1.0),
+            ))
+            .font_family(EMBEDDED_TERMINAL_FONT)
+            .text_size(px(12.5))
+            .text_color(color(MUTED_TEXT))
+            .whitespace_nowrap();
+        if cfg!(target_os = "macos") {
+            // Room for the traffic lights, which sit inside the strip.
+            strip = strip.child(div().flex_none().w(px(62.0)).h_full());
+        }
+        strip
+            .child(tabs)
+            .child(
+                Button::new("tab-new")
+                    .icon(IconName::Plus)
+                    .ghost()
+                    .xsmall()
+                    .compact()
+                    .tooltip("New tab · ⌃t n")
+                    .on_click(cx.listener(|this, _, _, _| {
+                        this.send_workspace(WorkspaceCommand::NewTab);
+                    })),
+            )
+            .child(
+                div()
+                    .id("window-drag-region")
+                    .flex_1()
+                    .min_w(px(24.0))
+                    .h_full()
+                    .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
+                        cx.stop_propagation();
+                        window.start_window_move();
+                    })
+                    .on_double_click(|_, window, cx| {
+                        cx.stop_propagation();
+                        window.zoom_window();
+                    }),
+            )
+            .child(self.render_mode_hints())
+            .child(self.render_mode_pill())
+            .child(self.render_session_mark())
+            .child(div().flex_none().w(px(HEADER_ACTIONS_WIDTH)).h_full())
+    }
+
+    /// The keys that matter in the current mode, in gofer's `[key] label` form.
+    fn render_mode_hints(&self) -> impl IntoElement {
+        let hints: &[(&str, &str)] = match self.mode {
+            InputMode::Normal => &[("⌃p", "pane"), ("⌃t", "tab"), ("⌥hjkl", "move")],
+            InputMode::Pane => &[
+                ("hjkl", "focus"),
+                ("r", "right"),
+                ("d", "down"),
+                ("x", "close"),
+                ("f", "zoom"),
+                ("⌃n", "resize"),
+            ],
+            InputMode::Tab => &[
+                ("hl", "move"),
+                ("1-9", "jump"),
+                ("n", "new"),
+                ("r", "rename"),
+                ("c", "ink"),
+                ("x", "close"),
+            ],
+            InputMode::Session => &[("w", "switch"), ("d", "detach")],
+            InputMode::Resize => &[("hjkl", "resize"), ("↵", "done")],
+        };
+        let mut row = h_flex()
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .gap(px(14.0))
+            .text_color(color(FAINT_TEXT));
+        for (key, label) in hints {
+            row = row.child(
+                h_flex()
+                    .flex_none()
+                    .child("[")
+                    .child(div().text_color(color(TEXT)).child(*key))
+                    .child("]")
+                    .child(div().ml(px(6.0)).child(*label)),
+            );
+        }
+        row
+    }
+
+    fn render_mode_pill(&self) -> gpui::AnyElement {
+        let label = match self.mode {
+            InputMode::Normal => "NORMAL",
+            InputMode::Pane => "PANE",
+            InputMode::Tab => "TAB",
+            InputMode::Session => "SESSION",
+            InputMode::Resize => "RESIZE",
+        };
+        let pill = h_flex()
+            .flex_none()
+            .h(px(22.0))
+            .px(px(8.0))
+            .gap(px(8.0))
+            .items_center()
+            .rounded(px(4.0))
+            .font_weight(FontWeight::BOLD);
+        if self.mode == InputMode::Normal {
+            return pill
+                .text_color(color(TEXT))
+                .child(div().size(px(6.0)).rounded_full().bg(color(SAGE)))
+                .child(label)
+                .into_any_element();
+        }
+        let pill = pill
+            .bg(self.active_ink().color())
+            .text_color(color(GROUND))
+            .child(label);
+        if self.motion == MotionPreference::Reduced {
+            pill.into_any_element()
+        } else {
+            pill.with_animation(
+                SharedString::from(format!("mode-pill-{label}")),
+                interface_animation(160),
+                |pill, delta| pill.opacity(0.4 + delta * 0.6),
             )
             .into_any_element()
         }
     }
 
+    /// The session name in gofer's dot-matrix face: "where" you are.
+    fn render_session_mark(&self) -> gpui::AnyElement {
+        let name = self
+            .session
+            .as_ref()
+            .map_or("mux", |session| session.name.as_str());
+        let mark = chrome::dot_matrix(name, 3.0, color(MUTED_TEXT)).unwrap_or_else(|| {
+            div()
+                .text_color(color(FAINT_TEXT))
+                .child(name.to_owned())
+                .into_any_element()
+        });
+        div().flex_none().child(mark).into_any_element()
+    }
+
+    /// The warm, dithered ground in the active tab's ink. It shows in the
+    /// gaps between slabs and under the strip.
+    fn render_ground(&self) -> gpui::AnyElement {
+        let ink = self.active_ink();
+        let ground = img(ink.ground())
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .object_fit(ObjectFit::Cover);
+        if self.motion == MotionPreference::Reduced {
+            ground.into_any_element()
+        } else {
+            ground
+                .with_animation(
+                    SharedString::from(format!("ground-{ink:?}")),
+                    interface_animation(700),
+                    |ground, delta| ground.opacity(0.25 + delta * 0.75),
+                )
+                .into_any_element()
+        }
+    }
+
+    /// The slab behind a pane: a rounded card with a slim head. The focused
+    /// slab takes the tab's ink as its border, ring and glow.
+    fn render_pane_slab(
+        &self,
+        geometry: layout::PaneGeometry,
+        number: usize,
+        zoomed: bool,
+    ) -> gpui::AnyElement {
+        let ink = self.active_ink();
+        let frame = geometry.frame;
+        let focused = geometry.focused;
+        let pane = self.panes.get(&geometry.pane_id);
+        let title: SharedString = if self.active_agent_pane() == Some(geometry.pane_id) {
+            "agent".into()
+        } else {
+            pane.and_then(|pane| pane.title.title()).map_or_else(
+                || format!("pane {number}").into(),
+                |title| title.to_owned().into(),
+            )
+        };
+        let mut head = h_flex()
+            .h(px(layout::PANE_HEAD_HEIGHT))
+            .flex_none()
+            .items_center()
+            .gap(px(10.0))
+            .px(px(12.0))
+            .border_b_1()
+            .border_color(hairline(0.07))
+            .text_size(px(12.0))
+            .child(div().flex_none().size(px(6.0)).rounded_full().map(|dot| {
+                if focused {
+                    dot.bg(ink.color())
+                } else {
+                    dot.border_1().border_color(color(FAINT_TEXT))
+                }
+            }))
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(color(if focused { TEXT } else { MUTED_TEXT }))
+                    .child(title),
+            )
+            .child(div().flex_1());
+        if zoomed {
+            head = head.child(div().flex_none().text_color(ink.color()).child("zoom"));
+        }
+        if let Some(pane) = pane {
+            head = head.child(
+                div()
+                    .flex_none()
+                    .text_color(color(FAINT_TEXT))
+                    .child(format!("{}×{}", pane.frame.cols, pane.frame.rows)),
+            );
+        }
+
+        let mut slab = v_flex()
+            .absolute()
+            .left(px(frame.x))
+            .top(px(frame.y))
+            .w(px(frame.width))
+            .h(px(frame.height))
+            .rounded(px(12.0))
+            .bg(color(SURFACE))
+            .border_1()
+            .border_color(if focused {
+                ink.color().opacity(0.55)
+            } else {
+                hairline(0.07)
+            })
+            .font_family(EMBEDDED_TERMINAL_FONT)
+            .whitespace_nowrap()
+            .child(head);
+        if focused {
+            slab = slab
+                .shadow(vec![
+                    BoxShadow::new(px(0.0), px(0.0), ink.wash()).spread_radius(px(3.0)),
+                    BoxShadow::new(px(0.0), px(16.0), ink.color().opacity(0.14))
+                        .blur_radius(px(50.0)),
+                ])
+                .child(pane_focus_notch(geometry.pane_id, ink, self.motion));
+        }
+        slab.into_any_element()
+    }
+
     fn render_terminal_pane(
         &self,
         geometry: layout::PaneGeometry,
-        pane_count: usize,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let pane = self.panes.get(&geometry.pane_id)?;
@@ -2931,7 +3214,7 @@ impl MuxApp {
         let pointer_app = cx.weak_entity();
         let hover_app = pointer_app.clone();
         let scroll_app = pointer_app.clone();
-        let mut surface = div()
+        let surface = div()
             .absolute()
             .left(px(rect.x))
             .top(px(rect.y))
@@ -2969,12 +3252,11 @@ impl MuxApp {
                 self.terminal_font.clone(),
                 self.metrics,
                 focused,
+                gpui_terminal::TerminalChrome {
+                    surface: color(SURFACE),
+                    cursor: self.active_ink().color(),
+                },
             ));
-        if focused && pane_count > 1 {
-            // A short "focus beam" is visible at a glance without boxing
-            // every pane or stealing terminal pixels with permanent borders.
-            surface = surface.child(pane_focus_beam(pane_id, self.motion));
-        }
         Some(surface.into_any_element())
     }
 }
@@ -3095,26 +3377,35 @@ impl Render for MuxApp {
                     cx.stop_propagation();
                 }
             })
-            .bg(theme.surface)
+            .bg(color(GROUND))
             .font_family(theme.font_sans.clone())
             .text_color(theme.text)
+            .child(self.render_ground())
             .child(self.render_tabs(cx));
 
-        for geometry in geometry.panes {
+        let zoomed = self
+            .session
+            .as_ref()
+            .and_then(Session::active_tab)
+            .is_some_and(|tab| tab.zoomed_pane.is_some());
+        let hints = if self.mode == InputMode::Pane && pane_count > 1 {
+            neighbour_hints(&geometry.panes)
+        } else {
+            HashMap::new()
+        };
+        for (index, geometry) in geometry.panes.into_iter().enumerate() {
             let pane_id = geometry.pane_id;
+            root = root.child(self.render_pane_slab(geometry, index + 1, zoomed));
             if self.active_agent_pane() == Some(pane_id) {
                 let rect = geometry.rect;
                 let focused = geometry.focused;
                 root = root.child(self.render_agent_pane(pane_id, rect, focused, window, cx));
-                continue;
-            }
-            if let Some(surface) = self.render_terminal_pane(geometry, pane_count, cx) {
+            } else if let Some(surface) = self.render_terminal_pane(geometry, cx) {
                 root = root.child(surface);
             }
-        }
-
-        if self.mode != InputMode::Normal {
-            root = root.child(self.render_mode_bar(&theme));
+            if let Some(letter) = hints.get(&pane_id) {
+                root = root.child(pane_focus_hint(geometry.rect, *letter, self.active_ink()));
+            }
         }
         let active_agents = self
             .agents_for_active_tab()
@@ -3125,25 +3416,121 @@ impl Render for MuxApp {
     }
 }
 
-fn pane_focus_beam(pane_id: PaneId, motion: MotionPreference) -> gpui::AnyElement {
-    let beam = div()
+fn hairline(alpha: f32) -> Hsla {
+    gpui::white().opacity(alpha)
+}
+
+/// A short ink notch on the focused slab's top edge, visible at a glance.
+fn pane_focus_notch(pane_id: PaneId, ink: Ink, motion: MotionPreference) -> gpui::AnyElement {
+    let notch = div()
         .absolute()
         .top_0()
-        .left(px(8.0))
-        .w(px(34.0))
+        .left(px(14.0))
+        .w(px(40.0))
         .h(px(2.0))
         .rounded_full()
-        .bg(rgb(SIGNAL));
+        .bg(ink.color());
     if motion == MotionPreference::Reduced {
-        beam.into_any_element()
+        notch.into_any_element()
     } else {
-        beam.with_animation(
-            SharedString::from(format!("pane-focus-{pane_id}")),
-            interface_animation(120),
-            |beam, delta| beam.w(px(10.0 + delta * 24.0)).opacity(0.35 + delta * 0.65),
-        )
-        .into_any_element()
+        notch
+            .with_animation(
+                SharedString::from(format!("pane-focus-{pane_id}")),
+                interface_animation(220),
+                |notch, delta| {
+                    notch
+                        .w(px(12.0 + delta * 28.0))
+                        .opacity(0.35 + delta * 0.65)
+                },
+            )
+            .into_any_element()
     }
+}
+
+/// In pane mode, the panes ⌃p h/j/k/l would move to, keyed by that letter.
+/// Scores neighbours the way `Tab::focus_neighbor` does, in coordinates
+/// normalised to the workspace so the hint matches where focus will go.
+fn neighbour_hints(panes: &[layout::PaneGeometry]) -> HashMap<PaneId, char> {
+    let mut hints = HashMap::new();
+    let Some(focused) = panes.iter().find(|pane| pane.focused) else {
+        return hints;
+    };
+    let left = panes
+        .iter()
+        .map(|pane| pane.frame.x)
+        .fold(f32::MAX, f32::min);
+    let top = panes
+        .iter()
+        .map(|pane| pane.frame.y)
+        .fold(f32::MAX, f32::min);
+    let right = panes
+        .iter()
+        .map(|pane| pane.frame.x + pane.frame.width)
+        .fold(f32::MIN, f32::max);
+    let bottom = panes
+        .iter()
+        .map(|pane| pane.frame.y + pane.frame.height)
+        .fold(f32::MIN, f32::max);
+    let width = (right - left).max(1.0);
+    let height = (bottom - top).max(1.0);
+    let center = |frame: layout::Rect| {
+        (
+            (frame.x + frame.width / 2.0 - left) / width,
+            (frame.y + frame.height / 2.0 - top) / height,
+        )
+    };
+    let (focused_x, focused_y) = center(focused.frame);
+    for (letter, along_x, along_y) in [
+        ('h', -1.0, 0.0),
+        ('j', 0.0, 1.0),
+        ('k', 0.0, -1.0),
+        ('l', 1.0, 0.0),
+    ] {
+        let candidate = panes
+            .iter()
+            .filter(|pane| !pane.focused)
+            .filter_map(|pane| {
+                let (x, y) = center(pane.frame);
+                let (dx, dy) = (x - focused_x, y - focused_y);
+                let along = dx * along_x + dy * along_y;
+                let across = (dx * along_y).abs() + (dy * along_x).abs();
+                (along > 0.0).then_some((pane.pane_id, along + across * 2.0))
+            })
+            .min_by(|left, right| left.1.total_cmp(&right.1));
+        if let Some((pane_id, _)) = candidate {
+            hints.entry(pane_id).or_insert(letter);
+        }
+    }
+    hints
+}
+
+fn pane_focus_hint(rect: layout::Rect, letter: char, ink: Ink) -> gpui::AnyElement {
+    let mut card = v_flex()
+        .items_center()
+        .gap(px(8.0))
+        .px(px(18.0))
+        .py(px(14.0))
+        .rounded(px(10.0))
+        .bg(color(GROUND).opacity(0.72))
+        .border_1()
+        .border_color(hairline(0.12))
+        .font_family(EMBEDDED_TERMINAL_FONT)
+        .text_size(px(12.0))
+        .text_color(color(MUTED_TEXT));
+    if let Some(mark) = chrome::dot_matrix(&letter.to_string(), 5.0, ink.color()) {
+        card = card.child(mark);
+    }
+    div()
+        .absolute()
+        .left(px(rect.x))
+        .top(px(rect.y))
+        .w(px(rect.width))
+        .h(px(rect.height))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(card.child("focus"))
+        .into_any_element()
 }
 
 impl Render for MuxLayerHost {
@@ -3169,20 +3556,16 @@ impl Render for MuxLayerHost {
 fn header_actions(app: &gpui::WeakEntity<MuxApp>, active_agents: usize) -> impl IntoElement {
     let agents_app = app.clone();
     let settings_app = app.clone();
-    let agents_label = if active_agents == 0 {
-        "Agents".to_owned()
-    } else {
-        format!("Agents {active_agents}")
-    };
+    let agents_label = active_agents.to_string();
     h_flex()
         .absolute()
-        .top(px(2.0))
-        .right(px(4.0))
+        .top(px(6.0))
+        .right(px(8.0))
         .gap_1()
         .child(
             Button::new("open-agents")
                 .icon(IconName::Bot)
-                .label(agents_label)
+                .when(active_agents > 0, |button| button.label(agents_label))
                 .ghost()
                 .xsmall()
                 .compact()
@@ -3194,7 +3577,6 @@ fn header_actions(app: &gpui::WeakEntity<MuxApp>, active_agents: usize) -> impl 
         .child(
             Button::new("open-settings")
                 .icon(IconName::Settings2)
-                .label("Settings")
                 .ghost()
                 .xsmall()
                 .compact()
@@ -5424,7 +5806,7 @@ fn mux_bezel_palette(appearance: BezelAppearance) -> BezelTheme {
     });
     theme.accent_strong = theme.accent;
     theme.on_accent = color(if appearance.is_dark() {
-        0x0006_151c
+        GROUND
     } else {
         0x00f6_fbfe
     });
@@ -5432,6 +5814,24 @@ fn mux_bezel_palette(appearance: BezelAppearance) -> BezelTheme {
     theme.selection = theme
         .accent
         .opacity(if appearance.is_dark() { 0.28 } else { 0.18 });
+    if appearance.is_dark() {
+        // gofer's warm neutrals in place of Bezel's cool greys.
+        theme.bg = color(GROUND);
+        theme.surface = color(SURFACE);
+        theme.surface_raised = color(0x001c_1815);
+        theme.surface_raised_hover = color(0x0023_1e1a);
+        theme.surface_card = color(0x0018_1412);
+        theme.surface_dialog = color(0x0018_1412);
+        theme.surface_overlay = color(0x001d_1916);
+        theme.input_bg = color(0x0010_0d0c);
+        theme.border = hairline(0.08);
+        theme.border_strong = hairline(0.16);
+        theme.text = color(TEXT);
+        theme.text_muted = color(MUTED_TEXT);
+        theme.text_faint = color(FAINT_TEXT);
+        theme.text_dim = color(MUTED_TEXT);
+        theme.success = color(SAGE);
+    }
     theme
 }
 
@@ -5589,7 +5989,11 @@ fn run_graphical_application(
                     // its transparent titlebar. A missing GPUI titlebar drops the standard
                     // resizable/minimizable/closable style masks on macOS, which also prevents
                     // window managers such as Rectangle from applying a requested frame.
-                    titlebar: Some(TitleBar::title_bar_options()),
+                    titlebar: Some(TitlebarOptions {
+                        // Centre the traffic lights in the single top strip.
+                        traffic_light_position: Some(point(px(14.0), px(11.0))),
+                        ..TitleBar::title_bar_options()
+                    }),
                     window_background: BezelTheme::of(cx).window_background_appearance(),
                     app_id: Some("dev.mux.terminal".to_owned()),
                     ..Default::default()
@@ -5881,8 +6285,8 @@ mod tests {
         );
 
         assert_eq!(sizes.len(), 2);
-        assert!(sizes.iter().all(|(_, size)| size.cols == 115));
-        assert!(sizes.iter().all(|(_, size)| size.rows == 15));
+        assert!(sizes.iter().all(|(_, size)| size.cols == 112));
+        assert!(sizes.iter().all(|(_, size)| size.rows == 13));
     }
 
     #[test]

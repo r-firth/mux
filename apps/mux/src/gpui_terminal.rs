@@ -15,6 +15,14 @@ pub struct GridMetrics {
     pub padding_y: f32,
 }
 
+/// Colours the window chrome lends the terminal: the slab it sits on, and the
+/// tab's ink for the cursor.
+#[derive(Clone, Copy, Debug)]
+pub struct TerminalChrome {
+    pub surface: Hsla,
+    pub cursor: Hsla,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct GridPadding {
     pub top: f32,
@@ -211,13 +219,23 @@ pub fn terminal_canvas(
     font_family: String,
     metrics: GridMetrics,
     focused: bool,
+    chrome: TerminalChrome,
 ) -> impl IntoElement {
     let prepaint_frame = Rc::clone(&frame);
     let paint_frame = frame;
     canvas(
         move |_, window, _| prepare_runs(&prepaint_frame, &cache, &font_family, metrics, window),
         move |bounds, prepared, window, cx| {
-            paint_terminal(bounds, &paint_frame, prepared, metrics, focused, window, cx);
+            paint_terminal(
+                bounds,
+                &paint_frame,
+                prepared,
+                metrics,
+                focused,
+                chrome,
+                window,
+                cx,
+            );
         },
     )
     .size_full()
@@ -286,16 +304,20 @@ fn prepare_runs(
     PreparedTerminal { runs }
 }
 
+#[allow(clippy::too_many_arguments)] // One flat paint pass is clearer than a bundle struct.
 fn paint_terminal(
     bounds: Bounds<Pixels>,
     frame: &RenderFrame,
     prepared: PreparedTerminal,
     metrics: GridMetrics,
     focused: bool,
+    chrome: TerminalChrome,
     window: &mut Window,
     cx: &mut App,
 ) {
-    window.paint_quad(fill(bounds, terminal_color(frame.background)));
+    // Default-background cells take the slab colour so the terminal reads as
+    // part of its pane; explicit backgrounds still paint below.
+    window.paint_quad(fill(bounds, chrome.surface));
     let columns = usize::from(frame.cols);
     let padding = metrics.balanced_padding(
         f32::from(bounds.size.width),
@@ -360,7 +382,7 @@ fn paint_terminal(
             ),
             size(px(metrics.cell_width), px(metrics.cell_height)),
         );
-        let cursor_color = terminal_color(cursor.color).alpha(0.88);
+        let cursor_color = chrome.cursor.alpha(0.88);
         let cursor_bounds = match cursor.style {
             CursorStyle::Block => cell_bounds,
             CursorStyle::HollowBlock => {
@@ -428,9 +450,9 @@ fn terminal_color(color: Rgb) -> Hsla {
 
 fn selection_color(background: Rgb) -> Hsla {
     let base = terminal_color(background);
-    // A cool translucent selection remains legible across arbitrary terminal
+    // A warm translucent selection remains legible across arbitrary terminal
     // themes without replacing the application's actual ANSI colours.
-    base.blend(gpui::rgba(0x68bd_e84f).into())
+    base.blend(gpui::rgba(0xf29a_6b4f).into())
 }
 
 #[cfg(test)]
