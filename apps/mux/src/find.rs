@@ -16,6 +16,10 @@ use mux_terminal::{CellWidth, RenderCell, TerminalScrollState};
 /// the ones kept.
 const MOST_FOUND: usize = 10_000;
 
+/// New output is searched at most this often, so a busy pane with a long
+/// history spends a frame on it now and then rather than every frame.
+const FIND_REFRESH: Duration = Duration::from_millis(100);
+
 /// One place the text was found: a row counted from the top of the pane's
 /// history, and the characters of that row it covers, end exclusive.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,6 +41,9 @@ pub(super) struct PaneFind {
     /// The pane's output sequence and grid size the places were found at;
     /// new output or a reflow means looking again.
     searched: (u64, u16, u16),
+    /// When the places were last found, and whether a look is already due.
+    searched_when: Instant,
+    refresh_due: bool,
     _subscription: gpui::Subscription,
 }
 
@@ -104,6 +111,8 @@ impl MuxApp {
             current: None,
             current_line: String::new(),
             searched: (0, 0, 0),
+            searched_when: Instant::now(),
+            refresh_due: false,
             _subscription: subscription,
         });
         self.mode = InputMode::Normal;
@@ -141,6 +150,7 @@ impl MuxApp {
             }
         }
         find.searched = searched_at(pane);
+        find.searched_when = Instant::now();
         self.reveal_found();
         cx.notify();
     }
@@ -208,7 +218,28 @@ impl MuxApp {
             find.searched = searched;
             return;
         }
+        // A reflow moves every row, so it is looked at straight away; output
+        // that only adds rows waits its turn, and one look covers it all.
+        let reflowed = searched.1 != find.searched.1 || searched.2 != find.searched.2;
+        let wait = FIND_REFRESH.saturating_sub(find.searched_when.elapsed());
+        if !reflowed && !wait.is_zero() {
+            if !find.refresh_due {
+                find.refresh_due = true;
+                cx.spawn(async move |entity, cx| {
+                    cx.background_executor().timer(wait).await;
+                    let _ = entity.update(cx, |this, cx| {
+                        if let Some(find) = this.find.as_mut() {
+                            find.refresh_due = false;
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
+            return;
+        }
         find.searched = searched;
+        find.searched_when = Instant::now();
         if let Ok(text) = pane.engine.screen_text() {
             find.search(&text, true, usize::MAX);
         }

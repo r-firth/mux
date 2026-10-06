@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -150,6 +151,11 @@ struct BackendConnection {
     client: Client,
     current_session: Session,
     focused_pane: Option<PaneId>,
+    /// Workspace commands this window made whose echo, the daemon telling
+    /// every client the workspace changed, has yet to arrive. The command's
+    /// own response already carried the change, so the echo is passed over
+    /// rather than answered with a second snapshot of every pane.
+    unechoed_commands: HashMap<SessionId, usize>,
 }
 
 impl BackendConnection {
@@ -158,6 +164,7 @@ impl BackendConnection {
             client,
             current_session: attachment.session.clone(),
             focused_pane: attachment.session.active_tab().map(|tab| tab.focused_pane),
+            unechoed_commands: HashMap::new(),
         }
     }
 
@@ -166,19 +173,44 @@ impl BackendConnection {
         events: &EventSender,
         attachment: SessionAttachment,
     ) -> Result<()> {
+        // A fresh attachment starts a fresh event stream; echoes still owed
+        // to the old one will never come.
+        self.unechoed_commands.clear();
         self.current_session = attachment.session.clone();
         self.focused_pane = attachment.session.active_tab().map(|tab| tab.focused_pane);
         send_event(events, UserEvent::Attached(attachment))
     }
 
+    /// `output_continues` says each pane's output stream carries on unbroken
+    /// past this snapshot, so the window can keep its copy of a pane and
+    /// apply the output still to come rather than restore it.
     fn publish_workspace_update(
         &mut self,
         events: &EventSender,
         attachment: SessionAttachment,
+        output_continues: bool,
     ) -> Result<()> {
         self.current_session = attachment.session.clone();
         self.focused_pane = attachment.session.active_tab().map(|tab| tab.focused_pane);
-        send_event(events, UserEvent::WorkspaceUpdated(attachment))
+        send_event(
+            events,
+            UserEvent::WorkspaceUpdated {
+                attachment,
+                output_continues,
+            },
+        )
+    }
+
+    /// Whether a workspace-changed event is the echo of this window's own
+    /// command, already applied from the command's response.
+    fn take_echo(&mut self, session_id: SessionId) -> bool {
+        match self.unechoed_commands.get_mut(&session_id) {
+            Some(owed) if *owed > 0 => {
+                *owed -= 1;
+                true
+            }
+            _ => false,
+        }
     }
 
     async fn publish_sessions(&mut self, events: &EventSender) -> Result<()> {
@@ -209,7 +241,10 @@ impl BackendConnection {
     ) -> Result<()> {
         let command = translate_workspace_command(&self.current_session, command);
         match self.client.workspace_command(session_id, command).await {
-            Ok(attachment) => self.publish_workspace_update(events, attachment),
+            Ok(attachment) => {
+                *self.unechoed_commands.entry(session_id).or_default() += 1;
+                self.publish_workspace_update(events, attachment, true)
+            }
             Err(error) => {
                 report_backend_error(events, error);
                 Ok(())
@@ -431,8 +466,14 @@ impl BackendConnection {
                 self.publish_attachment(events, attachment)
             }
             ServerEvent::WorkspaceChanged { session_id } => {
+                if self.take_echo(session_id) {
+                    return Ok(());
+                }
+                // Another client changed the workspace. Attaching again starts
+                // a new event stream, so output may be missing in between.
                 let attachment = self.client.attach(SessionSelector::Id(session_id)).await?;
-                self.publish_workspace_update(events, attachment)
+                self.unechoed_commands.clear();
+                self.publish_workspace_update(events, attachment, false)
             }
             ServerEvent::Agent(event) => send_event(events, UserEvent::Agent(event)),
             ServerEvent::AgentResyncRequired => {

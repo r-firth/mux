@@ -403,6 +403,18 @@ int32_t mux_ghostty_terminal_new(
   return 0;
 }
 
+/* How much history the terminal keeps above its screen, in bytes of
+ * Ghostty's own pages; pruning works a page at a time, so the history kept
+ * lands within a page of the limit. */
+int32_t mux_ghostty_terminal_set_history_limit(
+    mux_ghostty_terminal_t terminal,
+    size_t max_bytes) {
+  return (int32_t)ghostty_terminal_set(
+      (GhosttyTerminal)terminal,
+      GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+      &max_bytes);
+}
+
 int32_t mux_ghostty_terminal_apply_theme(
     mux_ghostty_terminal_t raw_terminal,
     const mux_ghostty_rgb_t *background,

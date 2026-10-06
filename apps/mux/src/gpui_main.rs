@@ -26,6 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use agent_completion::{
@@ -171,7 +172,12 @@ gpui::actions!(
 
 enum UserEvent {
     Attached(SessionAttachment),
-    WorkspaceUpdated(SessionAttachment),
+    /// A change to the workspace. `output_continues` says each pane's
+    /// output stream carries on unbroken past the snapshot.
+    WorkspaceUpdated {
+        attachment: SessionAttachment,
+        output_continues: bool,
+    },
     Sessions(Vec<SessionSummary>),
     Server(ServerEvent),
     Agents(Vec<AgentSessionSnapshot>),
@@ -244,6 +250,14 @@ impl PaneReplica {
     }
 }
 
+/// How much history the window keeps for each pane: as much as the user's
+/// Ghostty does. The daemon keeps less, so a pane restored from it starts
+/// with the daemon's share and grows from there while the window has it.
+fn pane_history_bytes() -> usize {
+    static LIMIT: OnceLock<usize> = OnceLock::new();
+    *LIMIT.get_or_init(mux_terminal_ghostty::user_history_limit)
+}
+
 fn restore_pane_replica(
     pane: &PaneAttachment,
     ghostty_theme: &GhosttyTheme,
@@ -258,6 +272,9 @@ fn restore_pane_replica(
         .ok_or_else(|| anyhow!("daemon returned a non-libghostty terminal attachment"))?;
     let mut engine = GhosttyEngine::restore(checkpoint)
         .with_context(|| format!("restore terminal pane {}", pane.pane_id))?;
+    engine
+        .set_history_limit(pane_history_bytes())
+        .with_context(|| format!("set the history of terminal pane {}", pane.pane_id))?;
     // The daemon remembers the title; the sequence that set it may predate
     // the checkpoint, so the replay alone cannot be trusted to carry it.
     let mut title = TitleScanner::seeded(pane.title.clone());
@@ -299,16 +316,24 @@ fn restore_pane_replicas(
         .collect()
 }
 
+/// Keep the window's copy of each pane where it can be trusted, restoring
+/// the rest from the snapshot. A copy as new as the snapshot is kept; so is
+/// one behind it when `output_continues`, since the output it lacks is still
+/// on its way. Keeping a copy keeps its history, which can reach back further
+/// than the daemon's, along with its selection and where it is scrolled to.
 fn reconcile_pane_replicas(
     mut existing: HashMap<PaneId, PaneReplica>,
     attachments: &[PaneAttachment],
     ghostty_theme: &GhosttyTheme,
+    output_continues: bool,
 ) -> Result<HashMap<PaneId, PaneReplica>> {
     let mut reconciled = HashMap::with_capacity(attachments.len());
     for pane in attachments {
         let replica = match existing.remove(&pane.pane_id) {
             Some(replica)
-                if replica.engine.next_output_sequence() == pane.terminal.next_sequence =>
+                if replica.engine.next_output_sequence() == pane.terminal.next_sequence
+                    || (output_continues
+                        && replica.engine.next_output_sequence() < pane.terminal.next_sequence) =>
             {
                 replica
             }
@@ -854,7 +879,7 @@ impl MuxApp {
                         Err(error) => self.report_ui_error(&error, cx),
                     }
                 }
-                event @ (UserEvent::Attached(_) | UserEvent::WorkspaceUpdated(_)) => {
+                event @ (UserEvent::Attached(_) | UserEvent::WorkspaceUpdated { .. }) => {
                     self.publish_terminal_frames(&mut dirty_panes, cx);
                     self.apply_user_event(event, window, cx);
                     needs_render = true;
@@ -929,11 +954,12 @@ impl MuxApp {
     fn apply_user_event(&mut self, event: UserEvent, window: &mut Window, cx: &mut Context<Self>) {
         let result = match event {
             UserEvent::Attached(attachment) => {
-                self.apply_workspace_attachment(attachment, true, window, cx)
+                self.apply_workspace_attachment(attachment, None, window, cx)
             }
-            UserEvent::WorkspaceUpdated(attachment) => {
-                self.apply_workspace_attachment(attachment, false, window, cx)
-            }
+            UserEvent::WorkspaceUpdated {
+                attachment,
+                output_continues,
+            } => self.apply_workspace_attachment(attachment, Some(output_continues), window, cx),
             UserEvent::Sessions(sessions) => {
                 self.sessions = sessions;
                 Ok(())
@@ -1016,10 +1042,12 @@ impl MuxApp {
         }
     }
 
+    /// Apply a snapshot of the workspace: a fresh attachment when `update` is
+    /// `None`, else a change whose flag says the output carries on past it.
     fn apply_workspace_attachment(
         &mut self,
         mut attachment: SessionAttachment,
-        rebuild: bool,
+        update: Option<bool>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
@@ -1037,13 +1065,13 @@ impl MuxApp {
             .iter()
             .filter_map(|pane| pane.exit_status.map(|status| (pane.pane_id, status)))
             .collect();
-        if rebuild {
+        if let Some(output_continues) = update {
+            self.update_workspace(attachment, output_continues)?;
+        } else {
             self.attach(attachment)?;
             if self.terminal_resync_pending == Some(session_id) {
                 self.terminal_resync_pending = None;
             }
-        } else {
-            self.update_workspace(attachment)?;
         }
         self.note_pane_exits(exits);
         self.forget_closed_pane_calls();
@@ -1087,11 +1115,16 @@ impl MuxApp {
         Ok(())
     }
 
-    fn update_workspace(&mut self, attachment: SessionAttachment) -> Result<()> {
+    fn update_workspace(
+        &mut self,
+        attachment: SessionAttachment,
+        output_continues: bool,
+    ) -> Result<()> {
         let panes = reconcile_pane_replicas(
             std::mem::take(&mut self.panes),
             &attachment.panes,
             &self.ghostty_theme,
+            output_continues,
         )?;
         self.session = Some(attachment.session);
         self.panes = panes;
@@ -3851,7 +3884,7 @@ impl UserEvent {
     const fn label(&self) -> &'static str {
         match self {
             Self::Attached(_) => "attached",
-            Self::WorkspaceUpdated(_) => "workspace-updated",
+            Self::WorkspaceUpdated { .. } => "workspace-updated",
             Self::Sessions(_) => "sessions",
             Self::Server(_) => "server",
             Self::Agents(_) => "agents",
@@ -5428,6 +5461,7 @@ mod tests {
             HashMap::from([(pane_id, local_replica)]),
             &[attachment],
             &GhosttyTheme::default(),
+            false,
         )
         .expect("reconcile workspace update");
         let preserved = reconciled.get(&pane_id).expect("preserved pane");
@@ -5471,6 +5505,7 @@ mod tests {
             HashMap::from([(pane_id, local_replica)]),
             &[attachment],
             &GhosttyTheme::default(),
+            false,
         )
         .expect("reconcile workspace update");
         let repaired = reconciled.get_mut(&pane_id).expect("repaired pane");
@@ -5483,6 +5518,52 @@ mod tests {
                 .expect("next live output"),
             PaneOutputUpdate::Applied
         );
+    }
+
+    #[test]
+    fn workspace_updates_keep_a_replica_whose_output_is_still_coming() {
+        let pane_id = PaneId::new();
+        let size = TerminalSize {
+            cols: 20,
+            rows: 4,
+            ..TerminalSize::default()
+        };
+        let mut local_engine = GhosttyEngine::new(size).expect("local terminal");
+        local_engine.apply_output(1, b"one ").expect("local output");
+        let local_frame = local_engine.render_frame().expect("local frame");
+        let local_replica = PaneReplica::new(local_engine, local_frame);
+        let displayed = Rc::clone(&local_replica.frame);
+
+        let mut daemon_engine = GhosttyEngine::new(size).expect("daemon terminal");
+        daemon_engine
+            .apply_output(1, b"one ")
+            .expect("first daemon output");
+        daemon_engine
+            .apply_output(2, b"two")
+            .expect("second daemon output");
+        let attachment = PaneAttachment {
+            pane_id,
+            terminal: daemon_engine.attachment().expect("daemon attachment"),
+            exit_status: None,
+            title: None,
+        };
+
+        let mut reconciled = reconcile_pane_replicas(
+            HashMap::from([(pane_id, local_replica)]),
+            &[attachment],
+            &GhosttyTheme::default(),
+            true,
+        )
+        .expect("reconcile workspace update");
+        let kept = reconciled.get_mut(&pane_id).expect("kept pane");
+
+        assert!(Rc::ptr_eq(&displayed, &kept.frame));
+        assert_eq!(
+            kept.apply_output(2, b"two").expect("output still coming"),
+            PaneOutputUpdate::Applied
+        );
+        kept.publish_frame().expect("frame");
+        assert!(terminal_frame_text(&kept.frame).contains("one two"));
     }
 
     #[test]
