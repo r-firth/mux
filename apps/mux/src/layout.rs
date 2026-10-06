@@ -1,7 +1,14 @@
 use mux_workspace::{PaneId, PaneLayout, Session, SplitAxis};
 
-pub const TAB_BAR_HEIGHT: f32 = 28.0;
-pub const PANE_GAP: f32 = 1.0;
+/// The single top strip: traffic lights, tabs, mode and session.
+pub const TAB_BAR_HEIGHT: f32 = 34.0;
+/// Ground left visible around the slabs on the left, right and bottom.
+pub const WORKSPACE_INSET: f32 = 8.0;
+pub const PANE_GAP: f32 = 8.0;
+/// The slim title row at the top of every pane slab.
+pub const PANE_HEAD_HEIGHT: f32 = 24.0;
+const PANE_BODY_INSET_X: f32 = 6.0;
+const PANE_BODY_INSET_Y: f32 = 2.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rect {
@@ -14,6 +21,9 @@ pub struct Rect {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PaneGeometry {
     pub pane_id: PaneId,
+    /// The whole slab, including its head.
+    pub frame: Rect,
+    /// The terminal surface inside the slab. Pointer and grid maths use this.
     pub rect: Rect,
     pub focused: bool,
 }
@@ -27,24 +37,34 @@ pub struct WorkspaceGeometry {
 pub fn calculate(session: &Session, width: f32, height: f32) -> WorkspaceGeometry {
     let mut geometry = WorkspaceGeometry::default();
     let bounds = Rect {
-        x: 0.0,
+        x: WORKSPACE_INSET,
         y: TAB_BAR_HEIGHT,
-        width,
-        height: (height - TAB_BAR_HEIGHT).max(1.0),
+        width: (width - WORKSPACE_INSET * 2.0).max(1.0),
+        height: (height - TAB_BAR_HEIGHT - WORKSPACE_INSET).max(1.0),
     };
 
     if let Some(tab) = session.active_tab() {
         if let Some(zoomed) = tab.zoomed_pane {
-            geometry.panes.push(PaneGeometry {
-                pane_id: zoomed,
-                rect: bounds,
-                focused: true,
-            });
+            geometry.panes.push(pane_geometry(zoomed, bounds, true));
         } else {
             layout_panes(&tab.layout, bounds, tab.focused_pane, &mut geometry.panes);
         }
     }
     geometry
+}
+
+fn pane_geometry(pane_id: PaneId, frame: Rect, focused: bool) -> PaneGeometry {
+    PaneGeometry {
+        pane_id,
+        frame,
+        rect: Rect {
+            x: frame.x + PANE_BODY_INSET_X,
+            y: frame.y + PANE_HEAD_HEIGHT + PANE_BODY_INSET_Y,
+            width: (frame.width - PANE_BODY_INSET_X * 2.0).max(1.0),
+            height: (frame.height - PANE_HEAD_HEIGHT - PANE_BODY_INSET_Y * 2.0).max(1.0),
+        },
+        focused,
+    }
 }
 
 fn layout_panes(
@@ -54,11 +74,9 @@ fn layout_panes(
     output: &mut Vec<PaneGeometry>,
 ) {
     match layout {
-        PaneLayout::Leaf(pane_id) => output.push(PaneGeometry {
-            pane_id: *pane_id,
-            rect: bounds,
-            focused: *pane_id == focused_pane,
-        }),
+        PaneLayout::Leaf(pane_id) => {
+            output.push(pane_geometry(*pane_id, bounds, *pane_id == focused_pane));
+        }
         PaneLayout::Split {
             axis,
             ratio,
@@ -109,18 +127,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pane_geometry_reserves_exact_gpui_tab_bar_height() {
+    fn pane_slab_sits_on_the_ground_below_the_strip() {
         let pane = PaneId::new();
         let session = Session::with_panes("daily", &[pane]).expect("session");
         let geometry = calculate(&session, 800.0, 600.0);
 
         assert_eq!(
-            geometry.panes[0].rect,
+            geometry.panes[0].frame,
             Rect {
-                x: 0.0,
+                x: WORKSPACE_INSET,
                 y: TAB_BAR_HEIGHT,
-                width: 800.0,
-                height: 600.0 - TAB_BAR_HEIGHT,
+                width: 800.0 - WORKSPACE_INSET * 2.0,
+                height: 600.0 - TAB_BAR_HEIGHT - WORKSPACE_INSET,
+            }
+        );
+    }
+
+    #[test]
+    fn terminal_surface_sits_inside_the_slab_below_its_head() {
+        let pane = PaneId::new();
+        let session = Session::with_panes("daily", &[pane]).expect("session");
+        let geometry = calculate(&session, 800.0, 600.0);
+        let pane = geometry.panes[0];
+
+        assert_eq!(
+            pane.rect,
+            Rect {
+                x: pane.frame.x + PANE_BODY_INSET_X,
+                y: pane.frame.y + PANE_HEAD_HEIGHT + PANE_BODY_INSET_Y,
+                width: pane.frame.width - PANE_BODY_INSET_X * 2.0,
+                height: pane.frame.height - PANE_HEAD_HEIGHT - PANE_BODY_INSET_Y * 2.0,
             }
         );
     }
