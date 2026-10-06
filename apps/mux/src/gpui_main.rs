@@ -10,6 +10,7 @@ mod backend;
 mod chrome;
 mod gpui_terminal;
 mod layout;
+mod links;
 mod pane_calls;
 mod pane_exit;
 mod scrollback;
@@ -456,6 +457,9 @@ struct MuxApp {
     pane_restart: Option<pane_exit::PaneRestart>,
     /// Panes out of sight that rang or sent a notification, until seen.
     pane_calls: HashMap<PaneId, mux_terminal::Attention>,
+    /// The link under the pointer while ⌘ is held, and where the pointer is.
+    link_hover: Option<(PaneId, links::Link)>,
+    link_pointer: Option<(PaneId, layout::Rect, gpui::Point<gpui::Pixels>)>,
     selected_pane: Option<PaneId>,
     pending_focused_pane: Option<PaneId>,
     selection_drag: Option<TerminalPointerCapture>,
@@ -589,6 +593,8 @@ impl MuxApp {
             pane_exits: HashMap::new(),
             pane_restart: None,
             pane_calls: HashMap::new(),
+            link_hover: None,
+            link_pointer: None,
             selected_pane: None,
             pending_focused_pane: None,
             selection_drag: None,
@@ -842,6 +848,7 @@ impl MuxApp {
             }
         }
         self.publish_terminal_frames(&mut dirty_panes, cx);
+        self.refresh_link_hover(cx);
         self.collect_pane_calls(window) || needs_render
     }
 
@@ -3365,9 +3372,10 @@ impl MuxApp {
                         window.zoom_window();
                     }),
             )
-            .child(match &self.strip_message {
-                Some(message) => Self::render_strip_message(message, cx).into_any_element(),
-                None => self.render_mode_hints(cx).into_any_element(),
+            .child(match (self.render_link_target(), &self.strip_message) {
+                (Some(target), _) => target,
+                (None, Some(message)) => Self::render_strip_message(message, cx).into_any_element(),
+                (None, None) => self.render_mode_hints(cx).into_any_element(),
             })
             .child(self.render_mode_pill())
             .child(self.render_session_mark(cx))
@@ -3527,6 +3535,66 @@ impl MuxApp {
 
     /// The warm, dithered ground in the active tab's ink. It shows in the
     /// gaps between slabs and under the strip.
+    /// The root's pointer listeners. A drag or a mouse report that started
+    /// in a pane follows the pointer wherever it goes and ends on a release
+    /// anywhere; ⌘ pressed or let go over a link shows or hides it.
+    fn with_pointer_capture(
+        root: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let move_app = cx.weak_entity();
+        let release_app = move_app.clone();
+        let release_out_app = move_app.clone();
+        root.on_mouse_move(move |event, _, cx| {
+            let handled = move_app
+                .update(cx, |this, cx| {
+                    this.track_link_pointer(event.position, cx);
+                    let handled = this.pointer_move(event);
+                    if handled {
+                        cx.notify();
+                    }
+                    handled
+                })
+                .unwrap_or(false);
+            if handled {
+                cx.stop_propagation();
+            }
+        })
+        .capture_any_mouse_up(move |event, _, cx| {
+            let handled = release_app
+                .update(cx, |this, cx| {
+                    let handled = this.pointer_up(event);
+                    if handled {
+                        cx.notify();
+                    }
+                    handled
+                })
+                .unwrap_or(false);
+            if handled {
+                cx.stop_propagation();
+            }
+        })
+        .on_mouse_up_out(gpui::MouseButton::Left, move |event, _, cx| {
+            let handled = release_out_app
+                .update(cx, |this, cx| {
+                    let handled = this.pointer_up(event);
+                    if handled {
+                        cx.notify();
+                    }
+                    handled
+                })
+                .unwrap_or(false);
+            if handled {
+                cx.stop_propagation();
+            }
+        })
+        .on_modifiers_changed(cx.listener(
+            |this, event: &gpui::ModifiersChangedEvent, _, cx| {
+                this.link_modifiers_changed(event.modifiers.platform, cx);
+            },
+        ))
+    }
+
     fn render_ground(&self) -> gpui::AnyElement {
         let ink = self.active_ink();
         let ground = img(ink.ground())
@@ -3699,8 +3767,14 @@ impl MuxApp {
             .h(px(rect.height))
             .overflow_hidden()
             .bg(rgb(SURFACE))
+            .when(self.pane_link_hovered(pane_id), |surface| {
+                surface.cursor_pointer()
+            })
             .on_any_mouse_down(move |event, window, cx| {
                 let _ = pointer_app.update(cx, |this, cx| {
+                    if this.open_link_under(pane_id, rect, event, cx) {
+                        return;
+                    }
                     this.focus_handle.focus(window, cx);
                     this.pointer_down(pane_id, rect, event);
                     cx.notify();
@@ -3709,7 +3783,11 @@ impl MuxApp {
             })
             .on_mouse_move(move |event, _, cx| {
                 let handled = hover_app
-                    .update(cx, |this, _| this.pointer_hover(pane_id, rect, event))
+                    .update(cx, |this, cx| {
+                        let command = event.modifiers.platform;
+                        this.hover_link(pane_id, rect, event.position, command, cx);
+                        this.pointer_hover(pane_id, rect, event)
+                    })
                     .unwrap_or(false);
                 if handled {
                     cx.stop_propagation();
@@ -3763,10 +3841,7 @@ impl Render for MuxApp {
             self.sync_terminal_sizes(f32::from(viewport.width), f32::from(viewport.height));
         self.settle_frame_state(window, cx);
         let pane_count = geometry.panes.len();
-        let move_app = cx.weak_entity();
-        let release_app = move_app.clone();
-        let release_out_app = move_app.clone();
-        let mut root = div()
+        let root = div()
             .id("mux-root")
             .key_context("MuxTerminal")
             .relative()
@@ -3779,49 +3854,8 @@ impl Render for MuxApp {
                 this.toggle_settings_sheet(window, cx);
             }))
             .on_key_down(cx.listener(Self::handle_key_down))
-            .on_key_up(cx.listener(Self::handle_key_up))
-            .on_mouse_move(move |event, _, cx| {
-                let handled = move_app
-                    .update(cx, |this, cx| {
-                        let handled = this.pointer_move(event);
-                        if handled {
-                            cx.notify();
-                        }
-                        handled
-                    })
-                    .unwrap_or(false);
-                if handled {
-                    cx.stop_propagation();
-                }
-            })
-            .capture_any_mouse_up(move |event, _, cx| {
-                let handled = release_app
-                    .update(cx, |this, cx| {
-                        let handled = this.pointer_up(event);
-                        if handled {
-                            cx.notify();
-                        }
-                        handled
-                    })
-                    .unwrap_or(false);
-                if handled {
-                    cx.stop_propagation();
-                }
-            })
-            .on_mouse_up_out(gpui::MouseButton::Left, move |event, _, cx| {
-                let handled = release_out_app
-                    .update(cx, |this, cx| {
-                        let handled = this.pointer_up(event);
-                        if handled {
-                            cx.notify();
-                        }
-                        handled
-                    })
-                    .unwrap_or(false);
-                if handled {
-                    cx.stop_propagation();
-                }
-            })
+            .on_key_up(cx.listener(Self::handle_key_up));
+        let mut root = Self::with_pointer_capture(root, cx)
             .bg(color(GROUND))
             .font_family(EMBEDDED_TERMINAL_FONT)
             .text_color(theme.text)
@@ -3848,6 +3882,7 @@ impl Render for MuxApp {
                 root = root.children(self.render_terminal_pane(geometry, cx));
                 root = root.children(self.render_pane_exit(geometry));
                 root = root.children(self.render_scroll_thumb(geometry));
+                root = root.children(self.render_link_underline(geometry));
             }
             if let Some(letter) = hints.get(&pane_id) {
                 root = root.child(pane_focus_hint(geometry.rect, *letter, self.active_ink()));
