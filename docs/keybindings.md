@@ -100,6 +100,26 @@ says how it ended. While it has the focus, these keys act on it:
 
 The session's last pane is never closed; Return starts a new shell there.
 
+## Go to
+
+`Cmd+P` (or `Cmd+Shift+P`) opens a palette over the workspace. With nothing
+typed it is a map of the session: each tab with its number, the panes of a
+split tab under it with what each is running, the other sessions, then each
+command beside the keys that do it. It opens on the tab you were in before
+this one, so `Cmd+P` then Return goes back.
+
+Typing narrows the list to rows with those letters in order: `sr` finds split
+right and `cw` finds the pane running `cargo watch`. A word also finds a pane
+by its tab's name, and a tab by what its panes are running. A number goes to
+that tab. Agents are listed once you type one's name: `codex` opens Codex in
+the pane with the keys, or shows the Codex session already in the tab.
+
+| Keys | Action |
+| --- | --- |
+| Up / Down, `Ctrl+p` / `Ctrl+n`, Tab / Shift+Tab | Choose a row |
+| Return | Go there |
+| Escape or `Cmd+P` | Close the palette |
+
 ## Sessions sheet
 
 Click the session's name at the right of the strip, or press `Cmd+Shift+S`, to

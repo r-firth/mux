@@ -34,6 +34,8 @@ impl MuxApp {
             self.close_session_sheet(window, cx);
             return;
         }
+        self.palette = None;
+        self.settings_sheet = None;
         self.backend.send(CommandMessage::ListSessions);
         let focus = cx.focus_handle();
         let deferred = focus.clone();
@@ -171,8 +173,13 @@ impl MuxApp {
         self.close_session_sheet(window, cx);
     }
 
-    /// A fresh session with one shell, started where the focused pane is.
     fn new_session_from_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_session_here();
+        self.close_session_sheet(window, cx);
+    }
+
+    /// A fresh session with one shell, started where the focused pane is.
+    pub(super) fn start_session_here(&mut self) {
         let Some(pane_id) = self.focused_pane_id() else {
             return;
         };
@@ -190,7 +197,6 @@ impl MuxApp {
         };
         self.backend
             .send(CommandMessage::CreateSessionForPane { name, pane_id });
-        self.close_session_sheet(window, cx);
     }
 
     fn rename_session_in_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
