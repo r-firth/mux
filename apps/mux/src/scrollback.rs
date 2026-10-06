@@ -118,7 +118,7 @@ impl MuxApp {
         if !scroll.is_scrolled() && !finding {
             return None;
         }
-        let rect = geometry.rect;
+        let rect = geometry.surface();
         let inset = 6.0;
         let (height, top) = thumb_geometry(scroll, rect.height - inset * 2.0);
         Some(

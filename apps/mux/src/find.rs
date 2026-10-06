@@ -372,7 +372,7 @@ impl MuxApp {
             return None;
         }
         let total = self.panes.get(&geometry.pane_id)?.frame.scroll.total.max(1) as f32;
-        let rect = geometry.rect;
+        let rect = geometry.surface();
         let inset = 6.0;
         let track = rect.height - inset * 2.0;
         let tick = |row: usize, tone: Hsla, height: f32| {

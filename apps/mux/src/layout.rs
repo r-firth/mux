@@ -31,6 +31,16 @@ pub struct PaneGeometry {
     pub focused: bool,
 }
 
+impl PaneGeometry {
+    /// The surface the slab holds as drawn. Settled, it is `rect`; while the
+    /// slab glides it is the slab's body, which `rect`, at the size the
+    /// terminal settles at, rides the corner of.
+    #[must_use]
+    pub fn surface(&self) -> Rect {
+        surface_of(self.frame)
+    }
+}
+
 /// The gap a split leaves between its two sides, where the split is held to
 /// drag it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -97,13 +107,19 @@ fn pane_geometry(pane_id: PaneId, frame: Rect, focused: bool) -> PaneGeometry {
     PaneGeometry {
         pane_id,
         frame,
-        rect: Rect {
-            x: frame.x + PANE_BODY_INSET_X,
-            y: frame.y + PANE_HEAD_HEIGHT + PANE_BODY_INSET_Y,
-            width: (frame.width - PANE_BODY_INSET_X * 2.0).max(1.0),
-            height: (frame.height - PANE_HEAD_HEIGHT - PANE_BODY_INSET_Y * 2.0).max(1.0),
-        },
+        rect: surface_of(frame),
         focused,
+    }
+}
+
+/// The terminal surface a slab holds: below its head, inset from its sides.
+#[must_use]
+pub fn surface_of(frame: Rect) -> Rect {
+    Rect {
+        x: frame.x + PANE_BODY_INSET_X,
+        y: frame.y + PANE_HEAD_HEIGHT + PANE_BODY_INSET_Y,
+        width: (frame.width - PANE_BODY_INSET_X * 2.0).max(1.0),
+        height: (frame.height - PANE_HEAD_HEIGHT - PANE_BODY_INSET_Y * 2.0).max(1.0),
     }
 }
 
