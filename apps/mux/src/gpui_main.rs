@@ -147,7 +147,9 @@ gpui::actions!(
         NavigateAgentLeft,
         NavigateAgentRight,
         NavigateAgentUp,
+        NextAgentChoice,
         OpenMuxSettings,
+        PreviousAgentChoice,
         QuitMux,
         SelectNextAgentCompletion,
         SelectPreviousAgentCompletion,
@@ -899,12 +901,19 @@ impl MuxApp {
             self.update_workspace(attachment)?;
         }
         self.sync_agent_draft_for_active_tab(window, cx);
-        if let Some(pane_id) = self.active_agent_pane()
+        let agent_pane = self.active_agent_pane();
+        if let Some(pane_id) = agent_pane
             && Some(pane_id) == self.focused_pane_id()
         {
             self.backend
                 .send(CommandMessage::RefreshAgentFiles { pane_id });
             self.focus_agent_composer(window);
+        } else if agent_pane.is_none_or(|pane_id| Some(pane_id) != self.terminal_input_pane_id())
+            && gpui::Focusable::focus_handle(self.agent_input.read(cx), cx).is_focused(window)
+        {
+            // The workspace moved on from the agent pane (a split, or a pane
+            // or tab chord typed in it); the keyboard follows it to the shell.
+            self.focus_handle.focus(window, cx);
         }
         Ok(())
     }
@@ -1918,8 +1927,17 @@ impl MuxApp {
         let draft = self.agent_input.read(cx).value().to_string();
         let draft = draft.trim();
         if draft.is_empty() {
-            // Enter on an empty launcher starts the chosen agent.
-            if self.active_agent().is_none()
+            // Enter on an empty composer answers the question on screen: the
+            // highlighted permission option, or the launcher's chosen agent.
+            if let Some(index) = self
+                .active_agent()
+                .and_then(AgentSessionSnapshot::pending_permission)
+                .map(|permission| self.permission_choice(permission))
+            {
+                if self.answer_agent_choice(index) {
+                    cx.notify();
+                }
+            } else if self.active_agent().is_none()
                 && self.pending_agent_prompt.is_none()
                 && let Some(profile) = self.launcher_profile().cloned()
             {
@@ -2359,6 +2377,19 @@ impl MuxApp {
             .unwrap_or_default();
         let next = wrapping_step(current, delta, ids.len());
         self.launcher_choice = Some(ids[next].clone());
+    }
+
+    /// Move the highlight of whatever the empty composer is choosing: a
+    /// permission card's option, or the launcher's agent.
+    fn move_agent_choice(&mut self, delta: isize) -> bool {
+        if self.move_permission_choice(delta) {
+            return true;
+        }
+        if self.active_agent().is_none() {
+            self.move_launcher_choice(delta);
+            return true;
+        }
+        false
     }
 
     fn launch_agent_profile(
@@ -3817,7 +3848,7 @@ fn handle_agent_pane_key_down(
             return;
         }
     }
-    if handle_agent_choice_key(app, event, window, cx) {
+    if handle_agent_choice_key(app, event, cx) {
         cx.stop_propagation();
         return;
     }
@@ -3838,7 +3869,6 @@ fn handle_agent_pane_key_down(
 fn handle_agent_choice_key(
     app: &gpui::WeakEntity<MuxApp>,
     event: &KeyDownEvent,
-    window: &mut Window,
     cx: &mut App,
 ) -> bool {
     let modifiers = event.keystroke.modifiers;
@@ -3874,25 +3904,15 @@ fn handle_agent_choice_key(
                 }
                 answered
             }
+            // Enter reaches submit_agent_prompt through the text field.
             "up" | "down" if asking.is_some() => {
                 this.move_permission_choice(if key == "up" { -1 } else { 1 });
                 cx.notify();
                 true
             }
-            "enter" if asking.is_some() => {
-                let answered = asking.is_some_and(|index| this.answer_agent_choice(index));
-                cx.notify();
-                answered
-            }
             "up" | "down" if this.active_agent().is_none() => {
                 this.move_launcher_choice(if key == "up" { -1 } else { 1 });
                 cx.notify();
-                true
-            }
-            "enter" if this.active_agent().is_none() => {
-                if let Some(profile) = this.launcher_profile().cloned() {
-                    this.launch_agent_profile(&profile, window, cx);
-                }
                 true
             }
             _ => false,
@@ -3901,8 +3921,19 @@ fn handle_agent_choice_key(
     .unwrap_or(false)
 }
 
-fn cancel_agent_turn(app: &gpui::WeakEntity<MuxApp>, _window: &mut Window, cx: &mut App) {
+fn cancel_agent_turn(app: &gpui::WeakEntity<MuxApp>, window: &mut Window, cx: &mut App) {
     let _ = app.update(cx, |this, cx| {
+        // Esc leaves a pane or tab mode first, as it does over a shell.
+        if this.mode != InputMode::Normal
+            && let Some(action) = this
+                .keymap
+                .resolve(this.mode, KeyChord::plain(MuxKey::Escape))
+                .cloned()
+        {
+            this.perform_action(action, window, cx);
+            cx.notify();
+            return;
+        }
         let running = this
             .active_agent()
             .filter(|agent| {
@@ -4439,6 +4470,18 @@ fn configure_application_actions(cx: &mut App) {
             "escape",
             DismissAgentCompletion,
             Some("MuxAgentPane > MuxAgentCompletion > Input"),
+        ),
+        // The launcher's agents and a permission card's options take the
+        // arrows while the composer is empty, before the text field does.
+        KeyBinding::new(
+            "up",
+            PreviousAgentChoice,
+            Some("MuxAgentPane > MuxAgentChoice > Input"),
+        ),
+        KeyBinding::new(
+            "down",
+            NextAgentChoice,
+            Some("MuxAgentPane > MuxAgentChoice > Input"),
         ),
     ]);
     configure_application_menu(cx);
