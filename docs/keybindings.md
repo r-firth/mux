@@ -49,13 +49,44 @@ Normal-mode `Ctrl+n` from Vim and other terminal applications.
 | `l` / `j` / Right / Down | Next tab |
 | `1` through `9` | Select a numbered tab and return to Normal |
 | `n` | Create a tab and return to Normal |
-| `r` | Rename the active tab |
+| `r` | Rename the active tab in its chip; Return keeps it, Escape puts it back |
+| `c` | Give the active tab the next ink |
 | `x` | Close the active tab and return to Normal |
 
-The session dialog exposes create, attach, rename, and confirmed kill actions.
+Clearing a tab's name hands it back to whatever its shell shows.
+
 Zellij's `Ctrl+o` session prefix intentionally has no Normal-mode binding yet.
 This keeps foreground Control-key input untouched except for `Ctrl+p` and
 `Ctrl+t`.
+
+## Sessions sheet
+
+Click the session's name at the right of the strip, or press `Cmd+Shift+S`, to
+drop the sessions sheet from it.
+
+| Keys | Action |
+| --- | --- |
+| `j` / `k` or Up / Down | Choose a session |
+| Return | Open the chosen session |
+| `n` | Start a session in the focused pane's directory |
+| `r` | Rename the chosen session in its row; Return saves, Escape cancels |
+| `x` | Ask to end the chosen session; `y` or Return ends it, `n` or Escape keeps it |
+| Escape or `Cmd+Shift+S` | Close the sheet |
+
+## Settings sheet
+
+`Cmd+,` opens settings: the agents `Ctrl+a` offers, each on or off.
+
+| Keys | Action |
+| --- | --- |
+| `j` / `k` or Up / Down | Choose an agent |
+| Space or Return | Turn it on or off; the change is saved at once |
+| `o` | Show `settings.json` in Finder |
+| Escape or `Cmd+,` | Close the sheet |
+
+The sheet reads `settings.json` each time it opens, so agents added by hand
+under `agent_servers` appear without a restart. While the file doesn't parse,
+the sheet says so and saves nothing.
 
 ## Agent surface
 

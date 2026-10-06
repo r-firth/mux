@@ -62,8 +62,9 @@ The native shell uses GPUI for the window, input dispatch, shaping, and GPU
 painting. A custom GPUI canvas consumes libghostty render-state snapshots
 through the terminal boundary, paints exact cell backgrounds and cursor shapes,
 and anchors shaped runs to Ghostty columns so fallback and wide glyphs do not
-move later cells. GPUI Component supplies sheets, dialogs, inputs, switches,
-buttons, notifications, icons, and animation without imposing IDE chrome.
+move later cells. GPUI Component supplies text inputs and the window root;
+the chrome around them (the strip, slabs, sheets, tooltips and messages) is
+drawn with plain GPUI elements in the mono face, without IDE chrome.
 
 Ghostty owns selection formatting, bracketed paste, mode-aware keyboard and
 mouse encoding, and the scrollback viewport. The GUI feeds its reusable
