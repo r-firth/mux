@@ -89,7 +89,6 @@ const MUTED_TEXT: u32 = 0x00aa_a397;
 const FAINT_TEXT: u32 = 0x0084_7d71;
 const SAGE: u32 = 0x00a7_b89c;
 const SIGNAL: u32 = 0x00f2_9a6b;
-const HEADER_ACTIONS_WIDTH: f32 = 72.0;
 const EMBEDDED_TERMINAL_FONT: &str = "JetBrainsMono Nerd Font Mono";
 const INITIAL_USER_EVENT_BATCH_CAPACITY: usize = 8;
 const MAX_USER_EVENT_BATCH: usize = 256;
@@ -146,6 +145,7 @@ gpui::actions!(
         NavigateAgentLeft,
         NavigateAgentRight,
         NavigateAgentUp,
+        OpenMuxSettings,
         QuitMux,
         SelectNextAgentCompletion,
         SelectPreviousAgentCompletion,
@@ -2853,93 +2853,131 @@ impl MuxApp {
         }
     }
 
+    /// What a tab is called: the name someone gave it, or else what its
+    /// focused pane is showing. A bare number says nothing the tab's position
+    /// does not already say, so a numeric default is never shown as a name.
+    fn tab_label(&self, tab: &mux_workspace::Tab) -> String {
+        let title = tab.title.trim();
+        if !title.is_empty() && title.parse::<u64>().is_err() {
+            return chrome::truncate_chars(title, 24);
+        }
+        self.panes
+            .get(&tab.focused_pane)
+            .and_then(|pane| pane.title.title())
+            .map_or_else(|| "shell".to_owned(), chrome::tab_label)
+    }
+
+    /// One tab in gofer's strip voice: an ink dot, then the name. The active
+    /// tab is lifted onto a wash and set bold; the rest stay quiet until
+    /// hovered. Jump numbers only appear while tab mode is listening for them.
     fn render_tab_chip(
         &self,
         position: usize,
         tab: &mux_workspace::Tab,
         active: bool,
-        theme: &BezelTheme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let tab_id = tab.id;
         let tab_mode = self.mode == InputMode::Tab;
         let ink = self.tab_ink(tab_id);
+        let label = self.tab_label(tab);
         let activity = agent_tab_activity(
             self.agents
                 .iter()
                 .filter(|agent| agent.tab_id == Some(tab_id))
                 .map(|agent| agent.status),
         );
+        let group = SharedString::from(format!("tab-chip-{tab_id}"));
+        let tooltip: SharedString = match activity {
+            Some(activity) => format!("{label} · {}", agent_tab_activity_label(activity)),
+            None => label.clone(),
+        }
+        .into();
         let mut chip = h_flex()
             .id(SharedString::from(format!("tab-{tab_id}")))
+            .group(group.clone())
             .flex_none()
-            .h(px(24.0))
-            .px(px(9.0))
+            .h(px(26.0))
+            .px(px(10.0))
             .gap(px(8.0))
             .items_center()
             .rounded(px(6.0))
-            .border_1()
-            .border_color(gpui::transparent_black())
             .cursor_pointer()
-            .child(
-                div()
-                    .font_weight(FontWeight::NORMAL)
-                    .text_color(if active {
-                        ink.color()
-                    } else {
-                        color(FAINT_TEXT)
-                    })
-                    .child((position + 1).to_string()),
-            )
-            .child(div().child(tab.title.clone()))
-            .child(
-                div()
-                    .flex_none()
-                    .size(px(8.0))
-                    .rounded(px(2.0))
-                    .bg(ink.color()),
-            )
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+            })
             .on_click(cx.listener(move |this, _, _, _| {
                 this.send_workspace(WorkspaceCommand::SelectTab(tab_id));
             }));
-        if let Some(activity) = activity {
-            let tooltip: SharedString =
-                format!("{} · {}", tab.title, agent_tab_activity_label(activity)).into();
-            chip = chip
-                .tooltip(move |window, cx| {
-                    gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
-                })
-                .child(
-                    div()
+        if tab_mode && position < 9 {
+            chip = chip.child(kbd(
+                (position + 1).to_string(),
+                if active { ink.color() } else { color(TEXT) },
+            ));
+        }
+        chip = chip
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(if active {
+                        ink.color()
+                    } else {
+                        ink.color().opacity(0.72)
+                    }),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .max_w(px(200.0))
+                    .truncate()
+                    .font_weight(if active {
+                        FontWeight::BOLD
+                    } else {
+                        FontWeight::NORMAL
+                    })
+                    .text_color(color(if active { TEXT } else { MUTED_TEXT }))
+                    .group_hover(group, |style| style.text_color(color(TEXT)))
+                    .child(label),
+            );
+        match activity {
+            Some(AgentTabActivity::Working) => {
+                chip = chip.child(
+                    h_flex()
                         .flex_none()
-                        .size(px(6.0))
-                        .rounded_full()
-                        .bg(agent_tab_activity_tone(activity, theme)),
+                        .gap(px(6.0))
+                        .text_color(color(TEXT))
+                        .child(div().size(px(5.0)).rounded_full().bg(color(TEXT)))
+                        .child("working"),
                 );
+            }
+            Some(AgentTabActivity::Attention) => {
+                chip = chip.child(
+                    h_flex()
+                        .flex_none()
+                        .gap(px(6.0))
+                        .text_color(color(SIGNAL))
+                        .child(div().size(px(5.0)).rounded_full().bg(color(SIGNAL)))
+                        .child("needs you"),
+                );
+            }
+            Some(AgentTabActivity::Idle) | None => {}
         }
         if active {
-            chip.bg(color(SURFACE))
-                .text_color(color(TEXT))
-                .font_weight(FontWeight::BOLD)
-                .border_color(ink.color().opacity(if tab_mode { 1.0 } else { 0.5 }))
-                .when(tab_mode, |chip| {
-                    chip.shadow(vec![
-                        BoxShadow::new(px(0.0), px(0.0), ink.wash()).spread_radius(px(3.0)),
-                    ])
-                })
+            chip.bg(wash(0.10))
         } else {
-            chip.when(tab_mode, |chip| chip.border_color(hairline(0.12)))
-                .hover(|style| style.bg(hairline(0.04)))
+            chip.hover(|style| style.bg(wash(0.05)))
+                .active(|style| style.bg(wash(0.10)))
         }
     }
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = BezelTheme::of(cx).clone();
         let mut tabs = h_flex().flex_none().items_center().gap(px(2.0));
         if let Some(session) = &self.session {
             for (position, tab) in session.tabs.iter().enumerate() {
                 let active = tab.id == session.active_tab;
-                tabs = tabs.child(self.render_tab_chip(position, tab, active, &theme, cx));
+                tabs = tabs.child(self.render_tab_chip(position, tab, active, cx));
             }
         }
 
@@ -2949,12 +2987,13 @@ impl MuxApp {
             .w_full()
             .flex_none()
             .items_center()
-            .gap(px(12.0))
+            .gap(px(6.0))
             .pl(px(10.0))
+            .pr(px(14.0))
             .bg(linear_gradient(
                 180.0,
-                linear_color_stop(ground.opacity(0.86), 0.0),
-                linear_color_stop(ground.opacity(0.55), 1.0),
+                linear_color_stop(ground.opacity(0.72), 0.0),
+                linear_color_stop(ground.opacity(0.36), 1.0),
             ))
             .font_family(EMBEDDED_TERMINAL_FONT)
             .text_size(px(12.5))
@@ -2967,15 +3006,25 @@ impl MuxApp {
         strip
             .child(tabs)
             .child(
-                Button::new("tab-new")
-                    .icon(IconName::Plus)
-                    .ghost()
-                    .xsmall()
-                    .compact()
-                    .tooltip("New tab · ⌃t n")
+                div()
+                    .id("tab-new")
+                    .flex_none()
+                    .h(px(26.0))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .text_color(color(FAINT_TEXT))
+                    .hover(|style| style.text_color(color(TEXT)).bg(wash(0.05)))
+                    .active(|style| style.bg(wash(0.10)))
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new("New tab · ⌃t n").build(window, cx)
+                    })
                     .on_click(cx.listener(|this, _, _, _| {
                         this.send_workspace(WorkspaceCommand::NewTab);
-                    })),
+                    }))
+                    .child("+"),
             )
             .child(
                 div()
@@ -2992,16 +3041,16 @@ impl MuxApp {
                         window.zoom_window();
                     }),
             )
-            .child(self.render_mode_hints())
+            .child(self.render_mode_hints(cx))
             .child(self.render_mode_pill())
             .child(self.render_session_mark())
-            .child(div().flex_none().w(px(HEADER_ACTIONS_WIDTH)).h_full())
     }
 
-    /// The keys that matter in the current mode, in gofer's `[key] label` form.
-    fn render_mode_hints(&self) -> impl IntoElement {
+    /// The keys that matter in the current mode, in gofer's `[key] label`
+    /// form. In normal mode each hint is also the button for what it names.
+    fn render_mode_hints(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let hints: &[(&str, &str)] = match self.mode {
-            InputMode::Normal => &[("⌃p", "pane"), ("⌃t", "tab"), ("⌥hjkl", "move")],
+            InputMode::Normal => &[("⌃a", "agent"), ("⌃p", "pane"), ("⌃t", "tab")],
             InputMode::Pane => &[
                 ("hjkl", "focus"),
                 ("r", "right"),
@@ -3021,27 +3070,47 @@ impl MuxApp {
             InputMode::Session => &[("w", "switch"), ("d", "detach")],
             InputMode::Resize => &[("hjkl", "resize"), ("↵", "done")],
         };
+        let key_color = if self.mode == InputMode::Normal {
+            color(TEXT)
+        } else {
+            self.active_ink().color()
+        };
         let mut row = h_flex()
             .min_w(px(0.0))
             .overflow_hidden()
-            .gap(px(14.0))
+            .gap(px(4.0))
             .text_color(color(FAINT_TEXT));
         for (key, label) in hints {
-            row = row.child(
-                h_flex()
-                    .flex_none()
-                    .child("[")
-                    .child(div().text_color(color(TEXT)).child(*key))
-                    .child("]")
-                    .child(div().ml(px(6.0)).child(*label)),
-            );
+            let mut hint = h_flex()
+                .id(SharedString::from(format!("hint-{label}")))
+                .flex_none()
+                .h(px(24.0))
+                .px(px(6.0))
+                .gap(px(6.0))
+                .items_center()
+                .rounded(px(6.0))
+                .child(kbd(*key, key_color))
+                .child(*label);
+            if self.mode == InputMode::Normal {
+                let label = *label;
+                hint = hint
+                    .cursor_pointer()
+                    .hover(|style| style.bg(wash(0.05)).text_color(color(TEXT)))
+                    .active(|style| style.bg(wash(0.10)))
+                    .on_click(cx.listener(move |this, _, window, cx| match label {
+                        "agent" => this.toggle_agents(window, cx),
+                        "pane" => this.mode = InputMode::Pane,
+                        _ => this.mode = InputMode::Tab,
+                    }));
+            }
+            row = row.child(hint);
         }
         row
     }
 
     fn render_mode_pill(&self) -> gpui::AnyElement {
         let label = match self.mode {
-            InputMode::Normal => "NORMAL",
+            InputMode::Normal => return gpui::Empty.into_any_element(),
             InputMode::Pane => "PANE",
             InputMode::Tab => "TAB",
             InputMode::Session => "SESSION",
@@ -3051,18 +3120,9 @@ impl MuxApp {
             .flex_none()
             .h(px(22.0))
             .px(px(8.0))
-            .gap(px(8.0))
             .items_center()
             .rounded(px(4.0))
-            .font_weight(FontWeight::BOLD);
-        if self.mode == InputMode::Normal {
-            return pill
-                .text_color(color(TEXT))
-                .child(div().size(px(6.0)).rounded_full().bg(color(SAGE)))
-                .child(label)
-                .into_any_element();
-        }
-        let pill = pill
+            .font_weight(FontWeight::BOLD)
             .bg(self.active_ink().color())
             .text_color(color(GROUND))
             .child(label);
@@ -3084,13 +3144,13 @@ impl MuxApp {
             .session
             .as_ref()
             .map_or("mux", |session| session.name.as_str());
-        let mark = chrome::dot_matrix(name, 3.0, color(MUTED_TEXT)).unwrap_or_else(|| {
+        let mark = chrome::dot_matrix(name, 2.5, color(TEXT)).unwrap_or_else(|| {
             div()
-                .text_color(color(FAINT_TEXT))
+                .text_color(color(MUTED_TEXT))
                 .child(name.to_owned())
                 .into_any_element()
         });
-        div().flex_none().child(mark).into_any_element()
+        div().flex_none().pl(px(8.0)).child(mark).into_any_element()
     }
 
     /// The warm, dithered ground in the active tab's ink. It shows in the
@@ -3133,7 +3193,7 @@ impl MuxApp {
         } else {
             pane.and_then(|pane| pane.title.title()).map_or_else(
                 || format!("pane {number}").into(),
-                |title| title.to_owned().into(),
+                |title| chrome::terminal_place(title).to_owned().into(),
             )
         };
         let mut head = h_flex()
@@ -3164,7 +3224,7 @@ impl MuxApp {
         if zoomed {
             head = head.child(div().flex_none().text_color(ink.color()).child("zoom"));
         }
-        if let Some(pane) = pane {
+        if let Some(pane) = pane.filter(|_| focused) {
             head = head.child(
                 div()
                     .flex_none()
@@ -3333,6 +3393,9 @@ impl Render for MuxApp {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_forward_terminal_tab))
             .on_action(cx.listener(Self::on_forward_terminal_backtab))
+            .on_action(cx.listener(|this, _: &OpenMuxSettings, window, cx| {
+                this.open_settings(window, cx);
+            }))
             .on_key_down(cx.listener(Self::handle_key_down))
             .on_key_up(cx.listener(Self::handle_key_up))
             .on_mouse_move(move |event, _, cx| {
@@ -3407,17 +3470,27 @@ impl Render for MuxApp {
                 root = root.child(pane_focus_hint(geometry.rect, *letter, self.active_ink()));
             }
         }
-        let active_agents = self
-            .agents_for_active_tab()
-            .filter(|agent| agent.status != AgentSessionStatus::Closed)
-            .count();
-        root = root.child(header_actions(&cx.weak_entity(), active_agents));
         root
     }
 }
 
 fn hairline(alpha: f32) -> Hsla {
     gpui::white().opacity(alpha)
+}
+
+/// gofer's wash: the text colour at a low alpha, for hover and selection.
+fn wash(alpha: f32) -> Hsla {
+    color(TEXT).opacity(alpha)
+}
+
+/// A key in gofer's bracketed form: faint brackets around the key itself.
+fn kbd(key: impl Into<SharedString>, key_color: Hsla) -> impl IntoElement {
+    h_flex()
+        .flex_none()
+        .text_color(color(FAINT_TEXT))
+        .child("[")
+        .child(div().text_color(key_color).child(key.into()))
+        .child("]")
 }
 
 /// A short ink notch on the focused slab's top edge, visible at a glance.
@@ -3551,40 +3624,6 @@ impl Render for MuxLayerHost {
         }
         root
     }
-}
-
-fn header_actions(app: &gpui::WeakEntity<MuxApp>, active_agents: usize) -> impl IntoElement {
-    let agents_app = app.clone();
-    let settings_app = app.clone();
-    let agents_label = active_agents.to_string();
-    h_flex()
-        .absolute()
-        .top(px(6.0))
-        .right(px(8.0))
-        .gap_1()
-        .child(
-            Button::new("open-agents")
-                .icon(IconName::Bot)
-                .when(active_agents > 0, |button| button.label(agents_label))
-                .ghost()
-                .xsmall()
-                .compact()
-                .tooltip("Open agent workspace · ⌃A")
-                .on_click(move |_, window, cx| {
-                    let _ = agents_app.update(cx, |this, cx| this.toggle_agents(window, cx));
-                }),
-        )
-        .child(
-            Button::new("open-settings")
-                .icon(IconName::Settings2)
-                .ghost()
-                .xsmall()
-                .compact()
-                .tooltip("Open Mux settings")
-                .on_click(move |_, window, cx| {
-                    let _ = settings_app.update(cx, |this, cx| this.open_settings(window, cx));
-                }),
-        )
 }
 
 fn return_agent_pane(app: &gpui::WeakEntity<MuxApp>, window: &mut Window, cx: &mut App) {
@@ -5396,14 +5435,6 @@ const fn agent_tab_activity_label(activity: AgentTabActivity) -> &'static str {
     }
 }
 
-fn agent_tab_activity_tone(activity: AgentTabActivity, theme: &BezelTheme) -> Hsla {
-    match activity {
-        AgentTabActivity::Idle => theme.success,
-        AgentTabActivity::Working => theme.accent,
-        AgentTabActivity::Attention => theme.warning,
-    }
-}
-
 fn interface_animation(duration_ms: u64) -> Animation {
     Animation::new(Duration::from_millis(duration_ms))
         .with_easing(cubic_bezier(0.16, 1.0, 0.3, 1.0))
@@ -5731,6 +5762,8 @@ fn configure_application_menu(cx: &mut App) {
         name: "Mux".into(),
         disabled: false,
         items: vec![
+            MenuItem::action("Settings…", OpenMuxSettings),
+            MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
             MenuItem::action("Quit Mux", QuitMux),
@@ -5740,7 +5773,10 @@ fn configure_application_menu(cx: &mut App) {
 
 fn configure_application_actions(cx: &mut App) {
     cx.on_action(quit_mux);
-    cx.bind_keys([KeyBinding::new("cmd-q", QuitMux, None)]);
+    cx.bind_keys([
+        KeyBinding::new("cmd-q", QuitMux, None),
+        KeyBinding::new("cmd-,", OpenMuxSettings, None),
+    ]);
     // Terminal panes own Tab; the component root must not turn it into focus traversal.
     cx.bind_keys([
         KeyBinding::new("tab", ForwardTerminalTab, Some("MuxTerminal")),
