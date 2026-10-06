@@ -64,6 +64,7 @@ enum Command {
     RenameTab,
     TabInk,
     Find,
+    QuickSelect,
     Agent,
     Sessions,
     NewSession,
@@ -272,6 +273,10 @@ impl MuxApp {
             }
             Command::Find => {
                 self.open_find(window, cx);
+                return;
+            }
+            Command::QuickSelect => {
+                self.toggle_quick_select(window, cx);
                 return;
             }
             Command::NewSession => {
@@ -602,7 +607,7 @@ impl MuxApp {
 
     /// What mux can do, each with the keys that do it and other words it
     /// answers to. Some say what they will do to the pane or tab on screen.
-    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 14] {
+    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 15] {
         let zoomed = self
             .session
             .as_ref()
@@ -648,6 +653,12 @@ impl MuxApp {
                 "⌘f",
                 "find in this pane",
                 "search look grep history scrollback",
+            ),
+            (
+                Command::QuickSelect,
+                "⌘⇧space",
+                "quick select",
+                "copy paste url link path hash hint pick yank",
             ),
             (
                 Command::Agent,

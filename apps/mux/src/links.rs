@@ -109,7 +109,7 @@ fn written_url_at(frame: &RenderFrame, point: TerminalPoint) -> Option<Link> {
 }
 
 /// Where URLs start and end in some text, as character indexes.
-fn url_spans(text: &[char]) -> Vec<(usize, usize)> {
+pub(super) fn url_spans(text: &[char]) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     let mut index = 0;
     while index < text.len() {
@@ -167,7 +167,7 @@ fn trimmed_url_length(url: &[char]) -> usize {
 }
 
 /// Cells in reading order, gathered into one span per row.
-fn spans_of(cells: impl Iterator<Item = (u16, u16)>) -> Vec<(u16, u16, u16)> {
+pub(super) fn spans_of(cells: impl Iterator<Item = (u16, u16)>) -> Vec<(u16, u16, u16)> {
     let mut spans: Vec<(u16, u16, u16)> = Vec::new();
     for (row, column) in cells {
         match spans.last_mut() {

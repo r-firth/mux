@@ -15,6 +15,7 @@ mod links;
 mod palette;
 mod pane_calls;
 mod pane_exit;
+mod quick_select;
 mod scrollback;
 mod seams;
 mod session_sheet;
@@ -162,6 +163,7 @@ gpui::actions!(
         OpenFind,
         OpenMuxPalette,
         OpenMuxSettings,
+        OpenQuickSelect,
         PreviousAgentChoice,
         PreviousPaletteRow,
         QuitMux,
@@ -493,6 +495,8 @@ struct MuxApp {
     seam_drag: Option<seams::SeamDrag>,
     seam_pointer: Option<seams::SeamPointer>,
     seam_settle: Option<seams::SeamSettle>,
+    quick_select: Option<quick_select::QuickSelect>,
+    chosen_target: Option<quick_select::ChosenTarget>,
     /// The tab that was active before the one on screen.
     previous_tab: Option<TabId>,
     /// Panes whose program has exited, and how. The daemon keeps them until
@@ -639,6 +643,8 @@ impl MuxApp {
             seam_drag: None,
             seam_pointer: None,
             seam_settle: None,
+            quick_select: None,
+            chosen_target: None,
             previous_tab: None,
             pane_exits: HashMap::new(),
             pane_restart: None,
@@ -1605,6 +1611,10 @@ impl MuxApp {
             cx.propagate();
             return;
         }
+        if self.quick_select_key(&event.keystroke, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.active_agent_pane() == self.terminal_input_pane_id() {
             // The focused pane is currently a native agent surface. Its input
             // and modal-key handlers own this event; never leak it through to
@@ -1734,6 +1744,12 @@ impl MuxApp {
 
     fn forward_terminal_tab(&mut self, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.active_agent_pane() == self.terminal_input_pane_id() {
+            return;
+        }
+        // Quick select keeps Tab from the shell behind it, as it does every
+        // key that isn't one of its labels.
+        if self.quick_select_open() {
+            cx.stop_propagation();
             return;
         }
         let keystroke = terminal_tab_keystroke(shift);
@@ -3478,32 +3494,37 @@ impl MuxApp {
     /// to it, apart from ⌃p, and is the last hint to give way to a narrow
     /// window.
     fn render_mode_hints(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let normal = self.mode == InputMode::Normal;
-        let hints: &[(&str, &str)] = match self.mode {
-            InputMode::Normal => &[
-                ("⌘p", "go to"),
-                ("⌃a", "agent"),
-                ("⌃t", "tab"),
-                ("⌃p", "pane"),
-            ],
-            InputMode::Pane => &[
-                ("hjkl", "focus"),
-                ("r", "right"),
-                ("d", "down"),
-                ("x", "close"),
-                ("f", "zoom"),
-                ("⌃n", "resize"),
-            ],
-            InputMode::Tab => &[
-                ("hl", "move"),
-                ("1-9", "jump"),
-                ("n", "new"),
-                ("r", "rename"),
-                ("c", "ink"),
-                ("x", "close"),
-            ],
-            InputMode::Session => &[("w", "switch"), ("d", "detach")],
-            InputMode::Resize => &[("hjkl", "resize"), ("enter", "done")],
+        let selecting = self.quick_select_open();
+        let normal = self.mode == InputMode::Normal && !selecting;
+        let hints: &[(&str, &str)] = if selecting {
+            &[("a-z", "copy"), ("⇧", "paste"), ("esc", "close")]
+        } else {
+            match self.mode {
+                InputMode::Normal => &[
+                    ("⌘p", "go to"),
+                    ("⌃a", "agent"),
+                    ("⌃t", "tab"),
+                    ("⌃p", "pane"),
+                ],
+                InputMode::Pane => &[
+                    ("hjkl", "focus"),
+                    ("r", "right"),
+                    ("d", "down"),
+                    ("x", "close"),
+                    ("f", "zoom"),
+                    ("⌃n", "resize"),
+                ],
+                InputMode::Tab => &[
+                    ("hl", "move"),
+                    ("1-9", "jump"),
+                    ("n", "new"),
+                    ("r", "rename"),
+                    ("c", "ink"),
+                    ("x", "close"),
+                ],
+                InputMode::Session => &[("w", "switch"), ("d", "detach")],
+                InputMode::Resize => &[("hjkl", "resize"), ("enter", "done")],
+            }
         };
         let key_color = if normal {
             color(TEXT)
@@ -3551,12 +3572,16 @@ impl MuxApp {
     }
 
     fn render_mode_pill(&self) -> gpui::AnyElement {
-        let label = match self.mode {
-            InputMode::Normal => return gpui::Empty.into_any_element(),
-            InputMode::Pane => "PANE",
-            InputMode::Tab => "TAB",
-            InputMode::Session => "SESSION",
-            InputMode::Resize => "RESIZE",
+        let label = if self.quick_select_open() {
+            "SELECT"
+        } else {
+            match self.mode {
+                InputMode::Normal => return gpui::Empty.into_any_element(),
+                InputMode::Pane => "PANE",
+                InputMode::Tab => "TAB",
+                InputMode::Session => "SESSION",
+                InputMode::Resize => "RESIZE",
+            }
         };
         let pill = h_flex()
             .flex_none()
@@ -3894,8 +3919,10 @@ impl MuxApp {
                     surface: color(SURFACE),
                     cursor: self.active_ink().color(),
                 },
-                self.find_marks(pane_id),
-            ));
+                self.quick_select_marks(pane_id)
+                    .unwrap_or_else(|| self.find_marks(pane_id)),
+            ))
+            .children(self.render_quick_select_labels(pane_id, rect));
         Some(surface.into_any_element())
     }
 }
@@ -3925,6 +3952,7 @@ impl Render for MuxApp {
             self.sync_terminal_sizes(f32::from(viewport.width), f32::from(viewport.height));
         self.settle_frame_state(window, cx);
         self.refresh_find(window, cx);
+        self.refresh_quick_select(window, cx);
         let pane_count = geometry.panes.len();
         let root = div()
             .id("mux-root")
@@ -3944,8 +3972,18 @@ impl Render for MuxApp {
             .on_action(cx.listener(|this, _: &OpenFind, window, cx| this.open_find(window, cx)))
             .on_action(cx.listener(|this, _: &FindOlder, _, cx| this.step_find(true, cx)))
             .on_action(cx.listener(|this, _: &FindNewer, _, cx| this.step_find(false, cx)))
+            .on_action(cx.listener(|this, _: &OpenQuickSelect, window, cx| {
+                this.toggle_quick_select(window, cx);
+            }))
             .on_key_down(cx.listener(Self::handle_key_down))
-            .on_key_up(cx.listener(Self::handle_key_up));
+            .on_key_up(cx.listener(Self::handle_key_up))
+            // Quick select is for the keys: a click anywhere puts it away
+            // and goes on to do what it does.
+            .capture_any_mouse_down(cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
+                if this.quick_select.take().is_some() {
+                    cx.notify();
+                }
+            }));
         let mut root = Self::with_pointer_capture(root, cx)
             .bg(color(GROUND))
             .font_family(EMBEDDED_TERMINAL_FONT)
@@ -4817,6 +4855,7 @@ fn configure_application_actions(cx: &mut App) {
         KeyBinding::new("cmd-f", OpenFind, None),
         KeyBinding::new("cmd-g", FindOlder, None),
         KeyBinding::new("cmd-shift-g", FindNewer, None),
+        KeyBinding::new("cmd-shift-space", OpenQuickSelect, None),
     ]);
     // The palette's field keeps typing; the keys that move through the
     // list, choose from it and close it are the palette's.
