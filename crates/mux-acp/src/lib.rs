@@ -4,12 +4,13 @@
 //! translates the stable ACP v1 schema into durable product state, and keeps
 //! protocol types out of the daemon IPC and native UI.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
@@ -19,9 +20,9 @@ use agent_client_protocol::schema::v1::{
     PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigOptionsCapabilities, SessionConfigSelectOptions,
-    SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, ToolCall,
-    ToolCallContent, ToolCallStatus, ToolCallUpdate,
+    SessionId, SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, StopReason,
+    ToolCall, ToolCallContent, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, ConnectionTo};
 use indexmap::IndexMap;
@@ -63,11 +64,12 @@ impl AgentSpec {
         }
     }
 
-    /// Claude Agent SDK adapter from the official ACP registry.
+    /// Claude Code, through the Claude Agent SDK adapter from the official
+    /// ACP registry. It uses the same sign-in and settings as the `claude` CLI.
     #[must_use]
     pub fn claude() -> Self {
         Self {
-            name: "Claude Agent".to_owned(),
+            name: "Claude Code".to_owned(),
             command: PathBuf::from("npx"),
             args: vec![
                 "-y".to_owned(),
@@ -135,6 +137,14 @@ impl AgentSpec {
         resolved
     }
 
+    /// Whether this agent's launcher can be found in the app or login-shell
+    /// PATH. This can start a login shell the first time it is asked, so call
+    /// it off the UI thread.
+    #[must_use]
+    pub fn command_available(&self) -> bool {
+        ensure_agent_command_available(&self.resolve_runtime_environment()).is_ok()
+    }
+
     pub fn prepare(&self) -> Result<PreparedAgent, AgentError> {
         if self.name.trim().is_empty() {
             return Err(AgentError::InvalidSpec(
@@ -166,36 +176,35 @@ pub struct AgentProfile {
     pub spec: AgentSpec,
 }
 
-/// Small default set sourced from the official ACP registry.
-/// Registry installation/caching can replace these launch recipes without
-/// changing the daemon or UI contracts.
+/// Small default set sourced from the official ACP registry, in the order the
+/// launcher offers them. Registry installation/caching can replace these
+/// launch recipes without changing the daemon or UI contracts.
 #[must_use]
 pub fn built_in_agent_profiles() -> Vec<AgentProfile> {
     vec![
         AgentProfile {
-            id: "codex-acp".to_owned(),
-            name: "Codex".to_owned(),
-            description: "Official ACP adapter · downloaded and cached on first use".to_owned(),
-            spec: AgentSpec::codex(),
-        },
-        AgentProfile {
             id: "claude-acp".to_owned(),
-            name: "Claude Agent".to_owned(),
-            description: "Claude Agent ACP adapter · downloaded and cached on first use".to_owned(),
+            name: "Claude Code".to_owned(),
+            description: "claude-agent-acp, fetched with npx on first use".to_owned(),
             spec: AgentSpec::claude(),
         },
         AgentProfile {
-            id: "gemini".to_owned(),
-            name: "Gemini CLI".to_owned(),
-            description: "Gemini CLI native ACP mode · downloaded and cached on first use"
-                .to_owned(),
-            spec: AgentSpec::gemini(),
+            id: "codex-acp".to_owned(),
+            name: "Codex".to_owned(),
+            description: "codex-acp, fetched with npx on first use".to_owned(),
+            spec: AgentSpec::codex(),
         },
         AgentProfile {
             id: "github-copilot".to_owned(),
             name: "GitHub Copilot".to_owned(),
-            description: "Copilot CLI native ACP mode · uses installed copilot".to_owned(),
+            description: "the copilot CLI in ACP mode".to_owned(),
             spec: AgentSpec::copilot(),
+        },
+        AgentProfile {
+            id: "gemini".to_owned(),
+            name: "Gemini CLI".to_owned(),
+            description: "gemini-cli in ACP mode, fetched with npx on first use".to_owned(),
+            spec: AgentSpec::gemini(),
         },
     ]
 }
@@ -292,6 +301,44 @@ pub struct AgentTool {
     /// Structured result supplied by the ACP agent.
     #[serde(default, with = "optional_json_value")]
     pub raw_output: Option<serde_json::Value>,
+    /// Files the tool is reading or changing, so clients can name them.
+    #[serde(default)]
+    pub locations: Vec<AgentToolLocation>,
+    /// File changes proposed or made by the tool.
+    #[serde(default)]
+    pub diffs: Vec<AgentDiff>,
+    /// When the daemon first saw the tool, in Unix milliseconds.
+    #[serde(default)]
+    pub started_at: Option<u64>,
+    /// When the tool completed or failed, in Unix milliseconds.
+    #[serde(default)]
+    pub finished_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentToolLocation {
+    pub path: PathBuf,
+    pub line: Option<u32>,
+}
+
+/// A file change in a tool call. `old_text` is `None` for a new file. Agents
+/// differ in how much they send: an edited snippet, or the whole file.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentDiff {
+    pub path: PathBuf,
+    pub old_text: Option<String>,
+    pub new_text: String,
+}
+
+/// The current time in Unix milliseconds. Timeline times are stamped by the
+/// daemon, so every client of one session shows the same times.
+#[must_use]
+pub fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 /// `serde_json::Value` relies on `deserialize_any`, which compact non-self-
@@ -355,6 +402,10 @@ pub struct AgentPermission {
     pub title: String,
     pub options: Vec<PermissionOption>,
     pub selected_option: Option<String>,
+    #[serde(default)]
+    pub asked_at: Option<u64>,
+    #[serde(default)]
+    pub answered_at: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -458,6 +509,8 @@ pub enum AgentTimelineItem {
         role: AgentMessageRole,
         message_id: Option<String>,
         text: String,
+        /// When the message began, in Unix milliseconds.
+        at: Option<u64>,
     },
     Tool(AgentTool),
     Plan(Vec<AgentPlanEntry>),
@@ -467,6 +520,22 @@ pub enum AgentTimelineItem {
         characters: usize,
     },
     Error(String),
+    /// The end of a prompt turn, and why it ended.
+    TurnEnded {
+        at: u64,
+        stop: AgentStopReason,
+    },
+}
+
+/// Why the agent stopped working on a prompt.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum AgentStopReason {
+    EndTurn,
+    MaxTokens,
+    MaxTurnRequests,
+    Refusal,
+    Cancelled,
+    Other,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -488,9 +557,38 @@ pub struct AgentSessionSnapshot {
     pub config_options: Vec<AgentConfigOption>,
     pub available_commands: Vec<AgentSlashCommand>,
     pub auth_methods: Vec<AgentAuthMethod>,
+    /// When the session was started, in Unix milliseconds.
+    #[serde(default)]
+    pub started_at: u64,
+    /// Prompts sent while the agent was busy, in the order they will run.
+    #[serde(default)]
+    pub queued: Vec<String>,
 }
 
 impl AgentSessionSnapshot {
+    #[must_use]
+    pub fn new(id: AgentSessionId, tab_id: Option<TabId>, name: String, cwd: PathBuf) -> Self {
+        Self {
+            id,
+            tab_id,
+            name,
+            cwd,
+            status: AgentSessionStatus::Starting,
+            agent_name: None,
+            agent_version: None,
+            timeline: Vec::new(),
+            context_used: None,
+            context_size: None,
+            current_mode: None,
+            modes: Vec::new(),
+            config_options: Vec::new(),
+            available_commands: Vec::new(),
+            auth_methods: Vec::new(),
+            started_at: unix_millis(),
+            queued: Vec::new(),
+        }
+    }
+
     /// Apply a streamed daemon event to a client-side replica.
     pub fn apply(&mut self, event: &AgentEvent) {
         if event.session_id() == self.id {
@@ -537,6 +635,16 @@ pub enum AgentEvent {
     UserMessage {
         session_id: AgentSessionId,
         text: String,
+        at: u64,
+    },
+    /// A prompt arrived while the agent was busy; it runs after the turn ends.
+    PromptQueued {
+        session_id: AgentSessionId,
+        text: String,
+    },
+    /// Queued prompts were dropped, for example when a turn was interrupted.
+    QueueCleared {
+        session_id: AgentSessionId,
     },
     ContextAttached {
         session_id: AgentSessionId,
@@ -548,10 +656,11 @@ pub enum AgentEvent {
         role: AgentMessageRole,
         message_id: Option<String>,
         text: String,
+        at: u64,
     },
     ToolActivity {
         session_id: AgentSessionId,
-        tool: AgentTool,
+        tool: Box<AgentTool>,
     },
     PlanUpdated {
         session_id: AgentSessionId,
@@ -582,10 +691,12 @@ pub enum AgentEvent {
         session_id: AgentSessionId,
         request_id: String,
         option_id: Option<String>,
+        at: u64,
     },
     Completed {
         session_id: AgentSessionId,
-        stop_reason: String,
+        stop_reason: AgentStopReason,
+        at: u64,
     },
     Failed {
         session_id: AgentSessionId,
@@ -605,6 +716,8 @@ impl AgentEvent {
             | Self::AuthenticationStarted { session_id, .. }
             | Self::AuthenticationFailed { session_id, .. }
             | Self::UserMessage { session_id, .. }
+            | Self::PromptQueued { session_id, .. }
+            | Self::QueueCleared { session_id }
             | Self::ContextAttached { session_id, .. }
             | Self::ContentDelta { session_id, .. }
             | Self::ToolActivity { session_id, .. }
@@ -721,23 +834,8 @@ impl AgentManager {
         ensure_agent_command_available(&runtime_spec)?;
         let prepared = runtime_spec.prepare()?;
         let session_id = AgentSessionId::new();
-        let snapshot = AgentSessionSnapshot {
-            id: session_id,
-            tab_id,
-            name: prepared.name().to_owned(),
-            cwd: cwd.clone(),
-            status: AgentSessionStatus::Starting,
-            agent_name: None,
-            agent_version: None,
-            timeline: Vec::new(),
-            context_used: None,
-            context_size: None,
-            current_mode: None,
-            modes: Vec::new(),
-            config_options: Vec::new(),
-            available_commands: Vec::new(),
-            auth_methods: Vec::new(),
-        };
+        let snapshot =
+            AgentSessionSnapshot::new(session_id, tab_id, prepared.name().to_owned(), cwd.clone());
         let snapshot_state = Arc::new(RwLock::new(snapshot.clone()));
         let (commands, command_rx) = mpsc::unbounded_channel();
         self.inner.sessions.write().insert(
@@ -883,6 +981,7 @@ async fn run_agent(
     let waiters: PermissionWaiters = Arc::new(Mutex::new(HashMap::new()));
     let busy = Arc::new(AtomicBool::new(false));
     let notification_sink = sink.clone();
+    let notification_busy = Arc::clone(&busy);
     let permission_sink = sink.clone();
     let permission_waiters = Arc::clone(&waiters);
 
@@ -891,13 +990,21 @@ async fn run_agent(
         .name("mux")
         .on_receive_notification(
             async move |notification: SessionNotification, _connection| {
+                // Mux records each prompt in the timeline as it sends it. Some
+                // agents echo the prompt back mid-turn, which would otherwise
+                // repeat it inside the user's own message.
+                if notification_busy.load(Ordering::Acquire)
+                    && matches!(notification.update, SessionUpdate::UserMessageChunk(_))
+                {
+                    return Ok(());
+                }
                 emit_session_update(&notification_sink, notification.update);
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
         )
         .on_receive_request(
-            async move |request: RequestPermissionRequest, responder, _connection| {
+            async move |request: RequestPermissionRequest, responder, connection| {
                 let request_id = uuid::Uuid::new_v4().to_string();
                 let options = request
                     .options
@@ -910,6 +1017,10 @@ async fn run_agent(
                     .collect::<Vec<_>>();
                 let (sender, receiver) = oneshot::channel();
                 permission_waiters.lock().insert(request_id.clone(), sender);
+                // The request describes the tool it is asking about, often in
+                // more detail than the tool call itself (the full command, the
+                // proposed diff). Fold that into the timeline's tool first.
+                emit_tool_update(&permission_sink, request.tool_call.clone());
                 permission_sink.emit(AgentEvent::PermissionRequested {
                     session_id,
                     permission: AgentPermission {
@@ -923,17 +1034,27 @@ async fn run_agent(
                             .unwrap_or_else(|| "Agent action".to_owned()),
                         options,
                         selected_option: None,
+                        asked_at: Some(unix_millis()),
+                        answered_at: None,
                     },
                 });
-                let selected = receiver
-                    .await
-                    .ok()
-                    .flatten()
-                    .filter(|selected| valid_options.contains(selected));
-                let outcome = selected.map_or(RequestPermissionOutcome::Cancelled, |option_id| {
-                    RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id))
-                });
-                responder.respond(RequestPermissionResponse::new(outcome))
+                // Handlers run on the connection's event loop. Wait for the
+                // answer in a task of its own so the agent's updates keep
+                // flowing while the question is open.
+                connection.spawn(async move {
+                    let selected = receiver
+                        .await
+                        .ok()
+                        .flatten()
+                        .filter(|selected| valid_options.contains(selected));
+                    let outcome =
+                        selected.map_or(RequestPermissionOutcome::Cancelled, |option_id| {
+                            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                                option_id,
+                            ))
+                        });
+                    responder.respond(RequestPermissionResponse::new(outcome))
+                })
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -1004,6 +1125,10 @@ async fn run_agent(
                 auth_methods,
             });
 
+            // Prompts sent while a turn is running wait here, and each ended
+            // turn starts the next one.
+            let mut queue = VecDeque::new();
+            let (turn_ended, mut turn_ends) = mpsc::unbounded_channel::<()>();
             loop {
                 tokio::select! {
                     command = commands.recv() => {
@@ -1018,59 +1143,15 @@ async fn run_agent(
                                 });
                             }
                             AgentCommand::Prompt(prompt) => {
-                                if busy.swap(true, Ordering::AcqRel) {
-                                    sink.emit(AgentEvent::Failed {
+                                if busy.load(Ordering::Acquire) || !queue.is_empty() {
+                                    sink.emit(AgentEvent::PromptQueued {
                                         session_id,
-                                        message: "The agent is still working on the previous prompt".to_owned(),
+                                        text: prompt.text.clone(),
                                     });
+                                    queue.push_back(prompt);
                                     continue;
                                 }
-                                sink.emit(AgentEvent::UserMessage {
-                                    session_id,
-                                    text: prompt.text.clone(),
-                                });
-                                for context in &prompt.context {
-                                    sink.emit(AgentEvent::ContextAttached {
-                                        session_id,
-                                        label: context.label.clone(),
-                                        characters: context.text.chars().count(),
-                                    });
-                                }
-                                for file in &prompt.files {
-                                    sink.emit(AgentEvent::ContextAttached {
-                                        session_id,
-                                        label: file.path.display().to_string(),
-                                        characters: file.text.chars().count(),
-                                    });
-                                }
-                                let completion_sink = sink.clone();
-                                let completion_busy = Arc::clone(&busy);
-                                if let Err(error) = connection
-                                    .send_request(PromptRequest::new(
-                                        remote_session_id.clone(),
-                                        prompt_content_blocks(&prompt),
-                                    ))
-                                    .on_receiving_result(move |result: Result<PromptResponse, _>| async move {
-                                        completion_busy.store(false, Ordering::Release);
-                                        match result {
-                                            Ok(response) => completion_sink.emit(AgentEvent::Completed {
-                                                session_id,
-                                                stop_reason: format!("{:?}", response.stop_reason),
-                                            }),
-                                            Err(error) => completion_sink.emit(AgentEvent::Failed {
-                                                session_id,
-                                                message: error.to_string(),
-                                            }),
-                                        }
-                                        Ok(())
-                                    })
-                                {
-                                    busy.store(false, Ordering::Release);
-                                    sink.emit(AgentEvent::Failed {
-                                        session_id,
-                                        message: error.to_string(),
-                                    });
-                                }
+                                send_prompt(&connection, &remote_session_id, &prompt, &sink, &busy, &turn_ended);
                             }
                             AgentCommand::SetMode(mode_id) => {
                                 let mode_sink = sink.clone();
@@ -1148,15 +1229,23 @@ async fn run_agent(
                                         session_id,
                                         request_id,
                                         option_id: event_option,
+                                        at: unix_millis(),
                                     });
                                 }
                             }
                             AgentCommand::Cancel => {
+                                // Interrupting means stop: what was queued
+                                // behind this turn goes too.
+                                if !queue.is_empty() {
+                                    queue.clear();
+                                    sink.emit(AgentEvent::QueueCleared { session_id });
+                                }
                                 for request_id in cancel_permissions(&waiters) {
                                     sink.emit(AgentEvent::PermissionResolved {
                                         session_id,
                                         request_id,
                                         option_id: None,
+                                        at: unix_millis(),
                                     });
                                 }
                                 connection.send_notification(CancelNotification::new(remote_session_id.clone()))?;
@@ -1167,6 +1256,7 @@ async fn run_agent(
                                         session_id,
                                         request_id,
                                         option_id: None,
+                                        at: unix_millis(),
                                     });
                                 }
                                 if busy.load(Ordering::Acquire) {
@@ -1175,6 +1265,13 @@ async fn run_agent(
                                 sink.emit(AgentEvent::Closed { session_id });
                                 break;
                             }
+                        }
+                    }
+                    Some(()) = turn_ends.recv() => {
+                        if !busy.load(Ordering::Acquire)
+                            && let Some(prompt) = queue.pop_front()
+                        {
+                            send_prompt(&connection, &remote_session_id, &prompt, &sink, &busy, &turn_ended);
                         }
                     }
                     () = connection.incoming_closed() => {
@@ -1188,6 +1285,81 @@ async fn run_agent(
         .await
         .map_err(|error| AgentError::Protocol(error.to_string()))?;
     Ok(())
+}
+
+/// Start a prompt turn: record the prompt and its context in the timeline, send
+/// it, and report the turn's end (and why it ended) when the agent replies.
+fn send_prompt(
+    connection: &ConnectionTo<Agent>,
+    remote_session_id: &SessionId,
+    prompt: &AgentPrompt,
+    sink: &EventSink,
+    busy: &Arc<AtomicBool>,
+    turn_ended: &mpsc::UnboundedSender<()>,
+) {
+    let session_id = sink.session_id;
+    busy.store(true, Ordering::Release);
+    sink.emit(AgentEvent::UserMessage {
+        session_id,
+        text: prompt.text.clone(),
+        at: unix_millis(),
+    });
+    for context in &prompt.context {
+        sink.emit(AgentEvent::ContextAttached {
+            session_id,
+            label: context.label.clone(),
+            characters: context.text.chars().count(),
+        });
+    }
+    for file in &prompt.files {
+        sink.emit(AgentEvent::ContextAttached {
+            session_id,
+            label: file.path.display().to_string(),
+            characters: file.text.chars().count(),
+        });
+    }
+    let completion_sink = sink.clone();
+    let completion_busy = Arc::clone(busy);
+    let completion_ended = turn_ended.clone();
+    if let Err(error) = connection
+        .send_request(PromptRequest::new(
+            remote_session_id.clone(),
+            prompt_content_blocks(prompt),
+        ))
+        .on_receiving_result(move |result: Result<PromptResponse, _>| async move {
+            completion_busy.store(false, Ordering::Release);
+            match result {
+                Ok(response) => completion_sink.emit(AgentEvent::Completed {
+                    session_id,
+                    stop_reason: normalize_stop_reason(response.stop_reason),
+                    at: unix_millis(),
+                }),
+                Err(error) => completion_sink.emit(AgentEvent::Failed {
+                    session_id,
+                    message: error.to_string(),
+                }),
+            }
+            let _ = completion_ended.send(());
+            Ok(())
+        })
+    {
+        busy.store(false, Ordering::Release);
+        sink.emit(AgentEvent::Failed {
+            session_id,
+            message: error.to_string(),
+        });
+    }
+}
+
+fn normalize_stop_reason(reason: StopReason) -> AgentStopReason {
+    match reason {
+        StopReason::EndTurn => AgentStopReason::EndTurn,
+        StopReason::MaxTokens => AgentStopReason::MaxTokens,
+        StopReason::MaxTurnRequests => AgentStopReason::MaxTurnRequests,
+        StopReason::Refusal => AgentStopReason::Refusal,
+        StopReason::Cancelled => AgentStopReason::Cancelled,
+        _ => AgentStopReason::Other,
+    }
 }
 
 fn normalize_auth_methods(methods: &[AuthMethod]) -> Vec<AgentAuthMethod> {
@@ -1448,10 +1620,26 @@ fn emit_session_update(sink: &EventSink, update: SessionUpdate) {
         SessionUpdate::UserMessageChunk(chunk) => {
             emit_content_chunk(sink, AgentMessageRole::User, chunk);
         }
-        SessionUpdate::ToolCall(tool) => sink.emit(AgentEvent::ToolActivity {
-            session_id: sink.session_id,
-            tool: normalize_tool(tool),
-        }),
+        SessionUpdate::ToolCall(tool) => {
+            // A repeated call for a known tool is an update in all but name.
+            let now = unix_millis();
+            let mut tool = normalize_tool(tool);
+            let known = current_tool(sink, &tool.id);
+            tool.started_at = known
+                .as_ref()
+                .and_then(|known| known.started_at)
+                .or(Some(now));
+            if matches!(tool.status, ToolStatus::Completed | ToolStatus::Failed) {
+                tool.finished_at = known
+                    .as_ref()
+                    .and_then(|known| known.finished_at)
+                    .or(Some(now));
+            }
+            sink.emit(AgentEvent::ToolActivity {
+                session_id: sink.session_id,
+                tool: Box::new(tool),
+            });
+        }
         SessionUpdate::ToolCallUpdate(update) => emit_tool_update(sink, update),
         SessionUpdate::Plan(plan) => sink.emit(AgentEvent::PlanUpdated {
             session_id: sink.session_id,
@@ -1498,26 +1686,32 @@ fn emit_session_update(sink: &EventSink, update: SessionUpdate) {
     }
 }
 
-fn emit_tool_update(sink: &EventSink, update: ToolCallUpdate) {
-    let current = sink
-        .snapshot
+fn current_tool(sink: &EventSink, id: &str) -> Option<AgentTool> {
+    sink.snapshot
         .read()
         .timeline
         .iter()
         .find_map(|item| match item {
-            AgentTimelineItem::Tool(tool) if tool.id == update.tool_call_id.to_string() => {
-                Some(tool.clone())
-            }
+            AgentTimelineItem::Tool(tool) if tool.id == id => Some(tool.clone()),
             _ => None,
-        });
-    let mut tool = current.unwrap_or_else(|| AgentTool {
-        id: update.tool_call_id.to_string(),
+        })
+}
+
+fn emit_tool_update(sink: &EventSink, update: ToolCallUpdate) {
+    let now = unix_millis();
+    let id = update.tool_call_id.to_string();
+    let mut tool = current_tool(sink, &id).unwrap_or_else(|| AgentTool {
+        id,
         title: "Agent action".to_owned(),
         kind: AgentToolKind::Other,
         status: ToolStatus::Pending,
         detail: None,
         raw_input: None,
         raw_output: None,
+        locations: Vec::new(),
+        diffs: Vec::new(),
+        started_at: None,
+        finished_at: None,
     });
     if let Some(title) = update.fields.title {
         tool.title = title;
@@ -1530,6 +1724,10 @@ fn emit_tool_update(sink: &EventSink, update: ToolCallUpdate) {
     }
     if let Some(content) = update.fields.content {
         tool.detail = normalize_tool_content(&content);
+        tool.diffs = normalize_tool_diffs(&content);
+    }
+    if let Some(locations) = update.fields.locations {
+        tool.locations = normalize_tool_locations(&locations);
     }
     if let Some(raw_input) = update.fields.raw_input {
         tool.raw_input = Some(raw_input);
@@ -1537,9 +1735,13 @@ fn emit_tool_update(sink: &EventSink, update: ToolCallUpdate) {
     if let Some(raw_output) = update.fields.raw_output {
         tool.raw_output = Some(raw_output);
     }
+    tool.started_at.get_or_insert(now);
+    if matches!(tool.status, ToolStatus::Completed | ToolStatus::Failed) {
+        tool.finished_at.get_or_insert(now);
+    }
     sink.emit(AgentEvent::ToolActivity {
         session_id: sink.session_id,
-        tool,
+        tool: Box::new(tool),
     });
 }
 
@@ -1550,6 +1752,7 @@ fn emit_content_chunk(sink: &EventSink, role: AgentMessageRole, chunk: ContentCh
             role,
             message_id: chunk.message_id.map(|id| id.to_string()),
             text: text.text,
+            at: unix_millis(),
         });
     }
 }
@@ -1563,7 +1766,53 @@ fn normalize_tool(tool: ToolCall) -> AgentTool {
         detail: normalize_tool_content(&tool.content),
         raw_input: tool.raw_input,
         raw_output: tool.raw_output,
+        locations: normalize_tool_locations(&tool.locations),
+        diffs: normalize_tool_diffs(&tool.content),
+        started_at: None,
+        finished_at: None,
     }
+}
+
+fn normalize_tool_locations(locations: &[ToolCallLocation]) -> Vec<AgentToolLocation> {
+    locations
+        .iter()
+        .map(|location| AgentToolLocation {
+            path: location.path.clone(),
+            line: location.line,
+        })
+        .collect()
+}
+
+/// Each side of a diff crosses the daemon boundary on every update of its
+/// tool, so a whole-file rewrite is capped to what a client could show.
+const MAX_DIFF_TEXT_BYTES: usize = 256 * 1024;
+
+fn normalize_tool_diffs(content: &[ToolCallContent]) -> Vec<AgentDiff> {
+    content
+        .iter()
+        .filter_map(|item| match item {
+            ToolCallContent::Diff(diff) => Some(AgentDiff {
+                path: diff.path.clone(),
+                old_text: diff
+                    .old_text
+                    .as_deref()
+                    .map(|text| head_bytes(text, MAX_DIFF_TEXT_BYTES).to_owned()),
+                new_text: head_bytes(&diff.new_text, MAX_DIFF_TEXT_BYTES).to_owned(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn head_bytes(value: &str, limit: usize) -> &str {
+    if value.len() <= limit {
+        return value;
+    }
+    let mut end = limit;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 fn normalize_tool_kind(kind: agent_client_protocol::schema::v1::ToolKind) -> AgentToolKind {
@@ -1599,10 +1848,6 @@ fn normalize_tool_content(content: &[ToolCallContent]) -> Option<String> {
                 ContentBlock::Text(text) => Some(text.text.clone()),
                 _ => None,
             },
-            ToolCallContent::Diff(diff) => Some(format!("Updated {}", diff.path.display())),
-            ToolCallContent::Terminal(terminal) => {
-                Some(format!("Terminal {}", terminal.terminal_id))
-            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1678,14 +1923,20 @@ fn apply_event(snapshot: &mut AgentSessionSnapshot, event: &AgentEvent) {
         | AgentEvent::AuthenticationRequired { .. }
         | AgentEvent::AuthenticationStarted { .. }
         | AgentEvent::AuthenticationFailed { .. } => apply_connection_event(snapshot, event),
-        AgentEvent::UserMessage { text, .. } => {
+        AgentEvent::UserMessage { text, at, .. } => {
             snapshot.status = AgentSessionStatus::Working;
+            if snapshot.queued.first() == Some(text) {
+                snapshot.queued.remove(0);
+            }
             snapshot.timeline.push(AgentTimelineItem::Message {
                 role: AgentMessageRole::User,
                 message_id: None,
                 text: text.clone(),
+                at: Some(*at),
             });
         }
+        AgentEvent::PromptQueued { text, .. } => snapshot.queued.push(text.clone()),
+        AgentEvent::QueueCleared { .. } => snapshot.queued.clear(),
         AgentEvent::ContextAttached {
             label, characters, ..
         } => snapshot.timeline.push(AgentTimelineItem::Context {
@@ -1696,32 +1947,11 @@ fn apply_event(snapshot: &mut AgentSessionSnapshot, event: &AgentEvent) {
             role,
             message_id,
             text,
+            at,
             ..
-        } => append_message(snapshot, *role, message_id.clone(), text),
-        AgentEvent::ToolActivity { tool, .. } => {
-            if let Some(AgentTimelineItem::Tool(existing)) = snapshot.timeline.iter_mut().find(
-                |item| matches!(item, AgentTimelineItem::Tool(existing) if existing.id == tool.id),
-            ) {
-                *existing = tool.clone();
-            } else {
-                snapshot
-                    .timeline
-                    .push(AgentTimelineItem::Tool(tool.clone()));
-            }
-        }
-        AgentEvent::PlanUpdated { entries, .. } => {
-            if let Some(AgentTimelineItem::Plan(existing)) = snapshot
-                .timeline
-                .iter_mut()
-                .find(|item| matches!(item, AgentTimelineItem::Plan(_)))
-            {
-                existing.clone_from(entries);
-            } else {
-                snapshot
-                    .timeline
-                    .push(AgentTimelineItem::Plan(entries.clone()));
-            }
-        }
+        } => append_message(snapshot, *role, message_id.clone(), text, *at),
+        AgentEvent::ToolActivity { tool, .. } => apply_tool(snapshot, tool),
+        AgentEvent::PlanUpdated { entries, .. } => apply_plan(snapshot, entries),
         AgentEvent::UsageUpdated { used, size, .. } => {
             snapshot.context_used = Some(*used);
             snapshot.context_size = Some(*size);
@@ -1744,16 +1974,26 @@ fn apply_event(snapshot: &mut AgentSessionSnapshot, event: &AgentEvent) {
         AgentEvent::PermissionResolved {
             request_id,
             option_id,
+            at,
             ..
         } => {
             if let Some(AgentTimelineItem::Permission(permission)) = snapshot.timeline.iter_mut().find(
                 |item| matches!(item, AgentTimelineItem::Permission(permission) if permission.request_id == *request_id),
             ) {
                 permission.selected_option.clone_from(option_id);
+                permission.answered_at = Some(*at);
             }
             snapshot.status = AgentSessionStatus::Working;
         }
-        AgentEvent::Completed { .. } => snapshot.status = AgentSessionStatus::Idle,
+        AgentEvent::Completed {
+            stop_reason, at, ..
+        } => {
+            snapshot.status = AgentSessionStatus::Idle;
+            snapshot.timeline.push(AgentTimelineItem::TurnEnded {
+                at: *at,
+                stop: *stop_reason,
+            });
+        }
         AgentEvent::Failed { message, .. } => {
             snapshot.status = AgentSessionStatus::Failed;
             snapshot
@@ -1764,17 +2004,62 @@ fn apply_event(snapshot: &mut AgentSessionSnapshot, event: &AgentEvent) {
     }
 }
 
+fn apply_tool(snapshot: &mut AgentSessionSnapshot, tool: &AgentTool) {
+    if let Some(AgentTimelineItem::Tool(existing)) = snapshot
+        .timeline
+        .iter_mut()
+        .find(|item| matches!(item, AgentTimelineItem::Tool(existing) if existing.id == tool.id))
+    {
+        *existing = tool.clone();
+    } else {
+        snapshot
+            .timeline
+            .push(AgentTimelineItem::Tool(tool.clone()));
+    }
+}
+
+/// A plan belongs to the turn that made it: update this turn's plan in place,
+/// and start a fresh one in a new turn.
+fn apply_plan(snapshot: &mut AgentSessionSnapshot, entries: &[AgentPlanEntry]) {
+    let turn_start = snapshot
+        .timeline
+        .iter()
+        .rposition(|item| {
+            matches!(
+                item,
+                AgentTimelineItem::Message {
+                    role: AgentMessageRole::User,
+                    ..
+                }
+            )
+        })
+        .unwrap_or(0);
+    if let Some(AgentTimelineItem::Plan(existing)) = snapshot.timeline[turn_start..]
+        .iter_mut()
+        .rev()
+        .find(|item| matches!(item, AgentTimelineItem::Plan(_)))
+    {
+        entries.clone_into(existing);
+    } else {
+        snapshot
+            .timeline
+            .push(AgentTimelineItem::Plan(entries.to_vec()));
+    }
+}
+
 fn append_message(
     snapshot: &mut AgentSessionSnapshot,
     role: AgentMessageRole,
     message_id: Option<String>,
     text: &str,
+    at: u64,
 ) {
     let can_append = snapshot.timeline.last_mut().and_then(|item| match item {
         AgentTimelineItem::Message {
             role: existing_role,
             message_id: existing_id,
             text: existing_text,
+            ..
         } if *existing_role == role
             && (message_id.is_none() || existing_id.is_none() || *existing_id == message_id) =>
         {
@@ -1789,6 +2074,7 @@ fn append_message(
             role,
             message_id,
             text: text.to_owned(),
+            at: Some(at),
         });
     }
 }
@@ -2083,6 +2369,8 @@ mod tests {
                 config_options: Vec::new(),
                 available_commands: Vec::new(),
                 auth_methods: Vec::new(),
+                started_at: 0,
+                queued: Vec::new(),
             }))
         };
         manager.inner.sessions.write().extend([
@@ -2140,18 +2428,22 @@ mod tests {
             config_options: Vec::new(),
             available_commands: Vec::new(),
             auth_methods: Vec::new(),
+            started_at: 0,
+            queued: Vec::new(),
         };
         append_message(
             &mut snapshot,
             AgentMessageRole::Agent,
             Some("one".to_owned()),
             "hello ",
+            1,
         );
         append_message(
             &mut snapshot,
             AgentMessageRole::Agent,
             Some("one".to_owned()),
             "world",
+            2,
         );
         assert_eq!(
             snapshot.timeline,
@@ -2159,6 +2451,7 @@ mod tests {
                 role: AgentMessageRole::Agent,
                 message_id: Some("one".to_owned()),
                 text: "hello world".to_owned(),
+                at: Some(1),
             }]
         );
     }
@@ -2230,6 +2523,8 @@ mod tests {
             config_options: Vec::new(),
             available_commands: Vec::new(),
             auth_methods: Vec::new(),
+            started_at: 0,
+            queued: Vec::new(),
         };
         apply_event(
             &mut snapshot,
@@ -2241,6 +2536,8 @@ mod tests {
                     title: "Run tests".to_owned(),
                     options: Vec::new(),
                     selected_option: None,
+                    asked_at: None,
+                    answered_at: None,
                 },
             },
         );
@@ -2249,6 +2546,135 @@ mod tests {
             snapshot.timeline.last(),
             Some(AgentTimelineItem::Permission(permission)) if permission.request_id == "request"
         ));
+    }
+
+    fn test_snapshot() -> AgentSessionSnapshot {
+        AgentSessionSnapshot::new(
+            AgentSessionId::new(),
+            None,
+            "test".to_owned(),
+            PathBuf::from("/"),
+        )
+    }
+
+    fn plan(text: &str, status: PlanStatus) -> Vec<AgentPlanEntry> {
+        vec![AgentPlanEntry {
+            text: text.to_owned(),
+            status,
+        }]
+    }
+
+    #[test]
+    fn a_plan_updates_in_place_within_a_turn_and_starts_fresh_in_the_next() {
+        let mut snapshot = test_snapshot();
+        let id = snapshot.id;
+        let prompt = |text: &str, at| AgentEvent::UserMessage {
+            session_id: id,
+            text: text.to_owned(),
+            at,
+        };
+        let update = |entries| AgentEvent::PlanUpdated {
+            session_id: id,
+            entries,
+        };
+        apply_event(&mut snapshot, &prompt("first", 1));
+        apply_event(&mut snapshot, &update(plan("read", PlanStatus::Running)));
+        apply_event(&mut snapshot, &update(plan("read", PlanStatus::Completed)));
+        apply_event(&mut snapshot, &prompt("second", 2));
+        apply_event(&mut snapshot, &update(plan("write", PlanStatus::Running)));
+
+        let plans = snapshot
+            .timeline
+            .iter()
+            .filter_map(|item| match item {
+                AgentTimelineItem::Plan(entries) => Some(entries.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            plans,
+            [
+                plan("read", PlanStatus::Completed),
+                plan("write", PlanStatus::Running)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_queued_prompt_leaves_the_queue_when_its_turn_starts() {
+        let mut snapshot = test_snapshot();
+        let id = snapshot.id;
+        apply_event(
+            &mut snapshot,
+            &AgentEvent::PromptQueued {
+                session_id: id,
+                text: "and then this".to_owned(),
+            },
+        );
+        assert_eq!(snapshot.queued, ["and then this"]);
+        apply_event(
+            &mut snapshot,
+            &AgentEvent::UserMessage {
+                session_id: id,
+                text: "and then this".to_owned(),
+                at: 5,
+            },
+        );
+        assert!(snapshot.queued.is_empty());
+        assert_eq!(snapshot.status, AgentSessionStatus::Working);
+    }
+
+    #[test]
+    fn a_finished_turn_records_when_and_why_it_ended() {
+        let mut snapshot = test_snapshot();
+        let id = snapshot.id;
+        apply_event(
+            &mut snapshot,
+            &AgentEvent::Completed {
+                session_id: id,
+                stop_reason: AgentStopReason::Cancelled,
+                at: 9,
+            },
+        );
+        assert_eq!(snapshot.status, AgentSessionStatus::Idle);
+        assert_eq!(
+            snapshot.timeline.last(),
+            Some(&AgentTimelineItem::TurnEnded {
+                at: 9,
+                stop: AgentStopReason::Cancelled
+            })
+        );
+    }
+
+    #[test]
+    fn tool_diffs_and_locations_are_kept_for_native_clients() {
+        let tool = ToolCall::new("edit-1", "Edit layout.rs")
+            .kind(agent_client_protocol::schema::v1::ToolKind::Edit)
+            .content(vec![ToolCallContent::Diff(
+                agent_client_protocol::schema::v1::Diff::new(
+                    "/repo/src/layout.rs",
+                    "let gap = 10;",
+                )
+                .old_text("let gap = 6;"),
+            )])
+            .locations(vec![ToolCallLocation::new("/repo/src/layout.rs").line(12)]);
+        let normalized = normalize_tool(tool);
+        assert_eq!(
+            normalized.diffs,
+            [AgentDiff {
+                path: PathBuf::from("/repo/src/layout.rs"),
+                old_text: Some("let gap = 6;".to_owned()),
+                new_text: "let gap = 10;".to_owned(),
+            }]
+        );
+        assert_eq!(
+            normalized.locations,
+            [AgentToolLocation {
+                path: PathBuf::from("/repo/src/layout.rs"),
+                line: Some(12),
+            }]
+        );
+        assert_eq!(normalized.detail, None, "a diff is not prose");
     }
 
     #[test]
@@ -2273,6 +2699,8 @@ mod tests {
                 description: "stale".to_owned(),
             }],
             auth_methods: Vec::new(),
+            started_at: 0,
+            queued: Vec::new(),
         };
         let commands = vec![AgentSlashCommand {
             name: "review".to_owned(),
@@ -2312,6 +2740,8 @@ mod tests {
             config_options: Vec::new(),
             available_commands: Vec::new(),
             auth_methods: Vec::new(),
+            started_at: 0,
+            queued: Vec::new(),
         };
 
         apply_event(
@@ -2376,6 +2806,8 @@ mod tests {
             config_options: Vec::new(),
             available_commands: Vec::new(),
             auth_methods: Vec::new(),
+            started_at: 0,
+            queued: Vec::new(),
         }));
         let (events, _) = broadcast::channel(16);
         let sink = EventSink {
@@ -2451,6 +2883,8 @@ mod tests {
             config_options: Vec::new(),
             available_commands: Vec::new(),
             auth_methods: Vec::new(),
+            started_at: 0,
+            queued: Vec::new(),
         }));
         let (events, _) = broadcast::channel(16);
         let sink = EventSink {

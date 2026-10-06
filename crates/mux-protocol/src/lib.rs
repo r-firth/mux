@@ -21,7 +21,9 @@ use tokio::task::JoinHandle;
 // sequencing behavior indefinitely.
 /// Version 7 requires daemon-side recovery of orphaned terminal keyboard modes
 /// when the shell regains its PTY after a child process exits.
-pub const PROTOCOL_VERSION: u16 = 7;
+/// Version 8 adds daemon-stamped times, file diffs, tool locations, turn ends
+/// and queued prompts to agent snapshots and events.
+pub const PROTOCOL_VERSION: u16 = 8;
 /// Request id zero is reserved for latency-sensitive messages whose successful
 /// completion does not require a response.
 pub const UNACKNOWLEDGED_REQUEST_ID: u64 = 0;
@@ -184,6 +186,8 @@ pub struct PaneAttachment {
     pub pane_id: PaneId,
     pub terminal: TerminalAttachment,
     pub exit_status: Option<ProcessExit>,
+    /// The last window title the pane's program set, if any.
+    pub title: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -348,7 +352,7 @@ mod tests {
     async fn framed_agent_tools_round_trip_structured_input_and_output() {
         let expected = ServerMessage::Event(ServerEvent::Agent(AgentEvent::ToolActivity {
             session_id: AgentSessionId::new(),
-            tool: AgentTool {
+            tool: Box::new(AgentTool {
                 id: "tool-1".to_owned(),
                 title: "Run tests".to_owned(),
                 kind: AgentToolKind::Execute,
@@ -356,7 +360,18 @@ mod tests {
                 detail: None,
                 raw_input: Some(serde_json::json!({"command": "cargo test"})),
                 raw_output: Some(serde_json::json!({"exit_code": 0, "output": "ok"})),
-            },
+                locations: vec![mux_acp::AgentToolLocation {
+                    path: PathBuf::from("/repo/Cargo.toml"),
+                    line: None,
+                }],
+                diffs: vec![mux_acp::AgentDiff {
+                    path: PathBuf::from("/repo/src/lib.rs"),
+                    old_text: None,
+                    new_text: "fn main() {}\n".to_owned(),
+                }],
+                started_at: Some(1_700_000_000_000),
+                finished_at: Some(1_700_000_003_400),
+            }),
         }));
         let (mut writer, mut reader) = tokio::io::duplex(1024);
 
