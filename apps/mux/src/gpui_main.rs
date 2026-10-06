@@ -10,6 +10,7 @@ mod backend;
 mod chrome;
 mod gpui_terminal;
 mod layout;
+mod pane_calls;
 mod pane_exit;
 mod scrollback;
 mod session_sheet;
@@ -257,6 +258,8 @@ fn restore_pane_replica(
         engine.apply_output(chunk.sequence, &chunk.bytes)?;
         title.scan(&chunk.bytes);
     }
+    // A bell in the replayed history rang long ago.
+    let _ = title.take_attention();
     let restored_next_sequence = engine.next_output_sequence();
     if restored_next_sequence != pane.terminal.next_sequence {
         return Err(anyhow!(
@@ -451,6 +454,8 @@ struct MuxApp {
     /// they are closed.
     pane_exits: HashMap<PaneId, ProcessExit>,
     pane_restart: Option<pane_exit::PaneRestart>,
+    /// Panes out of sight that rang or sent a notification, until seen.
+    pane_calls: HashMap<PaneId, mux_terminal::Attention>,
     selected_pane: Option<PaneId>,
     pending_focused_pane: Option<PaneId>,
     selection_drag: Option<TerminalPointerCapture>,
@@ -583,6 +588,7 @@ impl MuxApp {
             settings_sheet: None,
             pane_exits: HashMap::new(),
             pane_restart: None,
+            pane_calls: HashMap::new(),
             selected_pane: None,
             pending_focused_pane: None,
             selection_drag: None,
@@ -836,7 +842,7 @@ impl MuxApp {
             }
         }
         self.publish_terminal_frames(&mut dirty_panes, cx);
-        needs_render
+        self.collect_pane_calls(window) || needs_render
     }
 
     fn publish_terminal_frames(
@@ -1011,6 +1017,7 @@ impl MuxApp {
             self.update_workspace(attachment)?;
         }
         self.note_pane_exits(exits);
+        self.forget_closed_pane_calls();
         self.sync_agent_draft_for_active_tab(window, cx);
         let agent_pane = self.active_agent_pane();
         if let Some(pane_id) = agent_pane
@@ -3089,6 +3096,15 @@ impl MuxApp {
         geometry
     }
 
+    /// State that follows from what this frame shows: a size that changed
+    /// is read out, and a call from the pane in front has been seen.
+    fn settle_frame_state(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.size_readout_pending) {
+            self.show_size_readout(cx);
+        }
+        self.clear_seen_pane_call(window);
+    }
+
     /// Show the focused pane's size for a moment, as a window or split
     /// settles; each change restarts the moment.
     fn show_size_readout(&mut self, cx: &mut Context<Self>) {
@@ -3148,10 +3164,13 @@ impl MuxApp {
             .agents
             .iter()
             .any(|agent| agent.tab_id == Some(tab_id) && self.agent_unseen.contains(&agent.id));
-        let tooltip: SharedString = match activity {
-            Some(AgentTabActivity::Idle) if unseen => format!("{label} · agent finished"),
-            Some(activity) => format!("{label} · {}", agent_tab_activity_label(activity)),
-            None => label.clone(),
+        // The tab on screen shows its panes' calls in their own heads.
+        let call = self.tab_call(tab).filter(|_| !active);
+        let tooltip: SharedString = match (activity, call) {
+            (_, Some(call)) => format!("{label} · {}", pane_calls::call_words(call)),
+            (Some(AgentTabActivity::Idle), None) if unseen => format!("{label} · agent finished"),
+            (Some(activity), None) => format!("{label} · {}", agent_tab_activity_label(activity)),
+            (None, None) => label.clone(),
         }
         .into();
         let mut chip = h_flex()
@@ -3175,10 +3194,11 @@ impl MuxApp {
             ));
         }
         // The tab's ink dot carries its agent's state: it breathes while an
-        // agent works, turns peach when one needs you, and sage when one has
-        // finished out of sight.
+        // agent works, turns peach when one needs you (or a pane rang), and
+        // sage when one has finished out of sight.
         let dot = match activity {
             Some(AgentTabActivity::Attention) => color(SIGNAL),
+            _ if call.is_some() => color(SIGNAL),
             Some(AgentTabActivity::Working) => ink.color().opacity(self.agent_pulse_level()),
             _ if unseen => color(SAGE),
             _ if active => ink.color(),
@@ -3207,13 +3227,15 @@ impl MuxApp {
                     .child(label),
             );
         }
-        if activity == Some(AgentTabActivity::Attention) {
-            chip = chip.child(
-                div()
-                    .flex_none()
-                    .text_color(color(SIGNAL))
-                    .child("needs you"),
-            );
+        // Said in words as well, since a peach-inked tab's dot is peach
+        // anyway: what its agent or a pane of it wants.
+        let wants = if activity == Some(AgentTabActivity::Attention) {
+            Some("needs you".to_owned())
+        } else {
+            call.map(|call| chrome::truncate_chars(pane_calls::call_words(call), 18))
+        };
+        if let Some(wants) = wants {
+            chip = chip.child(div().flex_none().text_color(color(SIGNAL)).child(wants));
         }
         if active {
             chip.bg(wash(0.10))
@@ -3552,6 +3574,9 @@ impl MuxApp {
                 |title| chrome::terminal_place(title).to_owned().into(),
             )
         };
+        let call = self
+            .pane_call(geometry.pane_id)
+            .filter(|_| !focused && !agent_pane);
         let mut head = h_flex()
             .h(px(layout::PANE_HEAD_HEIGHT))
             .flex_none()
@@ -3564,6 +3589,8 @@ impl MuxApp {
             .child(div().flex_none().size(px(6.0)).rounded_full().map(|dot| {
                 if focused {
                     dot.bg(ink.color())
+                } else if call.is_some() {
+                    dot.bg(color(SIGNAL))
                 } else {
                     dot.border_1().border_color(color(FAINT_TEXT))
                 }
@@ -3586,6 +3613,16 @@ impl MuxApp {
                 )
             })
             .child(div().flex_1());
+        if let Some(mux_terminal::Attention::Notification(said)) = call {
+            head = head.child(
+                div()
+                    .min_w(px(0.0))
+                    .max_w(px(frame.width * 0.6))
+                    .truncate()
+                    .text_color(color(SIGNAL))
+                    .child(said.clone()),
+            );
+        }
         if let Some((state, tone)) = agent.and_then(|agent| agent_view::agent_state(agent.status)) {
             head = head.child(div().flex_none().text_color(color(tone)).child(state));
         }
@@ -3724,9 +3761,7 @@ impl Render for MuxApp {
         let viewport = window.viewport_size();
         let geometry =
             self.sync_terminal_sizes(f32::from(viewport.width), f32::from(viewport.height));
-        if std::mem::take(&mut self.size_readout_pending) {
-            self.show_size_readout(cx);
-        }
+        self.settle_frame_state(window, cx);
         let pane_count = geometry.panes.len();
         let move_app = cx.weak_entity();
         let release_app = move_app.clone();

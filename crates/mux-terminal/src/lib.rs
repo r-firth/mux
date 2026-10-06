@@ -10,7 +10,7 @@ use thiserror::Error;
 
 mod title;
 
-pub use title::TitleScanner;
+pub use title::{Attention, TitleScanner};
 
 /// Kitty progressive-keyboard flag requesting press/repeat/release event types.
 pub const KITTY_KEYBOARD_REPORT_EVENTS: u8 = 1 << 1;
