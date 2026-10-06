@@ -535,11 +535,49 @@ impl MuxApp {
                 .gap_y(px(2.0))
                 .flex_wrap()
                 .text_color(color(FAINT_TEXT))
-                .child(key_hint("↑↓", "choose"))
-                .child(key_hint("enter", "start"))
-                .child(div().child(format!("or type to ask {to} straight away")))
+                .children(self.launcher_hint(&to))
                 .into_any_element(),
         ]
+    }
+
+    /// The line under the launcher's agents. It reads for the chosen one: how
+    /// to start it, or, when it isn't installed, how to get it.
+    fn launcher_hint(&self, to: &str) -> Vec<AnyElement> {
+        let chosen = self.launcher_profile().map(|profile| profile.id.as_str());
+        let command = chosen
+            .filter(|_| self.launcher_profile_missing())
+            .map(install_command);
+        match command {
+            None => vec![
+                key_hint("↑↓", "choose").into_any_element(),
+                key_hint("enter", "start").into_any_element(),
+                div()
+                    .child(format!("or type to ask {to} straight away"))
+                    .into_any_element(),
+            ],
+            Some(Some(command)) if self.launcher_copied.as_deref() == chosen => vec![
+                h_flex()
+                    .gap(px(8.0))
+                    .child("copied")
+                    .child(inline_command(command))
+                    .into_any_element(),
+                key_hint("⌃a", "paste it in the shell").into_any_element(),
+            ],
+            Some(Some(command)) => vec![
+                key_hint("↑↓", "choose").into_any_element(),
+                key_hint("enter", "copy").into_any_element(),
+                inline_command(command),
+                div().child(format!("to install {to}")).into_any_element(),
+            ],
+            Some(None) => vec![
+                key_hint("↑↓", "choose").into_any_element(),
+                div()
+                    .child(format!(
+                        "{to} isn't on your PATH; set its command in settings"
+                    ))
+                    .into_any_element(),
+            ],
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -642,7 +680,18 @@ impl MuxApp {
         // An empty composer lends its arrows to the choice above it.
         let choosing =
             draft.is_empty() && agent.is_none_or(|agent| agent.pending_permission().is_some());
-        let send_label = if busy { "queue" } else { "send" };
+        let copies = agent.is_none()
+            && self.launcher_profile_missing()
+            && self
+                .launcher_profile()
+                .is_some_and(|profile| install_command(&profile.id).is_some());
+        let send_label = if busy {
+            "queue"
+        } else if copies {
+            "copy"
+        } else {
+            "send"
+        };
         let ready = !draft.trim().is_empty();
         let send_app = view.app.clone();
         let send = h_flex()
@@ -1133,6 +1182,18 @@ fn key_hint(key: &'static str, label: &'static str) -> gpui::Div {
         .gap(px(6.0))
         .child(kbd(key, color(MUTED_TEXT)))
         .child(label)
+}
+
+/// A shell command set in running text, on the same wash as inline code.
+fn inline_command(command: &str) -> AnyElement {
+    div()
+        .flex_none()
+        .px(px(4.0))
+        .rounded(px(3.0))
+        .bg(wash(0.07))
+        .text_color(color(TEXT))
+        .child(command.to_owned())
+        .into_any_element()
 }
 
 /// What /help shows: the commands and keys the pane answers to.
@@ -3270,9 +3331,18 @@ pub(super) fn profile_title(profile: &AgentProfile) -> String {
 
 fn install_hint(profile_id: &str) -> &'static str {
     match profile_id {
-        "github-copilot" => "not installed · npm i -g @github/copilot",
-        "claude-acp" | "codex-acp" | "gemini" => "needs node · brew install node",
+        "github-copilot" => "not installed",
+        "claude-acp" | "codex-acp" | "gemini" => "needs node",
         _ => "not found on PATH",
+    }
+}
+
+/// The shell command that makes an agent runnable here, when there is one.
+pub(super) fn install_command(profile_id: &str) -> Option<&'static str> {
+    match profile_id {
+        "github-copilot" => Some("npm i -g @github/copilot"),
+        "claude-acp" | "codex-acp" | "gemini" => Some("brew install node"),
+        _ => None,
     }
 }
 
@@ -3574,6 +3644,17 @@ mod tests {
             "expand_home takes a &Path"
         );
         assert_eq!(first_line("## Planning the change"), "Planning the change");
+    }
+
+    #[test]
+    fn every_built_in_agent_says_how_to_install_it() {
+        for profile in mux_acp::built_in_agent_profiles() {
+            assert!(
+                install_command(&profile.id).is_some(),
+                "the launcher has no install command for {}",
+                profile.id
+            );
+        }
     }
 
     fn step(
