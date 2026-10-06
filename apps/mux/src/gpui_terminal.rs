@@ -23,6 +23,35 @@ pub struct TerminalChrome {
     pub cursor: Hsla,
 }
 
+/// Places marked on the grid, such as what a find turned up. The current one
+/// is painted solid with its text in `current_text`; the rest take a wash
+/// under their own colours.
+#[derive(Clone, Debug, Default)]
+pub struct TerminalMarks {
+    pub spans: Vec<MarkSpan>,
+    pub wash: Hsla,
+    pub current: Hsla,
+    pub current_text: Rgb,
+}
+
+/// A row of the viewport and the columns a mark covers, end exclusive.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MarkSpan {
+    pub row: usize,
+    pub start: usize,
+    pub end: usize,
+    pub current: bool,
+}
+
+impl TerminalMarks {
+    fn current_text_at(&self, row: usize, column: usize) -> Option<Rgb> {
+        self.spans
+            .iter()
+            .any(|span| span.current && span.row == row && (span.start..span.end).contains(&column))
+            .then_some(self.current_text)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct GridPadding {
     pub top: f32,
@@ -220,11 +249,22 @@ pub fn terminal_canvas(
     metrics: GridMetrics,
     focused: bool,
     chrome: TerminalChrome,
+    marks: Rc<TerminalMarks>,
 ) -> impl IntoElement {
     let prepaint_frame = Rc::clone(&frame);
     let paint_frame = frame;
+    let prepaint_marks = Rc::clone(&marks);
     canvas(
-        move |_, window, _| prepare_runs(&prepaint_frame, &cache, &font_family, metrics, window),
+        move |_, window, _| {
+            prepare_runs(
+                &prepaint_frame,
+                &cache,
+                &font_family,
+                metrics,
+                &prepaint_marks,
+                window,
+            )
+        },
         move |bounds, prepared, window, cx| {
             paint_terminal(
                 bounds,
@@ -233,6 +273,7 @@ pub fn terminal_canvas(
                 metrics,
                 focused,
                 chrome,
+                &marks,
                 window,
                 cx,
             );
@@ -246,6 +287,7 @@ fn prepare_runs(
     cache: &Rc<RefCell<TerminalRenderCache>>,
     font_family: &str,
     metrics: GridMetrics,
+    marks: &TerminalMarks,
     window: &mut Window,
 ) -> PreparedTerminal {
     let columns = usize::from(frame.cols);
@@ -263,8 +305,13 @@ fn prepare_runs(
             }
 
             let start = column;
+            let foreground_at = |column: usize, cell: &RenderCell| {
+                marks
+                    .current_text_at(row, column)
+                    .unwrap_or_else(|| effective_foreground(cell))
+            };
             let run_style = RunStyle {
-                foreground: effective_foreground(cell),
+                foreground: foreground_at(column, cell),
                 style: cell.style,
             };
             let mut text = String::new();
@@ -277,7 +324,7 @@ fn prepare_runs(
                 while column < columns {
                     let next = &frame.cells[row * columns + column];
                     let next_style = RunStyle {
-                        foreground: effective_foreground(next),
+                        foreground: foreground_at(column, next),
                         style: next.style,
                     };
                     if next.width != CellWidth::Narrow
@@ -312,6 +359,7 @@ fn paint_terminal(
     metrics: GridMetrics,
     focused: bool,
     chrome: TerminalChrome,
+    marks: &TerminalMarks,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -353,6 +401,8 @@ fn paint_terminal(
             }
         }
     }
+
+    paint_marks(origin, metrics, marks, window);
 
     for run in prepared.runs {
         let position = point(
@@ -402,6 +452,34 @@ fn paint_terminal(
             ),
         };
         window.paint_quad(fill(cursor_bounds, cursor_color));
+    }
+}
+
+/// Marks sit between the backgrounds and the text, a hair inside their row
+/// so marks on neighbouring rows read as separate slips.
+fn paint_marks(
+    origin: gpui::Point<Pixels>,
+    metrics: GridMetrics,
+    marks: &TerminalMarks,
+    window: &mut Window,
+) {
+    for span in &marks.spans {
+        let bounds = Bounds::new(
+            point(
+                origin.x + px(metrics.cell_width) * span.start - px(1.0),
+                origin.y + px(metrics.cell_height) * span.row + px(1.0),
+            ),
+            size(
+                px(metrics.cell_width) * (span.end - span.start) + px(2.0),
+                px(metrics.cell_height) - px(2.0),
+            ),
+        );
+        let color = if span.current {
+            marks.current
+        } else {
+            marks.wash
+        };
+        window.paint_quad(fill(bounds, color).corner_radii(px(3.0)));
     }
 }
 

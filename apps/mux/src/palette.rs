@@ -63,6 +63,7 @@ enum Command {
     Resize,
     RenameTab,
     TabInk,
+    Find,
     Agent,
     Sessions,
     NewSession,
@@ -267,6 +268,10 @@ impl MuxApp {
             Command::CloseTab => Action::CloseTab,
             Command::TabInk => {
                 self.cycle_active_tab_ink();
+                return;
+            }
+            Command::Find => {
+                self.open_find(window, cx);
                 return;
             }
             Command::NewSession => {
@@ -597,7 +602,7 @@ impl MuxApp {
 
     /// What mux can do, each with the keys that do it and other words it
     /// answers to. Some say what they will do to the pane or tab on screen.
-    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 13] {
+    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 14] {
         let zoomed = self
             .session
             .as_ref()
@@ -637,6 +642,12 @@ impl MuxApp {
                 "⌃t c",
                 "change this tab's ink",
                 "colour color",
+            ),
+            (
+                Command::Find,
+                "⌘f",
+                "find in this pane",
+                "search look grep history scrollback",
             ),
             (
                 Command::Agent,
