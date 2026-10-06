@@ -378,7 +378,7 @@ impl MuxApp {
 /// The sheet's keys, in gofer's `[key] label` form.
 fn settings_sheet_hints() -> impl IntoElement {
     h_flex()
-        .gap(px(14.0))
+        .gap(px(12.0))
         .pl(px(24.0))
         .text_size(px(12.0))
         .text_color(color(FAINT_TEXT))

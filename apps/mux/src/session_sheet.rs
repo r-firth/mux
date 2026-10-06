@@ -8,7 +8,7 @@
 
 use super::*;
 
-const SHEET_WIDTH: f32 = 420.0;
+const SHEET_WIDTH: f32 = 440.0;
 const ROW_HEIGHT: f32 = 30.0;
 
 pub(super) struct SessionSheet {
@@ -209,14 +209,19 @@ impl MuxApp {
             window,
             move |this, input, event: &InputEvent, window, cx| match event {
                 InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                    let name = input.read(cx).value().trim().to_owned();
+                    let taken = this.session_name_taken(session_id, &name);
+                    if taken && matches!(event, InputEvent::PressEnter { .. }) {
+                        // The foot says whose name it is; esc gives up.
+                        return;
+                    }
                     let Some(sheet) = this.session_sheet.as_mut() else {
                         return;
                     };
                     if sheet.rename.take().is_none() {
                         return;
                     }
-                    let name = input.read(cx).value().trim().to_owned();
-                    if !name.is_empty() && name != session.name {
+                    if !taken && !name.is_empty() && name != session.name {
                         this.backend
                             .send(CommandMessage::RenameSession { session_id, name });
                     }
@@ -241,6 +246,13 @@ impl MuxApp {
                 _subscription: subscription,
             });
         }
+    }
+
+    /// Another session already goes by `name`, which the daemon would refuse.
+    fn session_name_taken(&self, session_id: SessionId, name: &str) -> bool {
+        self.sessions
+            .iter()
+            .any(|session| session.id != session_id && session.name == name)
     }
 
     /// The sheet over everything, under the strip's right end, with a
@@ -303,7 +315,10 @@ impl MuxApp {
                     ),
             )
             .child(rows)
-            .child(session_sheet_hints(sheet));
+            .child(session_sheet_hints(
+                sheet,
+                self.session_sheet_taken_name(cx),
+            ));
         let panel = if self.motion == MotionPreference::Reduced {
             panel.into_any_element()
         } else {
@@ -334,6 +349,14 @@ impl MuxApp {
                 .child(panel)
                 .into_any_element(),
         )
+    }
+
+    /// The name being typed, when another session already has it.
+    fn session_sheet_taken_name(&self, cx: &App) -> Option<String> {
+        let rename = self.session_sheet.as_ref()?.rename.as_ref()?;
+        let name = rename.input.read(cx).value().trim().to_owned();
+        self.session_name_taken(rename.session_id, &name)
+            .then_some(name)
     }
 
     fn session_sheet_line(
@@ -426,23 +449,26 @@ impl MuxApp {
     }
 }
 
-/// The keys that work right now, in gofer's `[key] label` form.
-fn session_sheet_hints(sheet: &SessionSheet) -> impl IntoElement {
+/// The keys that work right now, in gofer's `[key] label` form, and why
+/// enter won't save a name another session has.
+fn session_sheet_hints(sheet: &SessionSheet, taken: Option<String>) -> impl IntoElement {
     let hints: &[(&str, &str)] = if sheet.ending.is_some() {
         &[("y", "end"), ("n", "keep")]
+    } else if taken.is_some() {
+        &[("esc", "cancel")]
     } else if sheet.rename.is_some() {
-        &[("↵", "save"), ("esc", "cancel")]
+        &[("enter", "save"), ("esc", "cancel")]
     } else {
         &[
             ("↑↓", "choose"),
-            ("↵", "open"),
+            ("enter", "open"),
             ("n", "new"),
             ("r", "rename"),
             ("x", "end"),
         ]
     };
     h_flex()
-        .gap(px(14.0))
+        .gap(px(12.0))
         .pl(px(24.0))
         .text_size(px(12.0))
         .text_color(color(FAINT_TEXT))
@@ -454,4 +480,13 @@ fn session_sheet_hints(sheet: &SessionSheet) -> impl IntoElement {
                 .child(kbd(*key, color(key_color)))
                 .child(*label)
         }))
+        .when_some(taken, |hints, name| {
+            hints.child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(color(SIGNAL))
+                    .child(format!("there's already a session called {name}")),
+            )
+        })
 }
