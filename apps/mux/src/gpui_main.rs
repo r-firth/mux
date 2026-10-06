@@ -344,6 +344,18 @@ enum AgentContextMode {
     Tab,
 }
 
+/// What became of a line that started with a slash.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SlashOutcome {
+    /// Not one of mux's commands: it goes to the agent as typed.
+    NotMine,
+    /// Carried out: the composer empties.
+    Done,
+    /// The composer keeps what it now holds: a command to fix, or one
+    /// waiting for its value.
+    Keep,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MotionPreference {
     Full,
@@ -389,6 +401,8 @@ struct MuxApp {
     launcher_choice: Option<String>,
     /// The launcher choice whose install command was just copied.
     launcher_copied: Option<String>,
+    /// The composer's answer to the last slash command, until a keystroke.
+    agent_note: Option<agent_view::ComposerNote>,
     /// The option a pending permission card highlights, by request.
     permission_choice: Option<(String, usize)>,
     agent_placeholder: String,
@@ -433,6 +447,7 @@ fn create_agent_input(
         window,
         |this, _, event: &InputEvent, window, cx| match event {
             InputEvent::Change => {
+                this.agent_note = None;
                 if let Some(tab_id) = this.agent_input_tab {
                     let value = this.agent_input.read(cx).value().to_string();
                     this.agent_drafts.insert(tab_id, value);
@@ -515,6 +530,7 @@ impl MuxApp {
             agent_availability: HashMap::new(),
             launcher_choice: None,
             launcher_copied: None,
+            agent_note: None,
             permission_choice: None,
             agent_placeholder: String::new(),
             agent_unseen: HashSet::new(),
@@ -1148,6 +1164,7 @@ impl MuxApp {
             .map(|item| item.label.as_str());
         let selected = previous
             .and_then(|label| items.iter().position(|item| item.label == label))
+            .or_else(|| items.iter().position(|item| item.current))
             .unwrap_or_default();
         self.agent_completion_menu = Some(AgentCompletionMenu { items, selected });
     }
@@ -1250,6 +1267,7 @@ impl MuxApp {
             return;
         };
         if self.agent_panes.get(&tab_id) == Some(&pane_id) {
+            self.agent_note = None;
             self.agent_panes.remove(&tab_id);
             self.agent_follow_tail.remove(&tab_id);
             self.agent_scroll_needs_settle.remove(&tab_id);
@@ -1951,11 +1969,20 @@ impl MuxApp {
             }
             return;
         }
-        if self.handle_agent_slash_command(draft, window, cx) {
-            self.agent_input.update(cx, |input, cx| {
-                input.set_value("", window, cx);
-            });
-            return;
+        self.agent_note = None;
+        match self.handle_agent_slash_command(draft, window, cx) {
+            SlashOutcome::NotMine => {}
+            SlashOutcome::Done => {
+                self.agent_input.update(cx, |input, cx| {
+                    input.set_value("", window, cx);
+                });
+                cx.notify();
+                return;
+            }
+            SlashOutcome::Keep => {
+                cx.notify();
+                return;
+            }
         }
         if let Some(tab_id) = self.active_tab_id() {
             self.agent_help_tabs.remove(&tab_id);
@@ -1966,14 +1993,22 @@ impl MuxApp {
             .map(|agent| agent.id)
         else {
             if self.pending_agent_prompt.is_some() {
-                window.push_notification(Notification::info("Agent is starting…"), cx);
+                // The first message is on its way; this one waits its turn.
+                self.note_agent(
+                    false,
+                    "still starting",
+                    Some("send this once it's ready".to_owned()),
+                );
+                cx.notify();
                 return;
             }
             let Some(profile) = self.launcher_profile().cloned() else {
-                window.push_notification(
-                    Notification::warning("Enable an ACP agent in Settings first"),
-                    cx,
+                self.note_agent(
+                    false,
+                    "no agents are turned on",
+                    Some("add one in settings".to_owned()),
                 );
+                cx.notify();
                 return;
             };
             if self.launcher_profile_still_missing() {
@@ -1982,20 +2017,7 @@ impl MuxApp {
                 self.copy_launcher_install_command(cx);
                 return;
             }
-            let prompt = AgentPrompt {
-                text: draft.to_owned(),
-                context: self.agent_prompt_context().unwrap_or_default(),
-                files: self
-                    .agent_completion
-                    .reference_paths(draft)
-                    .into_iter()
-                    .map(|path| mux_acp::AgentFileReference {
-                        path,
-                        text: String::new(),
-                    })
-                    .collect(),
-            };
-            self.pending_agent_prompt = Some(prompt);
+            self.pending_agent_prompt = Some(self.agent_prompt(draft));
             self.follow_active_agent_tail();
             self.start_agent(profile, None);
             self.agent_input.update(cx, |input, cx| {
@@ -2003,99 +2025,115 @@ impl MuxApp {
             });
             return;
         };
-        let context = self.agent_prompt_context().unwrap_or_default();
+        let prompt = self.agent_prompt(draft);
         self.follow_active_agent_tail();
-        self.backend.send(CommandMessage::PromptAgent {
-            session_id,
-            prompt: AgentPrompt {
-                text: draft.to_owned(),
-                context,
-                files: self
-                    .agent_completion
-                    .reference_paths(draft)
-                    .into_iter()
-                    .map(|path| mux_acp::AgentFileReference {
-                        path,
-                        text: String::new(),
-                    })
-                    .collect(),
-            },
-        });
+        self.backend
+            .send(CommandMessage::PromptAgent { session_id, prompt });
         self.agent_input.update(cx, |input, cx| {
             input.set_value("", window, cx);
         });
     }
 
+    /// What a draft sends: its text, what the other panes show when context
+    /// is on, and the files it mentions.
+    fn agent_prompt(&self, draft: &str) -> AgentPrompt {
+        AgentPrompt {
+            text: draft.to_owned(),
+            context: self.agent_prompt_context().unwrap_or_default(),
+            files: self
+                .agent_completion
+                .reference_paths(draft)
+                .into_iter()
+                .map(|path| mux_acp::AgentFileReference {
+                    path,
+                    text: String::new(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Carry out one of mux's own slash commands and answer in the
+    /// composer. Anything else is the agent's own command, so it goes as
+    /// typed.
     fn handle_agent_slash_command(
         &mut self,
         draft: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> SlashOutcome {
         let Some(command) = draft.strip_prefix('/') else {
-            return false;
+            return SlashOutcome::NotMine;
         };
         let mut parts = command.split_whitespace();
-        match parts.next().unwrap_or_default() {
+        let name = parts.next().unwrap_or_default();
+        if command_needs_agent(name) && self.active_agent().is_none() {
+            let starts = self
+                .launcher_profile()
+                .map(|profile| format!("enter starts {}", agent_view::profile_title(profile)));
+            self.note_agent(false, "no agent in this tab yet", starts);
+            return SlashOutcome::Done;
+        }
+        match name {
             "new" => {
                 let requested = parts.next();
-                let profile = requested.map_or_else(
-                    || self.launcher_profile(),
-                    |query| {
-                        self.enabled_profiles()
-                            .find(|profile| agent_view::profile_answers_to(profile, query))
-                    },
-                );
-                if let Some(profile) = profile.cloned() {
-                    let cwd = parts.collect::<Vec<_>>().join(" ");
-                    self.start_agent(profile, parse_cwd_override(&cwd));
-                } else {
-                    window.push_notification(
-                        Notification::warning("Unknown or disabled ACP agent"),
-                        cx,
+                let cwd = parts.collect::<Vec<_>>().join(" ");
+                return self.start_named_agent(requested, &cwd);
+            }
+            "next" | "prev" | "previous" => {
+                if self.agents_for_active_tab().count() < 2 {
+                    self.note_agent(
+                        false,
+                        "this is the only session here",
+                        Some("/new starts another".to_owned()),
                     );
+                } else {
+                    self.select_relative_agent(if name == "next" { 1 } else { -1 });
                 }
             }
-            "next" => self.select_relative_agent(1),
-            "prev" | "previous" => self.select_relative_agent(-1),
-            "use" => self.select_agent(parts.next(), window, cx),
+            "use" => return self.select_agent(parts.next(), window, cx),
             "end" | "close" => {
                 if let Some(agent) = self.active_agent() {
                     self.backend.send(CommandMessage::CloseAgent(agent.id));
                 }
             }
-            "cancel" => {
-                if let Some(agent) = self.active_agent() {
-                    self.backend.send(CommandMessage::CancelAgent(agent.id));
-                }
-            }
+            "cancel" => self.cancel_agent_command(),
             "context" => {
-                self.agent_context = match parts.next() {
+                let mode = match parts.next() {
                     Some("none" | "off") => AgentContextMode::None,
                     Some("tab" | "panes" | "pane" | "screen" | "on") | None => {
                         AgentContextMode::Tab
                     }
                     Some(_) => {
-                        window.push_notification(
-                            Notification::warning("Usage: /context tab|none"),
-                            cx,
-                        );
-                        return true;
+                        self.note_agent(true, "/context takes tab or none", None);
+                        return SlashOutcome::Keep;
                     }
                 };
+                self.agent_context = mode;
+                self.note_agent(
+                    false,
+                    if mode == AgentContextMode::Tab {
+                        "messages include the other panes in this tab"
+                    } else {
+                        "messages leave the other panes out"
+                    },
+                    None,
+                );
             }
             "effort" | "reasoning" => {
-                self.set_agent_option(AgentConfigCategory::ThoughtLevel, parts.next(), window, cx);
+                return self.set_agent_option(
+                    AgentConfigCategory::ThoughtLevel,
+                    parts.next(),
+                    window,
+                    cx,
+                );
             }
             "model" => {
-                self.set_agent_option(AgentConfigCategory::Model, parts.next(), window, cx);
+                return self.set_agent_option(AgentConfigCategory::Model, parts.next(), window, cx);
             }
-            "mode" => self.set_agent_mode(parts.next(), window, cx),
-            "login" => self.authenticate_agent(parts.next(), window, cx),
-            "allow" => self.resolve_agent_permission(true, parts.next(), window, cx),
-            "deny" | "reject" => {
-                self.resolve_agent_permission(false, parts.next(), window, cx);
-            }
+            "mode" => return self.set_agent_mode(parts.next(), window, cx),
+            "login" => self.authenticate_agent(parts.next()),
+            "allow" => return self.resolve_agent_permission(true, parts.next()),
+            "deny" | "reject" => return self.resolve_agent_permission(false, parts.next()),
             "expand" | "details" => {
                 self.set_agent_detail_expansion(true, parts.next() == Some("all"));
             }
@@ -2106,12 +2144,86 @@ impl MuxApp {
                 if let Some(tab_id) = self.active_tab_id() {
                     self.agent_help_tabs.insert(tab_id);
                     self.follow_active_agent_tail();
-                    cx.notify();
                 }
             }
-            _ => return false,
+            _ => return SlashOutcome::NotMine,
         }
-        true
+        SlashOutcome::Done
+    }
+
+    /// Answer a slash command on the composer's hint line, in place of a
+    /// toast. A problem keeps the command in the composer to be fixed.
+    fn note_agent(&mut self, problem: bool, lead: impl Into<String>, rest: Option<String>) {
+        if let Some(tab_id) = self.active_tab_id() {
+            self.agent_note = Some(agent_view::ComposerNote {
+                tab_id,
+                lead: lead.into(),
+                rest,
+                problem,
+            });
+        }
+    }
+
+    /// `/new [agent] [cwd]`: the named agent, else the launcher's choice.
+    fn start_named_agent(&mut self, requested: Option<&str>, cwd: &str) -> SlashOutcome {
+        let profile = match requested {
+            Some(query) => self
+                .enabled_profiles()
+                .find(|profile| agent_view::profile_answers_to(profile, query)),
+            None => self.launcher_profile(),
+        }
+        .cloned();
+        let Some(profile) = profile else {
+            let handles = self
+                .enabled_profiles()
+                .map(agent_view::agent_handle)
+                .collect::<Vec<_>>();
+            if let Some(query) = requested {
+                let rest = (!handles.is_empty()).then(|| format!("try {}", or_list(&handles)));
+                self.note_agent(true, format!("no agent called {query}"), rest);
+                return SlashOutcome::Keep;
+            }
+            self.note_agent(
+                false,
+                "no agents are turned on",
+                Some("add one in settings".to_owned()),
+            );
+            return SlashOutcome::Done;
+        };
+        if self.agent_availability.get(&profile.id) == Some(&false) {
+            // Look once more: it may have been installed in a shell since.
+            let available = profile.spec.command_available();
+            self.agent_availability
+                .insert(profile.id.clone(), available);
+            if !available {
+                let rest = agent_view::install_command(&profile.id)
+                    .map(|command| format!("{command} installs it"));
+                let lead = format!("{} isn't installed", agent_view::profile_title(&profile));
+                self.note_agent(true, lead, rest);
+                return SlashOutcome::Keep;
+            }
+        }
+        self.start_agent(profile, parse_cwd_override(cwd));
+        SlashOutcome::Done
+    }
+
+    /// `/cancel`: stop the turn in progress, if there is one.
+    fn cancel_agent_command(&mut self) {
+        let Some(agent) = self.active_agent() else {
+            return;
+        };
+        if matches!(
+            agent.status,
+            AgentSessionStatus::Working | AgentSessionStatus::WaitingForPermission
+        ) {
+            self.backend.send(CommandMessage::CancelAgent(agent.id));
+        } else {
+            let lead = format!(
+                "{} isn't working on anything",
+                agent_view::agent_short_name(agent)
+            );
+            self.note_agent(false, lead, None);
+        }
     }
 
     fn set_agent_detail_expansion(&mut self, expanded: bool, all: bool) {
@@ -2156,21 +2268,17 @@ impl MuxApp {
         self.follow_active_agent_tail();
     }
 
+    /// `/use [n|name]`: switch session. Bare, it opens the list to choose
+    /// from.
     fn select_agent(
         &mut self,
         requested: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> SlashOutcome {
         let Some(requested) = requested else {
-            let sessions = self
-                .agents_for_active_tab()
-                .enumerate()
-                .map(|(index, agent)| format!("{}:{}", index + 1, agent.name))
-                .collect::<Vec<_>>()
-                .join(" · ");
-            window.push_notification(Notification::info(format!("Sessions: {sessions}")), cx);
-            return;
+            self.prefill_agent_draft("/use ", window, cx);
+            return SlashOutcome::Keep;
         };
         let agents = self.agents_for_active_tab().collect::<Vec<_>>();
         let index = requested
@@ -2181,6 +2289,7 @@ impl MuxApp {
             .or_else(|| {
                 agents.iter().position(|agent| {
                     agent.name.eq_ignore_ascii_case(requested)
+                        || agent_view::agent_short_name(agent).eq_ignore_ascii_case(requested)
                         || agent
                             .agent_name
                             .as_deref()
@@ -2191,17 +2300,23 @@ impl MuxApp {
             let session_id = agents[index].id;
             self.select_active_tab_agent(Some(session_id));
             self.follow_active_agent_tail();
-        } else {
-            window.push_notification(Notification::warning("Unknown agent session"), cx);
+            return SlashOutcome::Done;
         }
+        let sessions = agents
+            .iter()
+            .enumerate()
+            .map(|(index, agent)| format!("{} {}", index + 1, agent_view::agent_short_name(agent)))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        self.note_agent(
+            true,
+            format!("no session {requested} in this tab"),
+            Some(format!("sessions here: {sessions}")),
+        );
+        SlashOutcome::Keep
     }
 
-    fn authenticate_agent(
-        &self,
-        requested: Option<&str>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn authenticate_agent(&mut self, requested: Option<&str>) {
         let Some(agent) = self.active_agent() else {
             return;
         };
@@ -2219,26 +2334,21 @@ impl MuxApp {
                 method_id: method.id.clone(),
             });
         } else {
-            window.push_notification(
-                Notification::warning("This agent is not asking for authentication"),
-                cx,
+            let lead = format!(
+                "{} isn't asking you to sign in",
+                agent_view::agent_short_name(agent)
             );
+            self.note_agent(false, lead, None);
         }
     }
 
-    fn resolve_agent_permission(
-        &self,
-        allow: bool,
-        requested: Option<&str>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn resolve_agent_permission(&mut self, allow: bool, requested: Option<&str>) -> SlashOutcome {
         let Some(agent) = self.active_agent() else {
-            return;
+            return SlashOutcome::Done;
         };
         let Some(permission) = agent.pending_permission() else {
-            window.push_notification(Notification::warning("No permission is waiting"), cx);
-            return;
+            self.note_agent(false, "nothing is waiting on you", None);
+            return SlashOutcome::Done;
         };
         let always = requested.is_some_and(|value| value.eq_ignore_ascii_case("always"));
         let kind = match (allow, always) {
@@ -2248,43 +2358,64 @@ impl MuxApp {
             (false, true) => mux_acp::PermissionKind::RejectAlways,
         };
         let Some(option) = permission.options.iter().find(|option| option.kind == kind) else {
-            window.push_notification(
-                Notification::warning("The agent did not offer that permission choice"),
-                cx,
-            );
-            return;
+            let offered = permission
+                .options
+                .iter()
+                .map(|option| permission_command(option.kind).to_owned())
+                .collect::<Vec<_>>();
+            let lead = format!("{} didn't offer that", agent_view::agent_short_name(agent));
+            let rest = (!offered.is_empty()).then(|| format!("try {}", or_list(&offered)));
+            self.note_agent(true, lead, rest);
+            return SlashOutcome::Keep;
         };
         self.backend.send(CommandMessage::ResolveAgentPermission {
             session_id: agent.id,
             request_id: permission.request_id.clone(),
             option_id: Some(option.id.clone()),
         });
+        SlashOutcome::Done
     }
 
+    /// `/model` and `/effort`: set the session's choice. Bare, they open the
+    /// agent's choices to pick from.
     fn set_agent_option(
-        &self,
+        &mut self,
         category: AgentConfigCategory,
         requested: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> SlashOutcome {
         let Some(agent) = self.active_agent() else {
-            return;
+            return SlashOutcome::Done;
         };
+        let what = if category == AgentConfigCategory::Model {
+            "model"
+        } else {
+            "effort"
+        };
+        let who = agent_view::agent_short_name(agent);
+        let session_id = agent.id;
         let Some(option) = agent
             .config_options
             .iter()
             .find(|option| option.category == category)
+            .cloned()
         else {
-            window.push_notification(
-                Notification::warning("This agent does not expose that option"),
-                cx,
+            self.note_agent(
+                false,
+                format!("{who} doesn't offer a choice of {what}"),
+                None,
             );
-            return;
+            return SlashOutcome::Done;
         };
         let Some(requested) = requested else {
-            window.push_notification(Notification::info(describe_agent_option(option)), cx);
-            return;
+            if let AgentConfigValue::Boolean(on) = option.value {
+                let lead = format!("{what} is {}", if on { "on" } else { "off" });
+                self.note_agent(false, lead, Some(format!("/{what} on or off")));
+                return SlashOutcome::Done;
+            }
+            self.prefill_agent_draft(&format!("/{what} "), window, cx);
+            return SlashOutcome::Keep;
         };
         let selection = match &option.value {
             AgentConfigValue::Select { choices, .. } => choices
@@ -2302,34 +2433,47 @@ impl MuxApp {
         };
         if let Some(value) = selection {
             self.backend.send(CommandMessage::SetAgentConfig {
-                session_id: agent.id,
+                session_id,
                 config_id: option.id.clone(),
                 value,
             });
-        } else {
-            window.push_notification(Notification::warning(describe_agent_option(option)), cx);
+            return SlashOutcome::Done;
         }
+        let choices = match &option.value {
+            AgentConfigValue::Select { choices, .. } => choices
+                .iter()
+                .take(3)
+                .map(|choice| choice.id.clone())
+                .collect::<Vec<_>>(),
+            AgentConfigValue::Boolean(_) => vec!["on".to_owned(), "off".to_owned()],
+        };
+        self.note_agent(
+            true,
+            format!("{who} has no {what} {requested}"),
+            Some(format!("try {}", or_list(&choices))),
+        );
+        SlashOutcome::Keep
     }
 
-    fn set_agent_mode(&self, requested: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+    /// `/mode`: switch the session's mode. Bare, it opens the modes to pick
+    /// from.
+    fn set_agent_mode(
+        &mut self,
+        requested: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> SlashOutcome {
         let Some(agent) = self.active_agent() else {
-            return;
+            return SlashOutcome::Done;
         };
+        let who = agent_view::agent_short_name(agent);
+        if agent.modes.is_empty() {
+            self.note_agent(false, format!("{who} has no modes to switch"), None);
+            return SlashOutcome::Done;
+        }
         let Some(requested) = requested else {
-            let values = agent
-                .modes
-                .iter()
-                .map(|mode| mode.id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            window.push_notification(
-                Notification::info(format!(
-                    "Mode: {} · choices: {values}",
-                    agent.current_mode.as_deref().unwrap_or("default")
-                )),
-                cx,
-            );
-            return;
+            self.prefill_agent_draft("/mode ", window, cx);
+            return SlashOutcome::Keep;
         };
         if let Some(mode) = agent.modes.iter().find(|mode| {
             mode.id.eq_ignore_ascii_case(requested) || mode.name.eq_ignore_ascii_case(requested)
@@ -2338,9 +2482,20 @@ impl MuxApp {
                 session_id: agent.id,
                 mode_id: mode.id.clone(),
             });
-        } else {
-            window.push_notification(Notification::warning("Unknown agent mode"), cx);
+            return SlashOutcome::Done;
         }
+        let modes = agent
+            .modes
+            .iter()
+            .take(4)
+            .map(|mode| mode.id.clone())
+            .collect::<Vec<_>>();
+        self.note_agent(
+            true,
+            format!("{who} has no mode {requested}"),
+            Some(format!("try {}", or_list(&modes))),
+        );
+        SlashOutcome::Keep
     }
 
     fn enabled_profiles(&self) -> impl Iterator<Item = &AgentProfile> {
@@ -2583,21 +2738,29 @@ impl MuxApp {
                 value: agent_view::agent_handle(profile),
                 detail: "Agent".to_owned(),
                 description: agent_view::profile_title(profile),
+                current: false,
             })
             .collect::<Vec<_>>();
-        arguments.extend(["tab", "none"].into_iter().map(|value| {
-            AgentCommandArgument {
+        arguments.extend(
+            [
+                ("tab", AgentContextMode::Tab),
+                ("none", AgentContextMode::None),
+            ]
+            .into_iter()
+            .map(|(value, mode)| AgentCommandArgument {
                 command: "context".to_owned(),
                 value: value.to_owned(),
                 detail: "Context".to_owned(),
-                description: if value == "tab" {
+                description: if mode == AgentContextMode::Tab {
                     "Attach terminal context from the other panes in this tab"
                 } else {
                     "Do not attach terminal context"
                 }
                 .to_owned(),
-            }
-        }));
+                current: self.agent_context == mode,
+            }),
+        );
+        let active_id = self.active_agent().map(|agent| agent.id);
         arguments.extend(
             self.agents_for_active_tab()
                 .enumerate()
@@ -2609,6 +2772,7 @@ impl MuxApp {
                         .agent_name
                         .clone()
                         .unwrap_or_else(|| agent.name.clone()),
+                    current: Some(agent.id) == active_id,
                 }),
         );
         if let Some(agent) = self.active_agent() {
@@ -2621,6 +2785,7 @@ impl MuxApp {
                         .description
                         .clone()
                         .unwrap_or_else(|| mode.name.clone()),
+                    current: agent.current_mode.as_deref() == Some(mode.id.as_str()),
                 }
             }));
             for option in &agent.config_options {
@@ -2631,7 +2796,7 @@ impl MuxApp {
                     | AgentConfigCategory::ModelConfig
                     | AgentConfigCategory::Other => continue,
                 };
-                let AgentConfigValue::Select { choices, .. } = &option.value else {
+                let AgentConfigValue::Select { current, choices } = &option.value else {
                     continue;
                 };
                 arguments.extend(choices.iter().map(|choice| {
@@ -2643,6 +2808,7 @@ impl MuxApp {
                             .description
                             .clone()
                             .unwrap_or_else(|| choice.name.clone()),
+                        current: choice.id == *current,
                     }
                 }));
             }
@@ -2655,6 +2821,7 @@ impl MuxApp {
                         .description
                         .clone()
                         .unwrap_or_else(|| method.name.clone()),
+                    current: false,
                 }
             }));
         }
@@ -4002,6 +4169,8 @@ fn cancel_agent_turn(app: &gpui::WeakEntity<MuxApp>, window: &mut Window, cx: &m
             cx.notify();
             return;
         }
+        // Esc also sets aside whatever the composer last said.
+        this.agent_note = None;
         let running = this
             .active_agent()
             .filter(|agent| {
@@ -4205,24 +4374,48 @@ fn terminal_frame_text(frame: &RenderFrame) -> String {
     text.trim_end_matches('\n').to_owned()
 }
 
-fn describe_agent_option(option: &mux_acp::AgentConfigOption) -> String {
-    match &option.value {
-        AgentConfigValue::Select { current, choices } => format!(
-            "{}: {} · choices: {}",
-            option.name,
-            current,
-            choices
-                .iter()
-                .map(|choice| choice.id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        AgentConfigValue::Boolean(current) => format!(
-            "{}: {} · choices: on, off",
-            option.name,
-            if *current { "on" } else { "off" }
-        ),
+/// "a", "a or b", "a, b or c".
+fn or_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.clone(),
+        [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
     }
+}
+
+/// The slash command that picks a permission option of this kind.
+fn permission_command(kind: mux_acp::PermissionKind) -> &'static str {
+    match kind {
+        mux_acp::PermissionKind::AllowOnce => "/allow",
+        mux_acp::PermissionKind::AllowAlways => "/allow always",
+        mux_acp::PermissionKind::RejectOnce => "/deny",
+        mux_acp::PermissionKind::RejectAlways => "/deny always",
+    }
+}
+
+/// Whether a slash command acts on the tab's running session.
+fn command_needs_agent(name: &str) -> bool {
+    matches!(
+        name,
+        "next"
+            | "prev"
+            | "previous"
+            | "use"
+            | "end"
+            | "close"
+            | "cancel"
+            | "effort"
+            | "reasoning"
+            | "model"
+            | "mode"
+            | "login"
+            | "allow"
+            | "deny"
+            | "reject"
+            | "expand"
+            | "details"
+            | "collapse"
+    )
 }
 
 fn merge_agent_profiles(settings: &AppSettings) -> Vec<AgentProfile> {
@@ -4839,12 +5032,40 @@ mod tests {
     use super::{
         AgentTabActivity, GridMetrics, PaneOutputUpdate, PaneReplica, PaneScrollState,
         agent_session_is_visible, agent_tab_activity, agent_tab_activity_label,
-        format_agent_context_usage, format_session_pane_count, input_position_at, layout,
-        pane_needs_live_frame, reconcile_pane_replicas, take_terminal_key_release,
-        terminal_frame_text, terminal_input_pane, terminal_key_down_target, terminal_key_event,
-        terminal_sizes_for_geometry, terminal_tab_keystroke,
+        command_needs_agent, format_agent_context_usage, format_session_pane_count,
+        input_position_at, layout, or_list, pane_needs_live_frame, reconcile_pane_replicas,
+        take_terminal_key_release, terminal_frame_text, terminal_input_pane,
+        terminal_key_down_target, terminal_key_event, terminal_sizes_for_geometry,
+        terminal_tab_keystroke,
     };
     use mux_acp::AgentSessionStatus;
+
+    #[test]
+    fn composer_notes_list_choices_the_way_people_say_them() {
+        let names = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| (*item).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(or_list(&[]), "");
+        assert_eq!(or_list(&names(&["claude"])), "claude");
+        assert_eq!(or_list(&names(&["claude", "codex"])), "claude or codex");
+        assert_eq!(
+            or_list(&names(&["claude", "codex", "copilot"])),
+            "claude, codex or copilot"
+        );
+    }
+
+    #[test]
+    fn only_session_commands_wait_for_an_agent() {
+        for command in ["model", "mode", "use", "allow", "cancel"] {
+            assert!(command_needs_agent(command), "/{command}");
+        }
+        for command in ["new", "help", "context", "compact"] {
+            assert!(!command_needs_agent(command), "/{command}");
+        }
+    }
 
     #[test]
     fn agent_completion_cursor_positions_use_utf16_columns() {
