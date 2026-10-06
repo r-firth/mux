@@ -59,6 +59,18 @@ Zellij's `Ctrl+o` session prefix intentionally has no Normal-mode binding yet.
 This keeps foreground Control-key input untouched except for `Ctrl+p` and
 `Ctrl+t`.
 
+## Scrollback
+
+The wheel or trackpad moves through a pane's history; a thin thumb on the
+pane's right edge shows where while it is scrolled back. Typing returns the
+pane to its latest output.
+
+| Keys | Action |
+| --- | --- |
+| `Cmd+Home` / `Cmd+End` | Go to the top or bottom of the history |
+| `Cmd+PageUp` / `Cmd+PageDown` | Move a page through the history |
+| `Shift+PageUp` / `Shift+PageDown` | The same, unless the program has no history (a full-screen program keeps them) |
+
 ## Exited panes
 
 A shell that exits cleanly in the pane being typed in closes that pane, or its

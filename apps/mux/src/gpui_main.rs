@@ -11,6 +11,7 @@ mod chrome;
 mod gpui_terminal;
 mod layout;
 mod pane_exit;
+mod scrollback;
 mod session_sheet;
 mod settings;
 mod settings_sheet;
@@ -1595,7 +1596,7 @@ impl MuxApp {
             }
             return;
         }
-        if self.exited_pane_key(keystroke, held) {
+        if self.exited_pane_key(keystroke, held) || self.scrollback_key_down(keystroke, cx) {
             return;
         }
         if keystroke.modifiers.platform && keystroke.key == "v" {
@@ -1606,6 +1607,7 @@ impl MuxApp {
                 && let Ok(bytes) = pane.engine.encode_paste(&text)
             {
                 self.write_focused(bytes);
+                self.return_to_latest(pane_id, cx);
             }
             return;
         }
@@ -1619,6 +1621,9 @@ impl MuxApp {
         let Some(pane_id) = pane_id else {
             return;
         };
+        if !keystroke.modifiers.platform {
+            self.return_to_latest(pane_id, cx);
+        }
         if self.send_terminal_key_to(pane_id, keystroke, false, held, caps_lock) && !held {
             self.terminal_key_presses
                 .insert(keystroke.key.clone(), pane_id);
@@ -3807,6 +3812,7 @@ impl Render for MuxApp {
             } else {
                 root = root.children(self.render_terminal_pane(geometry, cx));
                 root = root.children(self.render_pane_exit(geometry));
+                root = root.children(self.render_scroll_thumb(geometry));
             }
             if let Some(letter) = hints.get(&pane_id) {
                 root = root.child(pane_focus_hint(geometry.rect, *letter, self.active_ink()));
