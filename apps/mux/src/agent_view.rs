@@ -1195,7 +1195,7 @@ fn key_hint(key: &'static str, label: &'static str) -> gpui::Div {
 }
 
 /// A shell command set in running text, on the same wash as inline code.
-fn inline_command(command: &str) -> AnyElement {
+pub(super) fn inline_command(command: &str) -> AnyElement {
     div()
         .flex_none()
         .px(px(4.0))
@@ -3382,7 +3382,7 @@ pub(super) fn profile_title(profile: &AgentProfile) -> String {
     }
 }
 
-fn install_hint(profile_id: &str) -> &'static str {
+pub(super) fn install_hint(profile_id: &str) -> &'static str {
     match profile_id {
         "github-copilot" => "not installed",
         "claude-acp" | "codex-acp" | "gemini" => "needs node",

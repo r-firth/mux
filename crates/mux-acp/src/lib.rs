@@ -185,25 +185,25 @@ pub fn built_in_agent_profiles() -> Vec<AgentProfile> {
         AgentProfile {
             id: "claude-acp".to_owned(),
             name: "Claude Code".to_owned(),
-            description: "claude-agent-acp, fetched with npx on first use".to_owned(),
+            description: "claude-agent-acp, fetched by npx".to_owned(),
             spec: AgentSpec::claude(),
         },
         AgentProfile {
             id: "codex-acp".to_owned(),
             name: "Codex".to_owned(),
-            description: "codex-acp, fetched with npx on first use".to_owned(),
+            description: "codex-acp, fetched by npx".to_owned(),
             spec: AgentSpec::codex(),
         },
         AgentProfile {
             id: "github-copilot".to_owned(),
             name: "GitHub Copilot".to_owned(),
-            description: "the copilot CLI in ACP mode".to_owned(),
+            description: "the copilot cli, in acp mode".to_owned(),
             spec: AgentSpec::copilot(),
         },
         AgentProfile {
             id: "gemini".to_owned(),
             name: "Gemini CLI".to_owned(),
-            description: "gemini-cli in ACP mode, fetched with npx on first use".to_owned(),
+            description: "gemini-cli in acp mode, fetched by npx".to_owned(),
             spec: AgentSpec::gemini(),
         },
     ]
