@@ -3413,14 +3413,18 @@ impl MuxApp {
     }
 
     /// The keys that matter in the current mode, in gofer's `[key] label`
-    /// form. In normal mode each hint is also the button for what it names.
+    /// form. In normal mode each hint is also the button for what it names,
+    /// and the row runs leftward from the session's name: "go to" sits next
+    /// to it, apart from ⌃p, and is the last hint to give way to a narrow
+    /// window.
     fn render_mode_hints(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let normal = self.mode == InputMode::Normal;
         let hints: &[(&str, &str)] = match self.mode {
             InputMode::Normal => &[
                 ("⌘p", "go to"),
-                ("⌃p", "pane"),
-                ("⌃t", "tab"),
                 ("⌃a", "agent"),
+                ("⌃t", "tab"),
+                ("⌃p", "pane"),
             ],
             InputMode::Pane => &[
                 ("hjkl", "focus"),
@@ -3441,7 +3445,7 @@ impl MuxApp {
             InputMode::Session => &[("w", "switch"), ("d", "detach")],
             InputMode::Resize => &[("hjkl", "resize"), ("enter", "done")],
         };
-        let key_color = if self.mode == InputMode::Normal {
+        let key_color = if normal {
             color(TEXT)
         } else {
             self.active_ink().color()
@@ -3452,6 +3456,7 @@ impl MuxApp {
             .min_w(px(0.0))
             .h(px(24.0))
             .flex_wrap()
+            .when(normal, Styled::flex_row_reverse)
             .justify_end()
             .overflow_hidden()
             .gap(px(4.0))
@@ -3467,7 +3472,7 @@ impl MuxApp {
                 .rounded(px(6.0))
                 .child(kbd(*key, key_color))
                 .child(*label);
-            if self.mode == InputMode::Normal {
+            if normal {
                 let label = *label;
                 hint = hint
                     .cursor_pointer()
