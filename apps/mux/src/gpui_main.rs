@@ -16,6 +16,7 @@ mod palette;
 mod pane_calls;
 mod pane_exit;
 mod scrollback;
+mod seams;
 mod session_sheet;
 mod settings;
 mod settings_sheet;
@@ -489,6 +490,9 @@ struct MuxApp {
     settings_sheet: Option<settings_sheet::SettingsSheet>,
     palette: Option<palette::Palette>,
     find: Option<find::PaneFind>,
+    seam_drag: Option<seams::SeamDrag>,
+    seam_pointer: Option<seams::SeamPointer>,
+    seam_settle: Option<seams::SeamSettle>,
     /// The tab that was active before the one on screen.
     previous_tab: Option<TabId>,
     /// Panes whose program has exited, and how. The daemon keeps them until
@@ -632,6 +636,9 @@ impl MuxApp {
             settings_sheet: None,
             palette: None,
             find: None,
+            seam_drag: None,
+            seam_pointer: None,
+            seam_settle: None,
             previous_tab: None,
             pane_exits: HashMap::new(),
             pane_restart: None,
@@ -1073,6 +1080,7 @@ impl MuxApp {
                 self.terminal_resync_pending = None;
             }
         }
+        self.keep_seam_drag();
         self.note_pane_exits(exits);
         self.forget_closed_pane_calls();
         self.remember_previous_tab(before);
@@ -2930,6 +2938,9 @@ impl MuxApp {
     }
 
     fn pointer_move(&mut self, event: &gpui::MouseMoveEvent) -> bool {
+        if self.drag_seam(event) {
+            return true;
+        }
         if let Some(capture) = self.mouse_reporting {
             let _ = self.report_mouse_event(
                 capture.pane_id,
@@ -2955,7 +2966,10 @@ impl MuxApp {
         rect: layout::Rect,
         event: &gpui::MouseMoveEvent,
     ) -> bool {
-        if self.mouse_reporting.is_some() || self.selection_drag.is_some() || event.modifiers.shift
+        if self.mouse_reporting.is_some()
+            || self.selection_drag.is_some()
+            || self.seam_dragging()
+            || event.modifiers.shift
         {
             return false;
         }
@@ -2971,6 +2985,9 @@ impl MuxApp {
     }
 
     fn pointer_up(&mut self, event: &gpui::MouseUpEvent) -> bool {
+        if event.button == gpui::MouseButton::Left && self.end_seam_drag() {
+            return true;
+        }
         if let Some(capture) = self.mouse_reporting.take() {
             let _ = self.report_mouse_event(
                 capture.pane_id,
@@ -3770,8 +3787,11 @@ impl MuxApp {
         if zoomed {
             head = head.child(div().flex_none().text_color(ink.color()).child("zoom"));
         }
-        let sizing = self.size_readout || self.mode == InputMode::Resize;
-        if let Some(pane) = pane.filter(|_| focused && !agent_pane && sizing) {
+        // A dragged seam resizes every pane on either side of it, so each
+        // says its size while it moves.
+        let sizing = (focused && (self.size_readout || self.mode == InputMode::Resize))
+            || self.seam_dragging();
+        if let Some(pane) = pane.filter(|_| !agent_pane && sizing) {
             head = head.child(
                 div()
                     .flex_none()
@@ -3961,7 +3981,11 @@ impl Render for MuxApp {
                 root = root.child(pane_focus_hint(geometry.rect, *letter, self.active_ink()));
             }
         }
-        root.children(self.render_session_sheet(cx))
+        for (index, seam) in geometry.seams.into_iter().enumerate() {
+            root = root.child(self.render_seam(index, seam, cx));
+        }
+        root.children(self.render_seam_drag_shield())
+            .children(self.render_session_sheet(cx))
             .children(self.render_settings_sheet(cx))
             .children(self.render_palette(viewport, cx))
     }
