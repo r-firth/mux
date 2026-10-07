@@ -17,6 +17,10 @@
 use super::*;
 use gpui::{AnyElement, Edges, Pixels, canvas, fill};
 
+#[cfg(target_os = "macos")]
+#[path = "ground_gpu.rs"]
+mod gpu;
+
 /// A 64×64 tile of blue noise: each cell's threshold, every value from 0 to
 /// 255 sixteen times, so any density lights evenly spread cells.
 static NOISE: &[u8; 4096] = include_bytes!("../assets/blue-noise-64.bin");
@@ -1065,6 +1069,19 @@ impl Ground {
     /// The ground for `scene` at `now`: the grain laid last, if nothing it
     /// shows has changed since.
     pub(super) fn lay(&mut self, scene: Scene, now: Instant) -> Rc<Grain> {
+        let laid = self.frame(scene, now);
+        if let Some((last, grain)) = &self.laid
+            && *last == laid
+        {
+            return Rc::clone(grain);
+        }
+        let grain = Rc::new(self.grain(&laid, true));
+        self.laid = Some((laid, Rc::clone(&grain)));
+        grain
+    }
+
+    /// Move the ground on to `now` for `scene`: what its light is laid from.
+    fn frame(&mut self, scene: Scene, now: Instant) -> Laid {
         let step = self.step(now);
         let still = scene.still;
         self.calls
@@ -1143,44 +1160,30 @@ impl Ground {
                 (strength * 32.0).round() / 32.0,
             )
         });
-        let laid = Laid {
+        Laid {
             scene,
             drift,
             step,
             past,
             dissolve,
             wake,
-        };
-        if let Some((last, grain)) = &self.laid
-            && *last == laid
-        {
-            return Rc::clone(grain);
         }
-        let grain = Rc::new(self.grain(&laid));
-        self.laid = Some((laid, Rc::clone(&grain)));
-        grain
     }
 
-    fn grain(&mut self, laid: &Laid) -> Grain {
-        let scene = &laid.scene;
-        let (width, height) = scene.viewport;
-        let cell = CELL;
-        let key = (width, height, laid.drift);
-        let ambient = match &self.ambient {
-            Some((cached, ambient)) if *cached == key => Rc::clone(ambient),
-            _ => {
-                let ambient = Rc::new(Ambient::new(width, height, Self::seconds(laid.drift)));
-                self.ambient = Some((key, Rc::clone(&ambient)));
-                ambient
-            }
-        };
-        let time = Self::seconds(laid.step);
-        let breath = if scene.still {
+    /// How strongly busy panes breathe out at `laid`'s step.
+    fn breath(laid: &Laid) -> f32 {
+        if laid.scene.still {
             0.5
         } else {
+            let time = Self::seconds(laid.step);
             0.25 + 0.75 * (0.5 - 0.5 * (time * std::f32::consts::TAU / BREATH).cos())
-        };
-        let calls = scene
+        }
+    }
+
+    /// Each caller in `laid`'s scene and where its rings have got to.
+    fn ringing(&self, laid: &Laid) -> Vec<Ringing> {
+        let scene = &laid.scene;
+        scene
             .calls
             .iter()
             .map(|call| Ringing {
@@ -1197,7 +1200,52 @@ impl Ground {
                         .map(|ring| (ring * call.reach, 0.9 * (1.0 - ring).powf(1.4)))
                 }),
             })
-            .collect();
+            .collect()
+    }
+
+    /// How strongly the slow fields show in each ink: less in the past.
+    fn gain(laid: &Laid) -> [f32; 3] {
+        [
+            1.0 - 0.55 * laid.past,
+            1.0 - 0.4 * laid.past,
+            1.0 - 0.4 * laid.past,
+        ]
+    }
+
+    /// Where the focus light is and how strong.
+    fn focus(scene: &Scene) -> Option<(layout::Rect, f32)> {
+        scene.focus.map(|focus| {
+            let rest = if scene.active { 1.0 } else { 0.55 };
+            (focus, rest * (1.0 + 0.5 * scene.bloom))
+        })
+    }
+
+    /// Busy panes, and how strongly each breathes out at `laid`'s step.
+    fn busy(laid: &Laid) -> Vec<(layout::Rect, f32)> {
+        let breath = Self::breath(laid);
+        laid.scene
+            .busy
+            .iter()
+            .map(|&(rect, busy)| (rect, busy * breath))
+            .filter(|&(_, strength)| strength > 0.0)
+            .collect()
+    }
+
+    /// The grain for `laid`: its field, and with `runs` the lit cells of the
+    /// whole window too, for drawing here rather than on the GPU.
+    fn grain(&mut self, laid: &Laid, runs: bool) -> Grain {
+        let scene = &laid.scene;
+        let (width, height) = scene.viewport;
+        let cell = CELL;
+        let key = (width, height, laid.drift);
+        let ambient = match &self.ambient {
+            Some((cached, ambient)) if *cached == key => Rc::clone(ambient),
+            _ => {
+                let ambient = Rc::new(Ambient::new(width, height, Self::seconds(laid.drift)));
+                self.ambient = Some((key, Rc::clone(&ambient)));
+                ambient
+            }
+        };
         let saturation = 1.0 - 0.4 * laid.past;
         let mut shades = Vec::with_capacity(512);
         Palette::new(scene.ink, saturation).shades(&mut shades);
@@ -1207,23 +1255,11 @@ impl Ground {
         let field = Rc::new(Field {
             cell,
             ambient,
-            gain: [
-                1.0 - 0.55 * laid.past,
-                1.0 - 0.4 * laid.past,
-                1.0 - 0.4 * laid.past,
-            ],
-            focus: scene.focus.map(|focus| {
-                let rest = if scene.active { 1.0 } else { 0.55 };
-                (focus, rest * (1.0 + 0.5 * scene.bloom))
-            }),
+            gain: Self::gain(laid),
+            focus: Self::focus(scene),
             chip: scene.chip,
-            busy: scene
-                .busy
-                .iter()
-                .map(|&(rect, busy)| (rect, busy * breath))
-                .filter(|&(_, strength)| strength > 0.0)
-                .collect(),
-            calls,
+            busy: Self::busy(laid),
+            calls: self.ringing(laid),
             leaving: laid
                 .dissolve
                 .map(|(_, origin, reached)| Leaving::new(origin, reached)),
@@ -1239,7 +1275,11 @@ impl Ground {
         };
         Grain {
             cell,
-            runs: field.lay(window, &scene.slabs, None),
+            runs: if runs {
+                field.lay(window, &scene.slabs, None)
+            } else {
+                Vec::new()
+            },
             field,
         }
     }
@@ -1255,6 +1295,9 @@ pub(super) struct Shared {
     /// Whether the panes' view is looking at the scene again while panes
     /// are busy.
     watching: bool,
+    /// Whether the panes' view shows the ground through a gap of its own,
+    /// and so wants the grain's field even while the GPU draws the ground.
+    wants_field: bool,
 }
 
 pub(super) type SharedGround = Rc<RefCell<Shared>>;
@@ -1266,6 +1309,12 @@ pub(super) struct GroundView {
     shared: SharedGround,
     drawn: Instant,
     waiting: bool,
+    /// The ground's own layer on the GPU, where it can be had, and whether
+    /// one has been asked for yet.
+    #[cfg(target_os = "macos")]
+    gpu: Option<gpu::Gpu>,
+    #[cfg(target_os = "macos")]
+    gpu_asked: bool,
 }
 
 impl GroundView {
@@ -1278,7 +1327,55 @@ impl GroundView {
             shared,
             drawn: Instant::now(),
             waiting: false,
+            #[cfg(target_os = "macos")]
+            gpu: None,
+            #[cfg(target_os = "macos")]
+            gpu_asked: false,
         }
+    }
+
+    /// Draw the ground on its GPU layer, if it has one. `None` when it has
+    /// not; otherwise whether the ground is moving.
+    #[cfg(target_os = "macos")]
+    fn draw_on_gpu(&mut self, window: &mut Window) -> Option<bool> {
+        if !self.gpu_asked {
+            self.gpu_asked = true;
+            match gpu::Gpu::attach(window) {
+                Ok(gpu) => {
+                    // The layer sits under the window's content, and shows
+                    // wherever that draws nothing.
+                    window.set_background_appearance(gpui::WindowBackgroundAppearance::Transparent);
+                    self.gpu = Some(gpu);
+                }
+                Err(error) => warn!(%error, "the ground stays off the GPU"),
+            }
+        }
+        let gpu = self.gpu.as_mut()?;
+        let mut shared = self.shared.borrow_mut();
+        let shared = &mut *shared;
+        let Some(mut scene) = shared.scene.clone() else {
+            return Some(false);
+        };
+        scene.active = window.is_window_active();
+        let (frame, grain) = shared
+            .ground
+            .gpu_frame(scene, Instant::now(), shared.wants_field);
+        shared.grain = grain;
+        gpu.draw(&frame);
+        Some(shared.ground.moving())
+    }
+
+    /// Draw the GPU's ground again on every frame while it moves. Nothing of
+    /// the window is drawn for this: only the layer.
+    #[cfg(target_os = "macos")]
+    fn follow_frames(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.waiting = true;
+        cx.on_next_frame(window, |this, window, cx| {
+            this.waiting = false;
+            if this.draw_on_gpu(window) == Some(true) {
+                this.follow_frames(window, cx);
+            }
+        });
     }
 
     /// Draw again on the first frame at least `FRAME` after the last.
@@ -1297,6 +1394,13 @@ impl GroundView {
 
 impl Render for GroundView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(target_os = "macos")]
+        if let Some(moving) = self.draw_on_gpu(window) {
+            if moving && !self.waiting {
+                self.follow_frames(window, cx);
+            }
+            return div().absolute().top_0().left_0().size_full();
+        }
         let now = Instant::now();
         let laid = {
             let mut shared = self.shared.borrow_mut();
@@ -1464,6 +1568,7 @@ impl MuxApp {
             let mut shared = self.ground.borrow_mut();
             let changed = shared.scene.as_ref() != Some(&scene);
             shared.scene = Some(scene);
+            shared.wants_field = self.active_agent_pane().is_some();
             self.grain.clone_from(&shared.grain);
             changed
         };
