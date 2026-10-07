@@ -1297,6 +1297,7 @@ pub(super) struct Shared {
     watching: bool,
     /// Whether the panes' view shows the ground through a gap of its own,
     /// and so wants the grain's field even while the GPU draws the ground.
+    #[cfg(target_os = "macos")]
     wants_field: bool,
 }
 
@@ -1571,7 +1572,10 @@ impl MuxApp {
             let mut shared = self.ground.borrow_mut();
             let changed = shared.scene.as_ref() != Some(&scene);
             shared.scene = Some(scene);
-            shared.wants_field = self.active_agent_pane().is_some();
+            #[cfg(target_os = "macos")]
+            {
+                shared.wants_field = self.active_agent_pane().is_some();
+            }
             self.grain.clone_from(&shared.grain);
             changed
         };
