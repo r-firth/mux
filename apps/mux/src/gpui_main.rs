@@ -10,6 +10,7 @@ mod backend;
 mod chrome;
 mod gpui_terminal;
 mod layout;
+mod session_sheet;
 mod settings;
 
 use std::borrow::Cow;
@@ -27,10 +28,7 @@ use anyhow::{Context as _, Result, anyhow};
 use backend::{BackendHandle, CommandMessage};
 use bezel::{
     theme::{self as bezel_theme, Appearance as BezelAppearance, Theme as BezelTheme},
-    ui::{
-        self as bezel_ui, icons as bezel_icons,
-        widgets::{Content as _, Scaffolding as _},
-    },
+    ui::{self as bezel_ui, icons as bezel_icons},
 };
 use chrome::Ink;
 use gpui::prelude::FluentBuilder as _;
@@ -43,11 +41,10 @@ use gpui::{
     linear_gradient, point, px, rgb, size,
 };
 use gpui_component::{
-    IconName, InteractiveElementExt as _, Sizable as _, StyledExt as _, Theme as ComponentTheme,
-    ThemeMode, TitleBar, WindowExt as _,
+    InteractiveElementExt as _, Sizable as _, StyledExt as _, Theme as ComponentTheme, ThemeMode,
+    TitleBar, WindowExt as _,
     animation::cubic_bezier,
-    button::{Button, ButtonVariant, ButtonVariants as _},
-    dialog::DialogButtonProps,
+    button::{Button, ButtonVariants as _},
     h_flex,
     input::{Enter, Input, InputEvent, InputState, Position, Textarea, TextareaState},
     notification::Notification,
@@ -427,6 +424,7 @@ struct MuxApp {
     /// it, so closing a tab never repaints its neighbours.
     tab_inks: HashMap<TabId, Ink>,
     tab_rename: Option<TabRename>,
+    session_sheet: Option<session_sheet::SessionSheet>,
     selected_pane: Option<PaneId>,
     pending_focused_pane: Option<PaneId>,
     selection_drag: Option<TerminalPointerCapture>,
@@ -551,6 +549,7 @@ impl MuxApp {
             agent_unseen: HashSet::new(),
             tab_inks: HashMap::new(),
             tab_rename: None,
+            session_sheet: None,
             selected_pane: None,
             pending_focused_pane: None,
             selection_drag: None,
@@ -940,7 +939,10 @@ impl MuxApp {
         {
             self.backend
                 .send(CommandMessage::RefreshAgentFiles { pane_id });
-            self.focus_agent_composer(window);
+            // A field over the panes keeps the keyboard until it closes.
+            if self.session_sheet.is_none() && self.tab_rename.is_none() {
+                self.focus_agent_composer(window);
+            }
         } else if agent_pane.is_none_or(|pane_id| Some(pane_id) != self.terminal_input_pane_id())
             && gpui::Focusable::focus_handle(self.agent_input.read(cx), cx).is_focused(window)
         {
@@ -1435,7 +1437,10 @@ impl MuxApp {
             // the window lost focus before GPUI delivered the prior key-up.
             self.terminal_key_presses.remove(&event.keystroke.key);
         }
-        if window.has_active_dialog(cx) || window.has_active_sheet(cx) || self.tab_rename.is_some()
+        if window.has_active_dialog(cx)
+            || window.has_active_sheet(cx)
+            || self.tab_rename.is_some()
+            || self.session_sheet.is_some()
         {
             cx.propagate();
             return;
@@ -1609,7 +1614,7 @@ impl MuxApp {
             }
             Action::NextTab => self.send_workspace(WorkspaceCommand::NextTab),
             Action::PreviousTab => self.send_workspace(WorkspaceCommand::PreviousTab),
-            Action::OpenSessionSwitcher => self.open_sessions(window, cx),
+            Action::OpenSessionSwitcher => self.toggle_session_sheet(window, cx),
             Action::DetachSession => cx.quit(),
             Action::OpenAgentSurface => self.toggle_agents(window, cx),
             Action::OpenSettings => self.open_settings(window, cx),
@@ -1704,219 +1709,6 @@ impl MuxApp {
             }
             dialog.title("Settings").w(px(560.0)).child(content)
         });
-    }
-
-    fn open_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.backend.send(CommandMessage::ListSessions);
-        let app = cx.weak_entity();
-        let active_session_id = self.session.as_ref().map(|session| session.id);
-        window.open_dialog(cx, move |dialog, _window, cx| {
-            let create_app = app.clone();
-            let theme = BezelTheme::of(cx).clone();
-            let mut content = v_flex().gap_3().font_family(theme.font_sans.clone()).child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .items_start()
-                    .gap_2()
-                    .child(theme.row_tile(bezel_icons::CLOUD))
-                    .child(
-                        v_flex()
-                            .min_w_0()
-                            .flex_1()
-                            .child(theme.row_title("Durable workspaces"))
-                            .child(theme.meta_line(vec![
-                                    div()
-                                        .child("Switch without stopping shells, panes, or agents.")
-                                        .into_any_element(),
-                                ])),
-                    )
-                    .child(
-                        Button::new("session-new")
-                            .icon(IconName::Plus)
-                            .label("New")
-                            .secondary()
-                            .small()
-                            .compact()
-                            .tooltip("Move the focused pane into a new session")
-                            .on_click(move |_, window, cx| {
-                                let _ = create_app.update(cx, |this, _| {
-                                    if let Some(pane_id) = this.focused_pane_id() {
-                                        let mut number = this.sessions.len() + 1;
-                                        let name = loop {
-                                            let candidate = format!("session-{number}");
-                                            if !this
-                                                .sessions
-                                                .iter()
-                                                .any(|session| session.name == candidate)
-                                            {
-                                                break candidate;
-                                            }
-                                            number += 1;
-                                        };
-                                        this.backend.send(CommandMessage::CreateSessionForPane {
-                                            name,
-                                            pane_id,
-                                        });
-                                    }
-                                });
-                                window.close_dialog(cx);
-                            }),
-                    ),
-            );
-            let sessions = app
-                .upgrade()
-                .map(|entity| entity.read(cx).sessions.clone())
-                .unwrap_or_default();
-            if sessions.is_empty() {
-                content = content.child(
-                    div()
-                        .w_full()
-                        .p_3()
-                        .rounded(px(BezelTheme::SURFACE_RADIUS))
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.surface_card)
-                        .text_sm()
-                        .text_color(theme.text_muted)
-                        .child("Loading sessions…"),
-                );
-            } else {
-                let mut group = theme.group_box();
-                for (index, session) in sessions.iter().enumerate() {
-                    group = group.child(Self::session_switcher_row(
-                        &app,
-                        session,
-                        active_session_id,
-                        index == 0,
-                        &theme,
-                    ));
-                }
-                content = content.child(group);
-            }
-            dialog.title("Sessions").w(px(560.0)).child(content)
-        });
-    }
-
-    fn session_switcher_row(
-        app: &gpui::WeakEntity<MuxApp>,
-        session: &SessionSummary,
-        active_session_id: Option<SessionId>,
-        first: bool,
-        theme: &BezelTheme,
-    ) -> gpui::AnyElement {
-        let session_id = session.id;
-        let active = active_session_id == Some(session_id);
-        let badge = if active {
-            theme.badge_active("CURRENT").into_any_element()
-        } else {
-            theme.badge("DURABLE").into_any_element()
-        };
-        let actions = Self::session_switcher_actions(app, session, active);
-        theme
-            .card_row(first)
-            .child(theme.row_tile(bezel_icons::MONITOR))
-            .child(
-                v_flex()
-                    .min_w_0()
-                    .flex_1()
-                    .child(
-                        h_flex()
-                            .min_w_0()
-                            .gap_2()
-                            .child(theme.row_title(session.name.clone()))
-                            .child(badge),
-                    )
-                    .child(theme.meta_line(vec![
-                        div()
-                            .child(format!(
-                                "{} · owned by muxd",
-                                format_session_pane_count(session.pane_count)
-                            ))
-                            .into_any_element(),
-                    ])),
-            )
-            .child(actions)
-            .into_any_element()
-    }
-
-    fn session_switcher_actions(
-        app: &gpui::WeakEntity<MuxApp>,
-        session: &SessionSummary,
-        active: bool,
-    ) -> gpui::AnyElement {
-        let attach_app = app.clone();
-        let rename_app = app.clone();
-        let kill_app = app.clone();
-        let session_id = session.id;
-        let rename_session = session.clone();
-        let kill_name = session.name.clone();
-        h_flex()
-            .flex_none()
-            .gap_1()
-            .when(!active, |actions| {
-                actions.child(
-                    Button::new(SharedString::from(format!("session-{session_id}")))
-                        .label("Open")
-                        .ghost()
-                        .small()
-                        .compact()
-                        .on_click(move |_, window, cx| {
-                            let _ = attach_app.update(cx, |this, _| {
-                                this.backend.send(CommandMessage::AttachSession(session_id));
-                            });
-                            window.close_dialog(cx);
-                        }),
-                )
-            })
-            .child(
-                Button::new(SharedString::from(format!("rename-session-{session_id}")))
-                    .icon(IconName::ALargeSmall)
-                    .label("Rename")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .on_click(move |_, window, cx| {
-                        open_rename_session_dialog(rename_app.clone(), &rename_session, window, cx);
-                    }),
-            )
-            .child(
-                Button::new(SharedString::from(format!("kill-session-{session_id}")))
-                    .icon(IconName::Delete)
-                    .label("End")
-                    .danger()
-                    .small()
-                    .compact()
-                    .on_click(move |_, window, cx| {
-                        let confirm_app = kill_app.clone();
-                        let kill_name = kill_name.clone();
-                        window.open_alert_dialog(cx, move |dialog, _, _| {
-                            let confirm_app = confirm_app.clone();
-                            dialog
-                                .title(format!("End {kill_name}?"))
-                                .button_props(
-                                    DialogButtonProps::default()
-                                        .ok_text("End session")
-                                        .ok_variant(ButtonVariant::Danger)
-                                        .cancel_text("Keep session")
-                                        .show_cancel(true),
-                                )
-                                .on_ok(move |_, window, cx| {
-                                    let _ = confirm_app.update(cx, |this, _| {
-                                        this.backend.send(CommandMessage::KillSession(session_id));
-                                    });
-                                    window.close_all_dialogs(cx);
-                                    true
-                                })
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .child("All processes in this durable session will exit."),
-                                )
-                        });
-                    }),
-            )
-            .into_any_element()
     }
 
     /// Rename the active tab in its own chip: the name turns into a field
@@ -3440,7 +3232,7 @@ impl MuxApp {
             .items_center()
             .gap(px(6.0))
             .pl(px(10.0))
-            .pr(px(14.0))
+            .pr(px(10.0))
             .bg(linear_gradient(
                 180.0,
                 linear_color_stop(ground.opacity(0.72), 0.0),
@@ -3494,7 +3286,7 @@ impl MuxApp {
             )
             .child(self.render_mode_hints(cx))
             .child(self.render_mode_pill())
-            .child(self.render_session_mark())
+            .child(self.render_session_mark(cx))
     }
 
     /// The keys that matter in the current mode, in gofer's `[key] label`
@@ -3589,8 +3381,9 @@ impl MuxApp {
         }
     }
 
-    /// The session name in gofer's dot-matrix face: "where" you are.
-    fn render_session_mark(&self) -> gpui::AnyElement {
+    /// The session name in gofer's dot-matrix face: "where" you are. It is
+    /// also the way to the other sessions, which drop down from it.
+    fn render_session_mark(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let name = self
             .session
             .as_ref()
@@ -3601,7 +3394,24 @@ impl MuxApp {
                 .child(name.to_owned())
                 .into_any_element()
         });
-        div().flex_none().pl(px(8.0)).child(mark).into_any_element()
+        let open = self.session_sheet.is_some();
+        h_flex()
+            .id("session-mark")
+            .flex_none()
+            .h(px(26.0))
+            .ml(px(2.0))
+            .px(px(6.0))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .when(open, |mark| mark.bg(wash(0.08)))
+            .when(!open, |mark| mark.hover(|style| style.bg(wash(0.05))))
+            .active(|style| style.bg(wash(0.10)))
+            // The sheet's backdrop closes it on mouse down; let the click
+            // that would reopen it fall through to nothing.
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_session_sheet(window, cx)))
+            .child(mark)
+            .into_any_element()
     }
 
     /// The warm, dithered ground in the active tab's ink. It shows in the
@@ -3816,43 +3626,6 @@ impl UserEvent {
     }
 }
 
-fn open_rename_session_dialog(
-    app: gpui::WeakEntity<MuxApp>,
-    session: &SessionSummary,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let session_id = session.id;
-    let session_name = session.name.clone();
-    let input = cx.new(|cx| {
-        let mut input = InputState::new(window, cx).placeholder("Session name");
-        input.set_value(session_name, window, cx);
-        input
-    });
-    let submit_input = input.clone();
-    window.open_dialog(cx, move |dialog, _, _| {
-        let submit_app = app.clone();
-        let input_for_button = submit_input.clone();
-        dialog.title("Rename session").w(px(420.0)).child(
-            v_flex().gap_3().child(Input::new(&submit_input)).child(
-                Button::new("rename-session-submit")
-                    .label("Rename")
-                    .primary()
-                    .on_click(move |_, window, cx| {
-                        let name = input_for_button.read(cx).value().trim().to_owned();
-                        if !name.is_empty() {
-                            let _ = submit_app.update(cx, |this, _| {
-                                this.backend
-                                    .send(CommandMessage::RenameSession { session_id, name });
-                            });
-                            window.close_all_dialogs(cx);
-                        }
-                    }),
-            ),
-        )
-    });
-}
-
 impl Render for MuxApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_agent_pulse(cx);
@@ -3949,6 +3722,9 @@ impl Render for MuxApp {
             if let Some(letter) = hints.get(&pane_id) {
                 root = root.child(pane_focus_hint(geometry.rect, *letter, self.active_ink()));
             }
+        }
+        if let Some(sheet) = self.render_session_sheet(cx) {
+            root = root.child(sheet);
         }
         root
     }
