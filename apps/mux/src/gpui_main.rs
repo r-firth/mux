@@ -4049,12 +4049,7 @@ impl Render for MuxApp {
         for (index, seam) in geometry.seams.into_iter().enumerate() {
             root = root.child(self.render_seam(index, seam, cx));
         }
-        let wake = self.ground.wake(
-            (f32::from(viewport.width), f32::from(viewport.height)),
-            Instant::now(),
-        );
-        root.children(wake)
-            .children(self.render_seam_drag_shield())
+        root.children(self.render_seam_drag_shield())
             .children(self.render_session_sheet(cx))
             .children(self.render_settings_sheet(cx))
             .children(self.render_palette(viewport, cx))

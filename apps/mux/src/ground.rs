@@ -35,15 +35,14 @@ const TIDE_TROUGH: f32 = 0.3;
 const TIDE_CREST: f32 = 0.1;
 const TIDE_WAVE: (f32, f32) = (260.0, 0.27);
 const TIDE_CROSS: (f32, f32) = (410.0, 0.12);
-/// A wake: one pulse of grain that crosses the whole window, slabs and all,
-/// when the tab changes or the window first shows. How long it takes, how
-/// big its dots are in points, how far it trails behind its front, and how
-/// thick with dots it is just behind the front.
-const WAKE: Duration = Duration::from_millis(560);
-const WAKE_CELL: f32 = 3.0;
-const WAKE_DOT: f32 = 2.0;
-const WAKE_TRAIL: f32 = 190.0;
-const WAKE_PEAK: f32 = 0.7;
+/// A wake: one ring of light that runs out through the grain when the tab
+/// changes or the window first shows. Like the rest of the ground it only
+/// ever shows where the grain does, never over a pane. How long it takes,
+/// how far it trails behind its front in points, and how much light it adds
+/// just behind the front, where 1 lights every dot.
+const WAKE: Duration = Duration::from_millis(700);
+const WAKE_TRAIL: f32 = 170.0;
+const WAKE_PEAK: f32 = 2.4;
 /// How much of the tide reaches the strip, where the words are.
 const TIDE_IN_STRIP: f32 = 0.3;
 /// The share of dots each step that light a little early, out of 256, and by
@@ -532,6 +531,9 @@ pub(super) struct Field {
     leaving: Option<Leaving>,
     /// The tide's clock, in seconds and in steps; `None` holds it still.
     tide: Option<(f32, u64)>,
+    /// A wake passing: where it set out from, how far its front has got,
+    /// and how strong it still is.
+    wake: Option<((f32, f32), f32, f32)>,
     /// The colour of each mix of levels a cell can show: two bits for each
     /// of the four inks, then one for showing the ink dissolving away.
     shades: Vec<Hsla>,
@@ -625,6 +627,7 @@ impl Field {
         }
         let [own, _, _, signal] = &mut line.values;
         self.swell(y, from, own);
+        self.wash(y, from, own);
         if let Some((rect, strength)) = self.focus {
             self.around(rect, y, (0.0, FOCUS_REACH), from, own, |distance| {
                 strength * (0.42 * fall(distance, FOCUS_REACH) + 0.18 * fall(distance, FOCUS_RIM))
@@ -745,6 +748,27 @@ impl Field {
             let swell = crest * crest * (0.6 + 0.4 * cross.sin());
             let carried = TIDE_TROUGH + (1.6 - TIDE_TROUGH) * swell;
             *value = *value * (1.0 + (carried - 1.0) * reach) + TIDE_CREST * swell * reach;
+        }
+    }
+
+    /// Add the light of a wake passing to the row at `y`: most just behind
+    /// its front, thinning along its trail.
+    #[allow(clippy::cast_precision_loss)]
+    fn wash(&self, y: f32, from: i32, values: &mut [f32]) {
+        let Some(((ox, oy), front, strength)) = self.wake else {
+            return;
+        };
+        let dy = y - oy;
+        if dy.abs() > front {
+            return;
+        }
+        for (index, value) in values.iter_mut().enumerate() {
+            let x = (from as f32 + index as f32 + 0.5) * self.cell;
+            let behind = front - (x - ox).hypot(dy);
+            if (0.0..WAKE_TRAIL).contains(&behind) {
+                let tail = 1.0 - behind / WAKE_TRAIL;
+                *value += strength * tail * tail * smooth(0.0, 8.0, behind);
+            }
         }
     }
 
@@ -896,62 +920,19 @@ fn paint_runs(runs: &[Run], cell: f32, bounds: Bounds<Pixels>, window: &mut Wind
 struct Wake {
     origin: (f32, f32),
     began: Instant,
-    ink: Ink,
-}
-
-/// One lit dot of a wake, and whether it is at the bright front.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct WakeDot {
-    x: f32,
-    y: f32,
-    front: bool,
 }
 
 impl Wake {
-    /// The wake's dots `through` of the way across a `width` by `height`
-    /// window, 0 to 1: a ring spreading from its origin, thick with dots at
-    /// its front and thinning behind, the whole of it fading as it goes.
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_precision_loss,
-        clippy::cast_sign_loss
-    )]
-    fn dots(&self, width: f32, height: f32, through: f32) -> Vec<WakeDot> {
+    /// How far the wake's front has got `through` of the way across a
+    /// window `width` by `height`, and how strong it still is.
+    fn reached(&self, width: f32, height: f32, through: f32) -> (f32, f32) {
         let (ox, oy) = self.origin;
         let far = ox.max(width - ox).hypot(oy.max(height - oy));
         let eased = 1.0 - (1.0 - through).powf(2.2);
-        let front = eased * (far + WAKE_TRAIL);
-        let strength = WAKE_PEAK * (1.0 - through.powi(3));
-        let columns = (width / WAKE_CELL).ceil() as usize;
-        let rows = (height / WAKE_CELL).ceil() as usize;
-        let inset = (WAKE_CELL - WAKE_DOT) / 2.0;
-        let mut dots = Vec::new();
-        for row in 0..rows {
-            let y = (row as f32 + 0.5) * WAKE_CELL;
-            let dy = y - oy;
-            if dy.abs() > front {
-                continue;
-            }
-            let noise = &NOISE[(row & 63) << 6..][..64];
-            for column in 0..columns {
-                let x = (column as f32 + 0.5) * WAKE_CELL;
-                let behind = front - (x - ox).hypot(dy);
-                if !(0.0..WAKE_TRAIL).contains(&behind) {
-                    continue;
-                }
-                let tail = 1.0 - behind / WAKE_TRAIL;
-                let value = strength * tail * tail * smooth(0.0, 10.0, behind);
-                let threshold = (f32::from(noise[column & 63]) + 0.5) / 256.0;
-                if value > threshold {
-                    dots.push(WakeDot {
-                        x: column as f32 * WAKE_CELL + inset,
-                        y: row as f32 * WAKE_CELL + inset,
-                        front: behind < 26.0,
-                    });
-                }
-            }
-        }
-        dots
+        (
+            eased * (far + WAKE_TRAIL),
+            WAKE_PEAK * (1.0 - through.powi(3)),
+        )
     }
 }
 
@@ -971,6 +952,7 @@ struct Laid {
     step: u64,
     past: f32,
     dissolve: Option<(Ink, (f32, f32), f32)>,
+    wake: Option<((f32, f32), f32, f32)>,
 }
 
 /// The ground's memory between frames.
@@ -1040,41 +1022,6 @@ impl Ground {
         self.dissolve.is_some() || self.wake.is_some()
     }
 
-    /// The wake crossing the window at `now`, to draw over everything.
-    pub(super) fn wake(&self, viewport: (f32, f32), now: Instant) -> Option<AnyElement> {
-        let wake = self.wake?;
-        let through = now.saturating_duration_since(wake.began).as_secs_f32() / WAKE.as_secs_f32();
-        if through >= 1.0 {
-            return None;
-        }
-        let dots = wake.dots(viewport.0, viewport.1, through);
-        let front = wake.ink.color().opacity(0.95);
-        let trail = wake.ink.color().opacity(0.55);
-        Some(
-            canvas(
-                |_, _, _| (),
-                move |bounds, (), window, _| {
-                    window.paint_layer(bounds, |window| {
-                        for dot in &dots {
-                            window.paint_quad(fill(
-                                Bounds::new(
-                                    point(bounds.origin.x + px(dot.x), bounds.origin.y + px(dot.y)),
-                                    size(px(WAKE_DOT), px(WAKE_DOT)),
-                                ),
-                                if dot.front { front } else { trail },
-                            ));
-                        }
-                    });
-                },
-            )
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .into_any_element(),
-        )
-    }
-
     /// How long until the ground next needs drawing on its own, or `None`
     /// when it holds still.
     pub(super) fn next_step(&self, now: Instant) -> Option<Duration> {
@@ -1100,11 +1047,7 @@ impl Ground {
                 (scene.viewport.0 / 2.0, layout::TAB_BAR_HEIGHT / 2.0),
                 center,
             );
-            self.wake = Some(Wake {
-                origin,
-                began: now,
-                ink: scene.ink,
-            });
+            self.wake = Some(Wake { origin, began: now });
         }
         if self
             .wake
@@ -1188,12 +1131,25 @@ impl Ground {
             step / IDLE_STEPS * IDLE_STEPS
         };
         let step = if still { 0 } else { step };
+        let wake = self.wake.map(|wake| {
+            let through =
+                now.saturating_duration_since(wake.began).as_secs_f32() / WAKE.as_secs_f32();
+            let (front, strength) =
+                wake.reached(scene.viewport.0, scene.viewport.1, through.min(1.0));
+            // Snapped, so frames a hair apart lay the same grain.
+            (
+                wake.origin,
+                (front / 2.0).round() * 2.0,
+                (strength * 32.0).round() / 32.0,
+            )
+        });
         let laid = Laid {
             scene,
             drift,
             step,
             past,
             dissolve,
+            wake,
         };
         if let Some((last, grain)) = &self.laid
             && *last == laid
@@ -1272,6 +1228,7 @@ impl Ground {
                 .dissolve
                 .map(|(_, origin, reached)| Leaving::new(origin, reached)),
             tide: (!scene.still).then(|| (Self::seconds(laid.drift), laid.drift)),
+            wake: laid.wake,
             shades,
         });
         let window = layout::Rect {
@@ -1707,19 +1664,20 @@ mod tests {
         let wake = ground.wake.expect("a wake for the new tab");
         assert_eq!(wake.origin, center(chip));
 
-        // Early on its dots are near the chip; later they have left it.
-        let near = |dots: &[WakeDot]| {
-            dots.iter()
-                .filter(|dot| (dot.x - 120.0).hypot(dot.y - 18.0) < 80.0)
-                .count()
-        };
-        let early = wake.dots(800.0, 500.0, 0.08);
-        let late = wake.dots(800.0, 500.0, 0.6);
+        // Early on it lights the strip round the chip; later it has left
+        // there and reached the far margin.
+        let by_chip = rect(200.0, 0.0, 110.0, 36.0);
+        let far_margin = rect(790.0, 200.0, 10.0, 200.0);
+        let early = ground.lay(on_tab(second), switched + WAKE.mul_f32(0.1));
+        let (chip_early, far_early) = (lit(&early, by_chip), lit(&early, far_margin));
+        let late = ground.lay(on_tab(second), switched + WAKE.mul_f32(0.6));
+        let (chip_late, far_late) = (lit(&late, by_chip), lit(&late, far_margin));
         assert!(
-            near(&early) > 20 && near(&late) == 0,
-            "the wake did not travel"
+            chip_early * 2 > chip_late * 3 && far_late > far_early * 2,
+            "the wake did not travel: chip {chip_early} then {chip_late}, far {far_early} then {far_late}"
         );
-        assert!(late.iter().any(|dot| dot.x > 500.0));
+        // It never lights anything under a slab.
+        assert_eq!(lit(&early, rect(40.0, 80.0, 300.0, 300.0)), 0);
 
         ground.lay(on_tab(second), switched + WAKE);
         assert!(ground.wake.is_none(), "the wake outstayed its crossing");
