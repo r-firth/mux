@@ -373,6 +373,7 @@ mod linked {
         wrapped: u8,
         continuation: u8,
         dirty: u8,
+        rebuilt: u8,
     }
 
     #[repr(C)]
@@ -586,6 +587,7 @@ mod linked {
         fn mux_ghostty_renderer_frame(
             renderer: *mut c_void,
             terminal: *mut c_void,
+            keep_clean_rows: bool,
             out_frame: *mut CRenderFrame,
         ) -> i32;
         fn mux_ghostty_render_frame_free(frame: *mut CRenderFrame);
@@ -623,6 +625,31 @@ mod linked {
         selection_gesture: NonNull<c_void>,
         descriptor: EngineDescriptor,
         next_sequence: u64,
+        /// The frame the renderer last filled, so the next fill of that same
+        /// frame only has to rewrite the rows that changed.
+        filled: Option<FilledFrame>,
+    }
+
+    /// Where a filled frame's cells live and its shape. A frame is only
+    /// updated in place when it is still exactly this one: a fresh frame, a
+    /// copy, or one resized since has its rows rebuilt in full.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct FilledFrame {
+        cells: usize,
+        len: usize,
+        cols: u16,
+        rows: u16,
+    }
+
+    impl FilledFrame {
+        fn of(frame: &RenderFrame) -> Self {
+            Self {
+                cells: frame.cells.as_ptr().addr(),
+                len: frame.cells.len(),
+                cols: frame.cols,
+                rows: frame.rows,
+            }
+        }
     }
 
     // SAFETY: libghostty-vt terminals contain no thread-affine platform
@@ -706,6 +733,7 @@ mod linked {
                 selection_gesture,
                 descriptor: descriptor(),
                 next_sequence: 1,
+                filled: None,
             })
         }
 
@@ -832,6 +860,7 @@ mod linked {
                 selection_gesture,
                 descriptor: descriptor(),
                 next_sequence: checkpoint.next_sequence,
+                filled: None,
             })
         }
 
@@ -1031,18 +1060,25 @@ mod linked {
         }
 
         fn render_frame_into(&mut self, rendered: &mut RenderFrame) -> Result<(), TerminalError> {
+            // Rows libghostty has not touched since the last fill are left as
+            // they are, but only in the frame that fill wrote. Until this fill
+            // succeeds, no frame holds the latest rows.
+            let keep_clean_rows = self.filled.take() == Some(FilledFrame::of(rendered));
             let mut frame = CRenderFrame::default();
             // SAFETY: both handles are exclusively owned and `frame` is a valid out pointer.
             let result = unsafe {
                 mux_ghostty_renderer_frame(
                     self.renderer.as_ptr(),
                     self.terminal.as_ptr(),
+                    keep_clean_rows,
                     &raw mut frame,
                 )
             };
             check(result).map_err(|error| TerminalError::Engine(error.to_string()))?;
             let guard = RenderFrameGuard(frame);
-            convert_frame_into(&guard.0, rendered)
+            convert_frame_into(&guard.0, rendered)?;
+            self.filled = Some(FilledFrame::of(rendered));
+            Ok(())
         }
     }
 
@@ -1536,8 +1572,19 @@ mod linked {
             };
         }
         rendered.cells.resize_with(cell_count, blank_render_cell);
-        for (target, cell) in rendered.cells.iter_mut().zip(cells) {
-            convert_cell_into(cell, text, target)?;
+        let columns = usize::from(frame.cols).max(1);
+        for ((targets, cells), row) in rendered
+            .cells
+            .chunks_mut(columns)
+            .zip(cells.chunks(columns))
+            .zip(rows)
+        {
+            if row.rebuilt == 0 {
+                continue;
+            }
+            for (target, cell) in targets.iter_mut().zip(cells) {
+                convert_cell_into(cell, text, target)?;
+            }
         }
         let cursor = if frame.cursor_has_value == 0 {
             None
@@ -1818,6 +1865,153 @@ mod linked {
             assert_eq!(frame.cells.as_ptr(), cells);
             assert_eq!(frame.cells[0].grapheme.as_ptr(), first_grapheme);
             assert_eq!(frame.cells[0].grapheme, "x");
+        }
+
+        fn row_text(frame: &RenderFrame, row: usize) -> String {
+            let columns = usize::from(frame.cols);
+            frame.cells[row * columns..(row + 1) * columns]
+                .iter()
+                .map(|cell| cell.grapheme.as_str())
+                .collect::<String>()
+        }
+
+        #[test]
+        fn refilling_a_frame_rewrites_only_the_rows_that_changed() {
+            let mut engine = GhosttyEngine::new(TerminalSize {
+                cols: 20,
+                rows: 6,
+                ..TerminalSize::default()
+            })
+            .expect("new terminal");
+            engine
+                .apply_output(1, b"one\r\ntwo\r\nthree")
+                .expect("initial output");
+            let mut frame = engine.render_frame().expect("initial frame");
+            // A row nothing writes to is left exactly as the frame had it.
+            frame.cells[0].grapheme = "Z".to_owned();
+
+            engine
+                .apply_output(2, b"\x1b[2;1Hfour")
+                .expect("rewrite the second row");
+            engine
+                .render_frame_into(&mut frame)
+                .expect("refilled frame");
+
+            assert_eq!(row_text(&frame, 0), "Zne");
+            assert_eq!(row_text(&frame, 1), "four");
+            assert_eq!(row_text(&frame, 2), "three");
+            assert!(frame.row_metadata[1].dirty);
+            assert!(!frame.row_metadata[0].dirty);
+        }
+
+        #[test]
+        fn a_refilled_frame_matches_a_fresh_one() {
+            use std::fmt::Write as _;
+
+            let mut engine = GhosttyEngine::new(TerminalSize {
+                cols: 20,
+                rows: 6,
+                ..TerminalSize::default()
+            })
+            .expect("new terminal");
+            engine
+                .apply_output(1, b"one\r\ntwo")
+                .expect("initial output");
+            let mut frame = engine.render_frame().expect("initial frame");
+
+            // Typing, then a theme, as a restored pane is given one.
+            engine
+                .apply_output(2, b"\x1b[31mred")
+                .expect("coloured text");
+            engine.render_frame_into(&mut frame).expect("after typing");
+            assert_eq!(frame.cells, engine.render_frame().expect("fresh").cells);
+
+            engine
+                .apply_theme(&GhosttyTheme {
+                    background: Some(Rgb {
+                        r: 0x12,
+                        g: 0x34,
+                        b: 0x56,
+                    }),
+                    foreground: Some(Rgb {
+                        r: 0xee,
+                        g: 0xee,
+                        b: 0xee,
+                    }),
+                    ..GhosttyTheme::default()
+                })
+                .expect("new background");
+            engine
+                .render_frame_into(&mut frame)
+                .expect("after background");
+            let fresh = engine.render_frame().expect("fresh");
+            assert_eq!(
+                frame.cells[0].background,
+                Rgb {
+                    r: 0x12,
+                    g: 0x34,
+                    b: 0x56
+                }
+            );
+            assert_eq!(frame.cells, fresh.cells);
+
+            // A selection, and looking back into history, change rows that
+            // no output touched.
+            engine
+                .set_selection(Some(TerminalSelection {
+                    anchor: mux_terminal::TerminalPoint { column: 0, row: 0 },
+                    focus: mux_terminal::TerminalPoint { column: 2, row: 1 },
+                    rectangular: false,
+                }))
+                .expect("select");
+            engine.render_frame_into(&mut frame).expect("after select");
+            assert!(frame.cells[0].selected);
+            assert_eq!(frame.cells, engine.render_frame().expect("fresh").cells);
+            engine.set_selection(None).expect("clear selection");
+            engine.render_frame_into(&mut frame).expect("after clear");
+            assert_eq!(frame.cells, engine.render_frame().expect("fresh").cells);
+
+            let mut lines = String::new();
+            for number in 1..=20 {
+                write!(lines, "\r\n{number}").expect("write test output");
+            }
+            engine
+                .apply_output(3, lines.as_bytes())
+                .expect("scroll into history");
+            engine.render_frame_into(&mut frame).expect("at the bottom");
+            engine
+                .scroll_viewport(TerminalViewportScroll::Delta(-3))
+                .expect("look back");
+            engine.render_frame_into(&mut frame).expect("looking back");
+            assert_eq!(frame.cells, engine.render_frame().expect("fresh").cells);
+        }
+
+        #[test]
+        fn a_frame_the_last_fill_did_not_write_is_rebuilt_in_full() {
+            let mut engine = GhosttyEngine::new(TerminalSize {
+                cols: 20,
+                rows: 6,
+                ..TerminalSize::default()
+            })
+            .expect("new terminal");
+            engine
+                .apply_output(1, b"one\r\ntwo")
+                .expect("initial output");
+            let mut frame = engine.render_frame().expect("initial frame");
+            let mut copy = frame.clone();
+
+            engine.apply_output(2, b"\r\nthree").expect("more output");
+            engine.render_frame_into(&mut copy).expect("copy refilled");
+            engine
+                .apply_output(3, b"\r\nfour")
+                .expect("still more output");
+            engine
+                .render_frame_into(&mut frame)
+                .expect("original refilled");
+
+            assert_eq!(row_text(&copy, 2), "three");
+            assert_eq!(row_text(&frame, 3), "four");
+            assert_eq!(frame.cells, engine.render_frame().expect("fresh").cells);
         }
 
         #[test]
