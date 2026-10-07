@@ -864,28 +864,6 @@ mod linked {
             })
         }
 
-        /// Takes in part of output `sequence` and waits for the rest, so a
-        /// long output can be applied a part at a time. The last part goes to
-        /// `apply_output`, which moves on to the next sequence.
-        pub fn apply_output_part(
-            &mut self,
-            sequence: u64,
-            bytes: &[u8],
-        ) -> Result<(), TerminalError> {
-            if sequence != self.next_sequence {
-                return Err(TerminalError::OutOfOrder {
-                    expected: self.next_sequence,
-                    actual: sequence,
-                });
-            }
-            // SAFETY: the owned terminal is valid and the byte slice is borrowed
-            // only for this synchronous call.
-            unsafe {
-                mux_ghostty_terminal_write(self.terminal.as_ptr(), bytes.as_ptr(), bytes.len());
-            }
-            Ok(())
-        }
-
         /// Keep up to `max_bytes` of history above the screen. libghostty
         /// prunes a page at a time, so what is kept lands within a page
         /// (about 400 KB) of the limit.
@@ -964,7 +942,17 @@ mod linked {
         }
 
         fn apply_output(&mut self, sequence: u64, bytes: &[u8]) -> Result<(), TerminalError> {
-            self.apply_output_part(sequence, bytes)?;
+            if sequence != self.next_sequence {
+                return Err(TerminalError::OutOfOrder {
+                    expected: self.next_sequence,
+                    actual: sequence,
+                });
+            }
+            // SAFETY: the owned terminal is valid and the byte slice is borrowed
+            // only for this synchronous call.
+            unsafe {
+                mux_ghostty_terminal_write(self.terminal.as_ptr(), bytes.as_ptr(), bytes.len());
+            }
             self.next_sequence += 1;
             Ok(())
         }
