@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/demo.gif" alt="Mux running terminals, Neovim, and a native Codex agent pane" width="1200">
+  <img src="assets/demo.webp" alt="Mux opening on its ground of lit dots: Neovim beside a shell running git log and cargo test, the ground stirring while the tests run, and the shell's pane ringing after a bell" width="1200">
 </p>
 
 ## What is Mux?
