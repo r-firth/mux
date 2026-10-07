@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread;
 
-use mux_terminal::{TerminalEngine, TerminalError};
+use mux_terminal::TerminalEngine;
 use mux_terminal_ghostty::GhosttyEngine;
 use parking_lot::{Mutex, MutexGuard};
 
@@ -20,10 +20,6 @@ pub const PARSE_IN_PLACE_BYTES: usize = 4 * 1024;
 /// How much the parser takes in before the window draws what it has, so a
 /// long flood still moves on screen.
 const PARSED_BETWEEN_DRAWS: usize = 256 * 1024;
-
-/// How much the parser takes in at a time before letting the window at the
-/// terminal, so the window never waits long to draw it.
-const PARSED_PER_TURN: usize = 16 * 1024;
 
 /// What the parser says when it has taken in output: `None`, or what went
 /// wrong.
@@ -74,7 +70,12 @@ fn parse(
     let mut since_draw = 0;
     let mut next = receiver.recv().ok();
     while let Some((sequence, bytes)) = next {
-        if let Err(error) = apply(engine, sequence, &bytes) {
+        let mut parsing = engine.lock();
+        let applied = parsing.apply_output(sequence, &bytes);
+        // Straight to the window if it is waiting, so it waits for one
+        // batch at most, however long the flood.
+        MutexGuard::unlock_fair(parsing);
+        if let Err(error) = applied {
             notify(Some(error.to_string()));
         }
         since_draw += bytes.len();
@@ -93,31 +94,6 @@ fn parse(
             }
             Err(TryRecvError::Disconnected) => None,
         };
-    }
-}
-
-/// Applies one output a part at a time, handing the terminal straight to
-/// the window between parts if it is waiting, so it waits for one part at
-/// most, however long the output.
-fn apply(
-    engine: &Mutex<GhosttyEngine>,
-    sequence: u64,
-    mut bytes: &[u8],
-) -> Result<(), TerminalError> {
-    loop {
-        let last = bytes.len() <= PARSED_PER_TURN;
-        let (part, rest) = bytes.split_at(bytes.len().min(PARSED_PER_TURN));
-        let mut parsing = engine.lock();
-        let applied = if last {
-            parsing.apply_output(sequence, part)
-        } else {
-            parsing.apply_output_part(sequence, part)
-        };
-        MutexGuard::unlock_fair(parsing);
-        if last || applied.is_err() {
-            return applied;
-        }
-        bytes = rest;
     }
 }
 
@@ -193,20 +169,5 @@ mod tests {
         let error = heard.recv_timeout(Duration::from_secs(10)).expect("said");
         assert!(error.is_some());
         assert_eq!(engine.lock().next_output_sequence(), 1);
-    }
-
-    #[test]
-    fn a_long_output_is_applied_whole_a_part_at_a_time() {
-        let engine = engine();
-        let mut long = b"x".repeat(PARSED_PER_TURN * 3 + 7);
-        long.extend_from_slice(b"\r\nlast line");
-
-        apply(&engine, 1, &long).expect("applied");
-        assert_eq!(engine.lock().next_output_sequence(), 2);
-        assert!(text(&engine).contains("last line"));
-
-        let error = apply(&engine, 1, &long).expect_err("already applied");
-        assert!(matches!(error, TerminalError::OutOfOrder { .. }));
-        assert_eq!(engine.lock().next_output_sequence(), 2);
     }
 }
