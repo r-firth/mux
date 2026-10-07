@@ -716,7 +716,17 @@ impl MuxApp {
             .child(kbd("enter", color(if ready { TEXT } else { FAINT_TEXT })))
             .child(send_label);
 
-        let hint = composer_hint(agent, busy, draft, self.agent_completion_menu.is_some());
+        let note = self
+            .agent_note
+            .as_ref()
+            .filter(|note| Some(note.tab_id) == self.active_tab_id());
+        let hint = composer_hint(
+            agent,
+            busy,
+            draft,
+            self.agent_completion_menu.is_some(),
+            note,
+        );
         let prompt_mark = div()
             .absolute()
             .left(px(-16.0))
@@ -2383,6 +2393,24 @@ fn current_activity(agent: &AgentSessionSnapshot) -> String {
 enum Hint {
     Key(&'static str, String),
     Words(String),
+    /// The composer answering a command: what happened, in ink when it went
+    /// wrong, then what to try, quieter.
+    Note {
+        lead: String,
+        rest: Option<String>,
+        problem: bool,
+    },
+}
+
+/// What the composer says back to one of mux's slash commands, on the line
+/// its key hints usually take, until the next keystroke. It stands in for a
+/// toast: the answer appears where the command was typed.
+pub(super) struct ComposerNote {
+    pub tab_id: TabId,
+    pub lead: String,
+    pub rest: Option<String>,
+    /// A command that went wrong stays in the composer to be fixed.
+    pub problem: bool,
 }
 
 fn hint_key(key: &'static str, label: impl Into<String>) -> Hint {
@@ -2404,6 +2432,20 @@ fn hint_line(hints: Vec<Hint>) -> gpui::Div {
                 .child(kbd(key, color(MUTED_TEXT)))
                 .child(label),
             Hint::Words(words) => div().min_w_0().truncate().child(words),
+            Hint::Note {
+                lead,
+                rest,
+                problem,
+            } => h_flex()
+                .min_w_0()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(color(if problem { SIGNAL } else { MUTED_TEXT }))
+                        .child(lead),
+                )
+                .children(rest.map(|rest| div().min_w_0().truncate().child(rest))),
         });
     }
     line
@@ -2415,6 +2457,7 @@ fn composer_hint(
     busy: bool,
     draft: &str,
     menu_open: bool,
+    note: Option<&ComposerNote>,
 ) -> Vec<Hint> {
     if menu_open {
         return vec![
@@ -2422,6 +2465,13 @@ fn composer_hint(
             hint_key("tab", "complete"),
             hint_key("esc", "close"),
         ];
+    }
+    if let Some(note) = note {
+        return vec![Hint::Note {
+            lead: note.lead.clone(),
+            rest: note.rest.clone(),
+            problem: note.problem,
+        }];
     }
     if let Some(agent) = agent {
         if !agent.queued.is_empty() {
@@ -2535,6 +2585,9 @@ fn completion_sheet(view: &PaneView<'_>, menu: &AgentCompletionMenu) -> AnyEleme
                         .text_color(color(TEXT))
                         .child(name),
                 )
+                .when(completion.current, |row| {
+                    row.child(div().flex_none().text_color(color(SAGE)).child("current"))
+                })
                 .child(
                     div()
                         .flex_1()
@@ -3284,7 +3337,7 @@ pub(super) fn agent_title(agent: &AgentSessionSnapshot) -> String {
 }
 
 /// The name a message is signed with.
-fn agent_short_name(agent: &AgentSessionSnapshot) -> String {
+pub(super) fn agent_short_name(agent: &AgentSessionSnapshot) -> String {
     agent_family(agent).map_or_else(|| agent_title(agent), str::to_owned)
 }
 

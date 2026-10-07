@@ -25,6 +25,8 @@ pub(crate) struct AgentCompletion {
     pub replacement: String,
     pub start: usize,
     pub end: usize,
+    /// The value already in effect, for a command that sets one.
+    pub current: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,6 +41,8 @@ pub(crate) struct AgentCommandArgument {
     pub value: String,
     pub detail: String,
     pub description: String,
+    /// Whether this is the value in effect now.
+    pub current: bool,
 }
 
 impl AgentCompletionMenu {
@@ -176,6 +180,7 @@ impl AgentCompletionProvider {
                     replacement: format!("{} ", argument.value),
                     start: token.start,
                     end: token.end,
+                    current: argument.current,
                 })
                 .collect();
         }
@@ -194,6 +199,7 @@ impl AgentCompletionProvider {
                     replacement: format!("/{} ", candidate.name),
                     start: token.start,
                     end: token.end,
+                    current: false,
                 })
                 .collect();
         }
@@ -211,6 +217,7 @@ impl AgentCompletionProvider {
                         replacement: format!("{} ", file_mention_token(&display)),
                         start: token.start,
                         end: token.end,
+                        current: false,
                     }
                 })
                 .collect();
@@ -597,12 +604,14 @@ mod tests {
                 value: "codex-acp".to_owned(),
                 detail: "Agent".to_owned(),
                 description: "Codex over ACP".to_owned(),
+                current: false,
             },
             AgentCommandArgument {
                 command: "new".to_owned(),
                 value: "gemini".to_owned(),
                 detail: "Agent".to_owned(),
                 description: "Gemini over ACP".to_owned(),
+                current: false,
             },
         ]);
 
