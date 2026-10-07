@@ -1366,6 +1366,7 @@ impl GroundView {
         );
         shared.grain = grain;
         gpu.draw(&frame);
+        self.drawn = Instant::now();
         Some(shared.ground.moving())
     }
 
