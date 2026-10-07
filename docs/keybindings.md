@@ -98,6 +98,22 @@ arrives.
 | Escape | Close find, leaving the pane where it is |
 | `Cmd+F` | Back to the field with its text selected, to type over it |
 
+## Quick select
+
+`Cmd+Shift+Space` puts a key or two, solid in the tab's ink, on every URL,
+file path, commit hash, IP address and UUID on the focused pane's screen,
+and fades the rest of it. Type a target's keys to copy it, or type them
+with Shift to put it at the prompt. The targets nearest the bottom get the
+easiest keys, the same text gets the same keys wherever it appears, and the
+keys stay put while output moves underneath them.
+
+| Keys | Action |
+| --- | --- |
+| A target's letters | Copy it |
+| Shift and its letters | Type it at the prompt |
+| Backspace | Take back the last letter |
+| Escape or `Cmd+Shift+Space` | Close quick select |
+
 ## Links
 
 Hold `Cmd` over a link in a pane's output, an OSC 8 hyperlink or a URL

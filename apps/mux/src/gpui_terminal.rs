@@ -25,13 +25,15 @@ pub struct TerminalChrome {
 
 /// Places marked on the grid, such as what a find turned up. The current one
 /// is painted solid with its text in `current_text`; the rest take a wash
-/// under their own colours.
+/// under their own colours. With `dim`, text off the marks fades toward it
+/// so the marks stand out.
 #[derive(Clone, Debug, Default)]
 pub struct TerminalMarks {
     pub spans: Vec<MarkSpan>,
     pub wash: Hsla,
     pub current: Hsla,
     pub current_text: Rgb,
+    pub dim: Option<Rgb>,
 }
 
 /// A row of the viewport and the columns a mark covers, end exclusive.
@@ -44,11 +46,32 @@ pub struct MarkSpan {
 }
 
 impl TerminalMarks {
-    fn current_text_at(&self, row: usize, column: usize) -> Option<Rgb> {
-        self.spans
-            .iter()
-            .any(|span| span.current && span.row == row && (span.start..span.end).contains(&column))
-            .then_some(self.current_text)
+    /// The colour a cell's text takes: `current_text` on the current mark,
+    /// its own on the others, and faded toward `dim` off them all.
+    fn text_at(&self, row: usize, column: usize, own: Rgb) -> Rgb {
+        let mut marked = false;
+        for span in &self.spans {
+            if span.row == row && (span.start..span.end).contains(&column) {
+                if span.current {
+                    return self.current_text;
+                }
+                marked = true;
+            }
+        }
+        match self.dim {
+            Some(toward) if !marked => faded(own, toward),
+            _ => own,
+        }
+    }
+}
+
+/// A colour most of the way to `toward`: still legible, but fallen back.
+fn faded(own: Rgb, toward: Rgb) -> Rgb {
+    let mix = |own: u8, toward: u8| (f32::from(own) * 0.3 + f32::from(toward) * 0.7).round() as u8;
+    Rgb {
+        r: mix(own.r, toward.r),
+        g: mix(own.g, toward.g),
+        b: mix(own.b, toward.b),
     }
 }
 
@@ -306,9 +329,7 @@ fn prepare_runs(
 
             let start = column;
             let foreground_at = |column: usize, cell: &RenderCell| {
-                marks
-                    .current_text_at(row, column)
-                    .unwrap_or_else(|| effective_foreground(cell))
+                marks.text_at(row, column, effective_foreground(cell))
             };
             let run_style = RunStyle {
                 foreground: foreground_at(column, cell),

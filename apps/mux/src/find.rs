@@ -280,6 +280,7 @@ impl MuxApp {
             wash: ink.opacity(0.26),
             current: ink,
             current_text: rgb_of(GROUND),
+            dim: None,
         })
     }
 
@@ -522,7 +523,7 @@ fn searched_at(pane: &PaneReplica) -> (u64, u16, u16) {
     )
 }
 
-fn rgb_of(value: u32) -> Rgb {
+pub(super) fn rgb_of(value: u32) -> Rgb {
     let [_, r, g, b] = value.to_be_bytes();
     Rgb { r, g, b }
 }
