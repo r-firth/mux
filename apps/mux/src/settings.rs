@@ -58,7 +58,7 @@ impl AppSettings {
                     Some(AgentProfile {
                         id: id.clone(),
                         name: id.clone(),
-                        description: "Custom ACP agent · configured in settings.json".to_owned(),
+                        description: "your own, from settings.json".to_owned(),
                         spec: AgentSpec {
                             name: id.clone(),
                             command: expand_home(command),

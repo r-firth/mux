@@ -12,11 +12,12 @@ mod gpui_terminal;
 mod layout;
 mod session_sheet;
 mod settings;
+mod settings_sheet;
 
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -41,14 +42,12 @@ use gpui::{
     linear_gradient, point, px, rgb, size,
 };
 use gpui_component::{
-    InteractiveElementExt as _, Sizable as _, StyledExt as _, Theme as ComponentTheme, ThemeMode,
-    TitleBar, WindowExt as _,
+    InteractiveElementExt as _, Sizable as _, Theme as ComponentTheme, ThemeMode, TitleBar,
+    WindowExt as _,
     animation::cubic_bezier,
-    button::{Button, ButtonVariants as _},
     h_flex,
     input::{Enter, Input, InputEvent, InputState, Position, Textarea, TextareaState},
     notification::Notification,
-    switch::Switch,
     v_flex,
 };
 use gpui_terminal::{GridMetrics, TerminalRenderCache};
@@ -425,6 +424,7 @@ struct MuxApp {
     tab_inks: HashMap<TabId, Ink>,
     tab_rename: Option<TabRename>,
     session_sheet: Option<session_sheet::SessionSheet>,
+    settings_sheet: Option<settings_sheet::SettingsSheet>,
     selected_pane: Option<PaneId>,
     pending_focused_pane: Option<PaneId>,
     selection_drag: Option<TerminalPointerCapture>,
@@ -550,6 +550,7 @@ impl MuxApp {
             tab_inks: HashMap::new(),
             tab_rename: None,
             session_sheet: None,
+            settings_sheet: None,
             selected_pane: None,
             pending_focused_pane: None,
             selection_drag: None,
@@ -939,8 +940,7 @@ impl MuxApp {
         {
             self.backend
                 .send(CommandMessage::RefreshAgentFiles { pane_id });
-            // A field over the panes keeps the keyboard until it closes.
-            if self.session_sheet.is_none() && self.tab_rename.is_none() {
+            if !self.field_has_keyboard() {
                 self.focus_agent_composer(window);
             }
         } else if agent_pane.is_none_or(|pane_id| Some(pane_id) != self.terminal_input_pane_id())
@@ -1137,6 +1137,12 @@ impl MuxApp {
             self.agent_scroll_needs_settle.insert(tab_id);
             self.agent_scroll_for(tab_id).scroll_to_bottom();
         }
+    }
+
+    /// A sheet or a chip's rename field is open over the panes. It keeps the
+    /// keyboard until it closes, whatever the workspace does meanwhile.
+    fn field_has_keyboard(&self) -> bool {
+        self.tab_rename.is_some() || self.session_sheet.is_some() || self.settings_sheet.is_some()
     }
 
     fn focus_agent_composer(&self, window: &mut Window) {
@@ -1437,10 +1443,7 @@ impl MuxApp {
             // the window lost focus before GPUI delivered the prior key-up.
             self.terminal_key_presses.remove(&event.keystroke.key);
         }
-        if window.has_active_dialog(cx)
-            || window.has_active_sheet(cx)
-            || self.tab_rename.is_some()
-            || self.session_sheet.is_some()
+        if window.has_active_dialog(cx) || window.has_active_sheet(cx) || self.field_has_keyboard()
         {
             cx.propagate();
             return;
@@ -1617,98 +1620,13 @@ impl MuxApp {
             Action::OpenSessionSwitcher => self.toggle_session_sheet(window, cx),
             Action::DetachSession => cx.quit(),
             Action::OpenAgentSurface => self.toggle_agents(window, cx),
-            Action::OpenSettings => self.open_settings(window, cx),
+            Action::OpenSettings => self.toggle_settings_sheet(window, cx),
             Action::OpenCommandPalette => window.push_notification(
                 Notification::info("Command palette is being moved to GPUI"),
                 cx,
             ),
         }
         cx.notify();
-    }
-
-    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        info!("opening GPUI settings dialog");
-        let theme = BezelTheme::of(cx).clone();
-        let profiles = self.profiles.clone();
-        let settings_path = self
-            .state_dir
-            .as_ref()
-            .map(|path| path.join("settings.json"));
-        let app = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, _window, cx| {
-            let mut content = v_flex()
-                .gap_2()
-                .font_family(theme.font_sans.clone());
-            content = content.child(
-                h_flex()
-                    .items_start()
-                    .gap_2()
-                    .pb_1()
-                    .child(
-                        bezel_icons::icon(bezel_icons::TUNING)
-                            .size(px(16.0))
-                            .text_color(theme.accent),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .whitespace_normal()
-                            .text_sm()
-                            .line_height(px(20.0))
-                            .text_color(theme.text_muted)
-                            .child("ACP agents run out of process. Custom agents use Zed-compatible agent_servers entries; restart Mux after editing the file."),
-                    ),
-            );
-            if let Some(settings_path) = settings_path.clone() {
-                content = content.child(agent_settings_file_row(&app, &settings_path, &theme));
-            }
-            for profile in &profiles {
-                let profile_id = profile.id.clone();
-                let enabled = app
-                    .upgrade()
-                    .is_some_and(|entity| entity.read(cx).settings.agent_enabled(&profile_id));
-                let toggle_app = app.clone();
-                let title = profile.name.clone();
-                let description = profile.description.clone();
-                content = content.child(
-                    h_flex()
-                        .justify_between()
-                        .gap_4()
-                        .p_3()
-                        .rounded(px(BezelTheme::SURFACE_RADIUS))
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.surface_card)
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_sm().font_semibold().child(title))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.text_muted)
-                                        .child(description),
-                                ),
-                        )
-                        .child(
-                            Switch::new(SharedString::from(profile_id.clone()))
-                                .checked(enabled)
-                                .on_click(move |enabled, _window, cx| {
-                                    let _ = toggle_app.update(cx, |this, cx| {
-                                        this.settings.set_agent_enabled(&profile_id, *enabled);
-                                        if let Some(state_dir) = &this.state_dir
-                                            && let Err(error) = this.settings.save(state_dir)
-                                        {
-                                            error!(%error, "save settings");
-                                        }
-                                        cx.notify();
-                                    });
-                                }),
-                        ),
-                );
-            }
-            dialog.title("Settings").w(px(560.0)).child(content)
-        });
     }
 
     /// Rename the active tab in its own chip: the name turns into a field
@@ -3647,7 +3565,7 @@ impl Render for MuxApp {
             .on_action(cx.listener(Self::on_forward_terminal_tab))
             .on_action(cx.listener(Self::on_forward_terminal_backtab))
             .on_action(cx.listener(|this, _: &OpenMuxSettings, window, cx| {
-                this.open_settings(window, cx);
+                this.toggle_settings_sheet(window, cx);
             }))
             .on_key_down(cx.listener(Self::handle_key_down))
             .on_key_up(cx.listener(Self::handle_key_up))
@@ -3723,10 +3641,8 @@ impl Render for MuxApp {
                 root = root.child(pane_focus_hint(geometry.rect, *letter, self.active_ink()));
             }
         }
-        if let Some(sheet) = self.render_session_sheet(cx) {
-            root = root.child(sheet);
-        }
-        root
+        root.children(self.render_session_sheet(cx))
+            .children(self.render_settings_sheet(cx))
     }
 }
 
@@ -4055,71 +3971,6 @@ fn cancel_agent_turn(app: &gpui::WeakEntity<MuxApp>, window: &mut Window, cx: &m
         cx.notify();
     });
     cx.stop_propagation();
-}
-
-fn agent_settings_file_row(
-    app: &gpui::WeakEntity<MuxApp>,
-    settings_path: &Path,
-    theme: &BezelTheme,
-) -> gpui::AnyElement {
-    let reveal_app = app.clone();
-    let reveal_path = settings_path.to_path_buf();
-    h_flex()
-        .w_full()
-        .min_w_0()
-        .gap_2()
-        .p_2()
-        .rounded(px(BezelTheme::CONTROL_RADIUS))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.code_wash)
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .truncate()
-                .font_family(theme.font_mono.clone())
-                .text_xs()
-                .text_color(theme.text_muted)
-                .child(settings_path.display().to_string()),
-        )
-        .child(
-            Button::new("reveal-agent-settings")
-                .label("Reveal")
-                .ghost()
-                .small()
-                .compact()
-                .on_click(move |_, window, cx| {
-                    let saved = reveal_app
-                        .update(cx, |this, _| {
-                            let Some(state_dir) = this.state_dir.as_ref() else {
-                                return Err(anyhow!("settings directory unavailable"));
-                            };
-                            this.settings.save(state_dir)
-                        })
-                        .unwrap_or_else(|error| Err(anyhow!(error)));
-                    if let Err(error) = saved {
-                        window.push_notification(
-                            Notification::error(format!(
-                                "Could not create settings.json: {error:#}"
-                            )),
-                            cx,
-                        );
-                        return;
-                    }
-                    if let Err(error) = Command::new("/usr/bin/open")
-                        .arg("-R")
-                        .arg(&reveal_path)
-                        .spawn()
-                    {
-                        window.push_notification(
-                            Notification::error(format!("Could not reveal settings.json: {error}")),
-                            cx,
-                        );
-                    }
-                }),
-        )
-        .into_any_element()
 }
 
 const fn agent_session_is_visible(status: AgentSessionStatus) -> bool {
