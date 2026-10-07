@@ -41,7 +41,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   release-pr:
+    # After the release is published, so release-please finds it and starts
+    # the next release PR from it, not from the release before. A failed
+    # publish still lets the release PR be brought up to date.
+    needs: release
     if: >-
+      !cancelled() &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main'
