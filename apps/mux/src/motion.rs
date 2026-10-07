@@ -9,10 +9,10 @@
 //! at once and rides its slab's corner at that size, so a program redraws
 //! once for the change rather than on every frame of the glide.
 //!
-//! When focus moves and the layout holds still, the glow lifts off the slab
-//! that had focus and slides beneath the slabs to the one that has it now,
-//! lighting the gaps on the way; that slab takes its ink edge and grows its
-//! notch once the glow arrives.
+//! When focus moves and the layout holds still, the light in the ground's
+//! grain lifts off the slab that had focus and slides beneath the slabs to
+//! the one that has it now, lighting the gaps on the way; that slab takes its
+//! ink edge and grows its notch once the light arrives.
 
 use super::*;
 
@@ -437,21 +437,6 @@ impl MuxApp {
                 );
             }
         }
-    }
-
-    /// The focus glow on its own, crossing between panes: the light a
-    /// focused slab casts, drawn beneath the slabs so it shows in the gaps,
-    /// blooming as it goes.
-    pub(super) fn render_crossing_glow(&self, frame: layout::Rect, bloom: f32) -> gpui::AnyElement {
-        div()
-            .absolute()
-            .left(px(frame.x))
-            .top(px(frame.y))
-            .w(px(frame.width))
-            .h(px(frame.height))
-            .rounded(px(12.0))
-            .shadow(focus_glow(self.active_ink(), 1.0 + bloom * 1.2))
-            .into_any_element()
     }
 
     /// A pane the layout no longer has: its slab, quiet, and what it last
