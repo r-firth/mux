@@ -500,8 +500,10 @@ struct MuxApp {
     seam_pointer: Option<seams::SeamPointer>,
     seam_settle: Option<seams::SeamSettle>,
     layout_motion: motion::LayoutMotion,
-    /// The grain the slabs sit on, and the grain laid for this frame.
-    ground: ground::Ground,
+    /// The grain the slabs sit on, which its own view lays and draws; that
+    /// view; and the grain it laid last.
+    ground: ground::SharedGround,
+    ground_view: Entity<ground::GroundView>,
     grain: Option<Rc<ground::Grain>>,
     /// Each pane's recent output, to tell a pane at work from one echoing
     /// what is typed, and the pane a key last went to, and when.
@@ -538,6 +540,7 @@ struct MuxApp {
 
 struct MuxLayerHost {
     view: Entity<MuxApp>,
+    ground: Entity<ground::GroundView>,
 }
 
 fn create_agent_input(
@@ -600,6 +603,12 @@ impl MuxApp {
         backend.send(CommandMessage::ListAgents);
         info!("GPUI workspace view initialized");
         Self::spawn_backend_event_loop(receiver, window, cx);
+        // This view is kept from frame to frame until told otherwise, and
+        // what it shows depends on whether the window is in front.
+        cx.observe_window_activation(window, |_, _, cx| cx.notify())
+            .detach();
+        let ground = ground::SharedGround::default();
+        let ground_view = cx.new(|cx| ground::GroundView::new(Rc::clone(&ground), window, cx));
 
         let profiles = merge_agent_profiles(&settings);
         Self::check_agent_availability(&profiles, window, cx);
@@ -657,7 +666,8 @@ impl MuxApp {
             seam_pointer: None,
             seam_settle: None,
             layout_motion: motion::LayoutMotion::default(),
-            ground: ground::Ground::default(),
+            ground,
+            ground_view,
             grain: None,
             pane_activity: HashMap::new(),
             last_key: Cell::new(None),
@@ -4055,13 +4065,10 @@ impl Render for MuxApp {
                 }
             }));
         let drawn = self.draw_layout(&geometry, viewport, window);
-        let grain = self.lay_ground(&drawn, viewport, window, cx);
-        self.grain = Some(Rc::clone(&grain));
+        self.publish_ground(&drawn, viewport, window, cx);
         let mut root = Self::with_pointer_capture(root, cx)
-            .bg(color(GROUND))
             .font_family(EMBEDDED_TERMINAL_FONT)
             .text_color(theme.text)
-            .child(ground::paint(&grain))
             .child(self.render_tabs(cx));
 
         let zoomed = self
@@ -4315,7 +4322,19 @@ impl Render for MuxLayerHost {
             .relative()
             .size_full()
             .overflow_hidden()
-            .child(self.view.clone());
+            // The ground under everything, then the panes. The panes' view
+            // is kept from one frame to the next until something in it
+            // changes, so the ground can move without it being drawn again.
+            .child(self.ground.clone())
+            .child(
+                self.view.clone().cached(
+                    gpui::StyleRefinement::default()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                ),
+            );
         if let Some(sheet) = gpui_component::Root::render_sheet_layer(window, cx) {
             root = root.child(sheet);
         }
@@ -5236,7 +5255,8 @@ fn run_graphical_application(
                         bezel_theme::appearance::observe_window(window, cx).detach();
                         let view = cx
                             .new(|cx| MuxApp::new(window, cx, state_dir, settings, settings_error));
-                        let host = cx.new(|_| MuxLayerHost { view });
+                        let ground = view.read(cx).ground_view.clone();
+                        let host = cx.new(|_| MuxLayerHost { view, ground });
                         cx.new(|cx| gpui_component::Root::new(host, window, cx))
                     }
                 },
