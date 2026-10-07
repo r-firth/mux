@@ -2,9 +2,9 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 #[cfg(feature = "ghostty")]
 use std::sync::OnceLock;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, sync_channel};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mux_protocol::{ProcessExit, ServerEvent, SpawnCommand};
 #[cfg(not(feature = "ghostty"))]
@@ -26,6 +26,8 @@ use tracing::{debug, error, warn};
 const READ_BUFFER_SIZE: usize = 64 * 1024;
 const OUTPUT_BATCH_SIZE: usize = 64 * 1024;
 const OUTPUT_BATCH_IDLE: Duration = Duration::from_micros(500);
+/// Output that comes this soon after the last batch is part of a stream.
+const OUTPUT_STREAM_GAP: Duration = Duration::from_millis(2);
 
 #[derive(Debug)]
 struct ForegroundProcessTracker {
@@ -72,8 +74,15 @@ struct PaneOutputWorker {
 impl PaneOutputWorker {
     fn run(self, output_receiver: &Receiver<Vec<u8>>) {
         let mut foreground = ForegroundProcessTracker::new(self.shell_process_id);
+        let mut last_batch: Option<Instant> = None;
         while let Ok(first) = output_receiver.recv() {
-            let (mut bytes, disconnected) = collect_output_batch(first, output_receiver);
+            // Output after a lull, such as the echo of a key, goes out at
+            // once. Output that keeps coming waits a moment for more, so a
+            // flood is applied and sent in large batches.
+            let streaming = last_batch.is_some_and(|at| at.elapsed() < OUTPUT_STREAM_GAP);
+            let wait = streaming.then_some(OUTPUT_BATCH_IDLE);
+            let (mut bytes, disconnected) = collect_output_batch(first, output_receiver, wait);
+            last_batch = Some(Instant::now());
             let shell_regained = foreground.observe(foreground_process_id(&self.master));
             let (output_sequence, responses, reset_keyboard) = match self
                 .apply_terminal_output(&bytes, shell_regained)
@@ -140,10 +149,22 @@ impl PaneOutputWorker {
     }
 }
 
-fn collect_output_batch(first: Vec<u8>, receiver: &Receiver<Vec<u8>>) -> (Vec<u8>, bool) {
+/// The output from `first` on as one batch: what is already queued, then,
+/// with a `wait`, what follows before the queue has been empty that long.
+fn collect_output_batch(
+    first: Vec<u8>,
+    receiver: &Receiver<Vec<u8>>,
+    wait: Option<Duration>,
+) -> (Vec<u8>, bool) {
     let mut bytes = first;
     while bytes.len() < OUTPUT_BATCH_SIZE {
-        match receiver.recv_timeout(OUTPUT_BATCH_IDLE) {
+        let next = match (receiver.try_recv(), wait) {
+            (Ok(next), _) => Ok(next),
+            (Err(TryRecvError::Empty), Some(wait)) => receiver.recv_timeout(wait),
+            (Err(TryRecvError::Empty), None) => Err(RecvTimeoutError::Timeout),
+            (Err(TryRecvError::Disconnected), _) => Err(RecvTimeoutError::Disconnected),
+        };
+        match next {
             Ok(next) => bytes.extend_from_slice(&next),
             Err(RecvTimeoutError::Timeout) => return (bytes, false),
             Err(RecvTimeoutError::Disconnected) => return (bytes, true),
@@ -400,7 +421,53 @@ pub enum PaneError {
 
 #[cfg(test)]
 mod tests {
-    use super::ForegroundProcessTracker;
+    use std::sync::mpsc::sync_channel;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use super::{ForegroundProcessTracker, OUTPUT_BATCH_SIZE, collect_output_batch};
+
+    #[test]
+    fn queued_output_joins_the_batch_without_a_wait() {
+        let (sender, receiver) = sync_channel(8);
+        sender.send(b"b".to_vec()).unwrap();
+        sender.send(b"c".to_vec()).unwrap();
+
+        let started = Instant::now();
+        let (bytes, disconnected) = collect_output_batch(b"a".to_vec(), &receiver, None);
+
+        assert_eq!(bytes, b"abc");
+        assert!(!disconnected);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_stream_waits_for_output_that_follows() {
+        let (sender, receiver) = sync_channel(8);
+        let writer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            sender.send(b"b".to_vec()).unwrap();
+        });
+
+        let (bytes, disconnected) =
+            collect_output_batch(b"a".to_vec(), &receiver, Some(Duration::from_secs(10)));
+
+        writer.join().unwrap();
+        assert_eq!(bytes, b"ab");
+        assert!(disconnected);
+    }
+
+    #[test]
+    fn a_batch_stops_growing_once_it_is_full() {
+        let (sender, receiver) = sync_channel(8);
+        sender.send(vec![b'b'; OUTPUT_BATCH_SIZE]).unwrap();
+        sender.send(b"c".to_vec()).unwrap();
+
+        let (bytes, _) = collect_output_batch(b"a".to_vec(), &receiver, None);
+
+        assert_eq!(bytes.len(), OUTPUT_BATCH_SIZE + 1);
+        assert_eq!(receiver.try_recv().unwrap(), b"c");
+    }
 
     #[test]
     fn foreground_tracker_reports_a_child_to_shell_transition_once() {
