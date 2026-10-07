@@ -103,6 +103,10 @@ const INITIAL_USER_EVENT_BATCH_CAPACITY: usize = 8;
 /// One step of the agent pane's breath; eight make a cycle.
 const AGENT_PULSE_MS: u64 = 300;
 const MAX_USER_EVENT_BATCH: usize = 256;
+/// Terminal output applied in one go before the window gets a turn. Parsing
+/// is the slow part of a flood, and this much takes a few milliseconds, so
+/// keys and frames still get in while a pane pours out output.
+const MAX_USER_EVENT_BATCH_OUTPUT: usize = 256 * 1024;
 
 struct MuxAssets;
 
@@ -851,11 +855,13 @@ impl MuxApp {
             while let Ok(first_event) = receiver.recv().await {
                 let first_label = first_event.label();
                 let mut batch = Vec::with_capacity(INITIAL_USER_EVENT_BATCH_CAPACITY);
+                let mut output = first_event.output_len();
                 batch.push(first_event);
-                while batch.len() < MAX_USER_EVENT_BATCH {
+                while batch.len() < MAX_USER_EVENT_BATCH && output < MAX_USER_EVENT_BATCH_OUTPUT {
                     let Ok(event) = receiver.try_recv() else {
                         break;
                     };
+                    output += event.output_len();
                     batch.push(event);
                 }
                 debug!(
@@ -870,6 +876,12 @@ impl MuxApp {
                         }
                     });
                 });
+                // While more is already waiting, the next receive would carry
+                // straight on without the window ever handling a key or
+                // drawing; step aside once so both can go first.
+                if !receiver.is_empty() {
+                    yield_now().await;
+                }
             }
         })
         .detach();
@@ -4040,7 +4052,30 @@ impl MuxApp {
     }
 }
 
+/// Let everything else waiting on the main thread run before carrying on.
+async fn yield_now() {
+    let mut yielded = false;
+    std::future::poll_fn(|cx| {
+        if yielded {
+            std::task::Poll::Ready(())
+        } else {
+            yielded = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+}
+
 impl UserEvent {
+    /// The terminal output this event carries, in bytes.
+    fn output_len(&self) -> usize {
+        match self {
+            Self::Server(ServerEvent::PaneOutput { bytes, .. }) => bytes.len(),
+            _ => 0,
+        }
+    }
+
     const fn label(&self) -> &'static str {
         match self {
             Self::Attached(_) => "attached",
