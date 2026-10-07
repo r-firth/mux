@@ -143,7 +143,7 @@ impl MuxApp {
         find.query = query;
         let scroll = pane.frame.scroll;
         let bottom = usize::try_from(scroll.offset + scroll.len.max(1) - 1).unwrap_or(usize::MAX);
-        match pane.with_engine(|engine| engine.screen_text()) {
+        match pane.engine.screen_text() {
             Ok(text) => find.search(&text, false, bottom),
             Err(error) => {
                 error!(pane_id = %find.pane_id, %error, "could not read the pane to find in it");
@@ -172,7 +172,7 @@ impl MuxApp {
         };
         find.current = Some(next);
         if let Some(pane) = self.panes.get(&find.pane_id)
-            && let Ok(text) = pane.with_engine(|engine| engine.screen_text())
+            && let Ok(text) = pane.engine.screen_text()
         {
             text.lines()
                 .nth(find.found[next].row)
@@ -240,7 +240,7 @@ impl MuxApp {
         }
         find.searched = searched;
         find.searched_when = Instant::now();
-        if let Ok(text) = pane.with_engine(|engine| engine.screen_text()) {
+        if let Ok(text) = pane.engine.screen_text() {
             find.search(&text, true, usize::MAX);
         }
     }
@@ -517,7 +517,7 @@ fn columns_of(cells: &[RenderCell], start: usize, end: usize) -> Option<(usize, 
 
 fn searched_at(pane: &PaneReplica) -> (u64, u16, u16) {
     (
-        pane.with_engine(|engine| engine.next_output_sequence()),
+        pane.engine.next_output_sequence(),
         pane.frame.cols,
         pane.frame.rows,
     )
