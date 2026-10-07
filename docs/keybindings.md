@@ -71,6 +71,14 @@ pane to its latest output.
 | `Cmd+PageUp` / `Cmd+PageDown` | Move a page through the history |
 | `Shift+PageUp` / `Shift+PageDown` | The same, unless the program has no history (a full-screen program keeps them) |
 
+## Panes that call
+
+A pane out of sight that rings the bell, or sends a desktop notification
+(OSC 9 or OSC 777, as Claude Code and Codex do when they want you), is marked
+until it is looked at. Its tab's dot turns peach with what it said beside the
+name, and in the tab on screen the pane's head says it. While Mux is in the
+background, the first call also bounces its Dock icon.
+
 ## Exited panes
 
 A shell that exits cleanly in the pane being typed in closes that pane, or its
