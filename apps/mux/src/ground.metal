@@ -28,6 +28,7 @@ struct Frame {
     float4 tones[16];
     float4 old_tones[16];
     float4 ground;
+    float4 slabs[$slabs$];
 };
 
 struct Corner {
@@ -107,6 +108,18 @@ fragment float4 ground_fragment(
     const float pitch = $pitch$;
     float scale = frame.clock.w;
     float2 here = in.position.xy / scale;
+    // Under a slab nothing of the ground shows: leave it dark and save the
+    // work. A slab's rounded corners do show a little, so they are lit.
+    for (int index = 0; index < int(frame.counts.z); index++) {
+        float4 slab = frame.slabs[index];
+        float2 into = here - slab.xy;
+        float2 left = slab.zw - into;
+        bool inside = into.x > 0.0 && into.y > 0.0 && left.x > 0.0 && left.y > 0.0;
+        bool cornered = min(into.x, left.x) < $corner$ && min(into.y, left.y) < $corner$;
+        if (inside && !cornered) {
+            return float4(frame.ground.rgb, 1.0);
+        }
+    }
     uint2 at = uint2(here / pitch);
     // The middle of the dot this pixel belongs to: the light is worked out
     // there, so a dot is one colour all over.

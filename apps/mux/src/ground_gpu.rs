@@ -43,6 +43,9 @@ const WASH: f32 = 0.07;
 const CONTRAST: f32 = 1.35;
 const ACCENT: f32 = 2.2;
 
+/// The most slabs the shader is told of. Any more are still drawn over the
+/// ground; it is only that the ground is lit under them for nothing.
+const SLABS: usize = 12;
 /// The most busy panes and callers the shader lights; more than this at
 /// once are not shown.
 const MOST: usize = 8;
@@ -70,7 +73,7 @@ pub(super) struct GpuFrame {
     wake: [f32; 4],
     /// Where a new ink spreads from, how far it has got, whether one is.
     leaving: [f32; 4],
-    /// How many busy panes and callers follow.
+    /// How many busy panes, callers and slabs follow.
     counts: [f32; 4],
     /// Each slow field: where it is and how wide in points, how strong.
     blobs: [[f32; 4]; 8],
@@ -88,6 +91,8 @@ pub(super) struct GpuFrame {
     /// The same for an ink dissolving away.
     old_tones: [[f32; 4]; 16],
     ground: [f32; 4],
+    /// The slabs drawn solid over the ground, which it need not light under.
+    slabs: [[f32; 4]; SLABS],
 }
 
 fn rect(rect: layout::Rect) -> [f32; 4] {
@@ -180,6 +185,10 @@ impl Ground {
             }
         }
         frame.counts[1] = calls.len().min(MOST) as f32;
+        for (index, &slab) in scene.slabs.iter().take(SLABS).enumerate() {
+            frame.slabs[index] = rect(slab);
+        }
+        frame.counts[2] = scene.slabs.len().min(SLABS) as f32;
 
         let lit_here = field.then(|| Rc::new(self.grain(&laid, false)));
         (frame, lit_here)
@@ -191,6 +200,8 @@ fn shader() -> String {
     let number = |value: f32| format!("{value:?}");
     [
         ("most", MOST.to_string()),
+        ("slabs", SLABS.to_string()),
+        ("corner", number(CORNER)),
         ("pitch", number(PITCH)),
         ("dot_size", number(DOT_SIZE)),
         ("dot_swell", number(DOT_SWELL)),
