@@ -15,7 +15,7 @@ mod settings;
 mod settings_sheet;
 
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
@@ -430,6 +430,12 @@ struct MuxApp {
     /// it, so closing a tab never repaints its neighbours.
     tab_inks: HashMap<TabId, Ink>,
     tab_rename: Option<TabRename>,
+    /// The chips scroll sideways when there are more than fit. They keep the
+    /// active tab in view until scrolled by hand, and take it up again when
+    /// the tab, or the mode (which widens chips with jump numbers), changes.
+    tab_strip_scroll: ScrollHandle,
+    tab_strip_active: Cell<Option<(TabId, InputMode)>>,
+    tab_strip_follow: Cell<bool>,
     strip_message: Option<StripMessage>,
     strip_serial: u64,
     /// The focused pane's size shows in its head while sizes are changing
@@ -559,6 +565,9 @@ impl MuxApp {
             agent_unseen: HashSet::new(),
             tab_inks: HashMap::new(),
             tab_rename: None,
+            tab_strip_scroll: ScrollHandle::new(),
+            tab_strip_active: Cell::new(None),
+            tab_strip_follow: Cell::new(true),
             strip_message: None,
             strip_serial: 0,
             size_readout: false,
@@ -3223,11 +3232,32 @@ impl MuxApp {
     }
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut tabs = h_flex().flex_none().items_center().gap(px(2.0));
+        // Past what fits, the chips scroll rather than push the session's
+        // name off the end of the strip.
+        let mut tabs = h_flex()
+            .id("tab-chips")
+            .min_w(px(0.0))
+            .overflow_x_scroll()
+            .track_scroll(&self.tab_strip_scroll)
+            .on_scroll_wheel(cx.listener(|this, _, _, _| this.tab_strip_follow.set(false)))
+            .items_center()
+            .gap(px(2.0));
         if let Some(session) = &self.session {
             for (position, tab) in session.tabs.iter().enumerate() {
                 let active = tab.id == session.active_tab;
                 tabs = tabs.child(self.render_tab_chip(position, tab, active, cx));
+            }
+            let shown = Some((session.active_tab, self.mode));
+            if self.tab_strip_active.replace(shown) != shown {
+                self.tab_strip_follow.set(true);
+            }
+            if self.tab_strip_follow.get()
+                && let Some(position) = session
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.id == session.active_tab)
+            {
+                self.tab_strip_scroll.scroll_to_item(position);
             }
         }
 
@@ -3348,8 +3378,13 @@ impl MuxApp {
         } else {
             self.active_ink().color()
         };
+        // When the strip is short of room, hints that don't fit wrap onto a
+        // second line that is clipped away, so none is ever cut in half.
         let mut row = h_flex()
             .min_w(px(0.0))
+            .h(px(24.0))
+            .flex_wrap()
+            .justify_end()
             .overflow_hidden()
             .gap(px(4.0))
             .text_color(color(FAINT_TEXT));
