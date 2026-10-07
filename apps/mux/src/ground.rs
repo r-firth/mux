@@ -21,11 +21,17 @@ use gpui::{AnyElement, Edges, Pixels, canvas, fill};
 /// 255 sixteen times, so any density lights evenly spread cells.
 static NOISE: &[u8; 4096] = include_bytes!("../assets/blue-noise-64.bin");
 
-/// One step of the grain's clock, about twelve a second: often enough to
-/// read as moving, seldom enough to read as dither rather than video.
-const STEP_MS: u64 = 83;
-/// With nothing happening the tide still runs, a step in every two.
-const IDLE_STEPS: u64 = 2;
+/// One step of the grain's clock: finer than any display's frame, so the
+/// light moves on every frame the ground is drawn.
+const STEP_MS: u64 = 4;
+/// The slow fields are worked out afresh this often, in steps: they move too
+/// slowly to need more.
+const IDLE_STEPS: u64 = 8;
+/// How often the grain shimmers, in steps: a dozen times a second.
+const SHIMMER_STEPS: u64 = 20;
+/// The ground draws no oftener than this, however fast the display: sixty
+/// frames a second is smooth, and twice that would cost twice as much.
+const FRAME: Duration = Duration::from_millis(14);
 /// The tide: swells that cross the ground all the time and carry its light
 /// with them, so the grain is never still. How little of the ground's light
 /// a trough keeps and how much a crest adds of its own; then how far apart
@@ -61,8 +67,8 @@ const COOLING: Duration = Duration::from_millis(500);
 const FIELD_CELL: f32 = 12.0;
 /// A slab's corner radius: cells this close to a corner can show past it.
 const CORNER: f32 = 12.0;
-/// A window bigger than this many square points has cells two points a side.
-const FINE_AREA: f32 = 2.6e6;
+/// A cell of grain, in points: two a side, as gofer's is.
+const CELL: f32 = 2.0;
 /// The warm ink under everything, as red, green and blue.
 const GROUND_RGB: [f32; 3] = [12.0, 10.0, 9.0];
 
@@ -668,7 +674,8 @@ impl Field {
         // Each step a different few dots light a little early.
         let shimmer = |column: i32| match self.tide {
             Some((_, step))
-                if (u64::from(thresholds.raw(column, 3)) + step * 29) & 255 < SHIMMER_SHARE =>
+                if (u64::from(thresholds.raw(column, 3)) + step / SHIMMER_STEPS * 29) & 255
+                    < SHIMMER_SHARE =>
             {
                 SHIMMER
             }
@@ -739,15 +746,31 @@ impl Field {
         } else {
             1.0
         };
+        // Each swell's phase grows by the same angle from one cell to the
+        // next, so its sine is turned along the row rather than worked out
+        // afresh for every cell.
         let turn = std::f32::consts::TAU;
-        for (index, value) in values.iter_mut().enumerate() {
-            let x = (from as f32 + index as f32 + 0.5) * self.cell;
-            let wave = ((x * 0.86 + y * 0.5) / TIDE_WAVE.0 - time * TIDE_WAVE.1) * turn;
-            let cross = ((y * 0.86 - x * 0.5) / TIDE_CROSS.0 - time * TIDE_CROSS.1) * turn;
-            let crest = 0.5 + 0.5 * wave.sin();
-            let swell = crest * crest * (0.6 + 0.4 * cross.sin());
+        let x = (from as f32 + 0.5) * self.cell;
+        let start = |(across, down): (f32, f32), (apart, pace): (f32, f32)| {
+            let phase = ((x * across + y * down) / apart - time * pace) * turn;
+            let step = self.cell * across / apart * turn;
+            (phase.sin_cos(), step.sin_cos())
+        };
+        let (mut wave, wave_step) = start((0.86, 0.5), TIDE_WAVE);
+        let (mut cross, cross_step) = start((-0.5, 0.86), TIDE_CROSS);
+        let turned = |(sin, cos): (f32, f32), (step_sin, step_cos): (f32, f32)| {
+            (
+                sin * step_cos + cos * step_sin,
+                cos * step_cos - sin * step_sin,
+            )
+        };
+        for value in values.iter_mut() {
+            let crest = 0.5 + 0.5 * wave.0;
+            let swell = crest * crest * (0.6 + 0.4 * cross.0);
             let carried = TIDE_TROUGH + (1.6 - TIDE_TROUGH) * swell;
             *value = *value * (1.0 + (carried - 1.0) * reach) + TIDE_CREST * swell * reach;
+            wave = turned(wave, wave_step);
+            cross = turned(cross, cross_step);
         }
     }
 
@@ -971,10 +994,6 @@ pub(super) struct Ground {
     past: (f32, Option<Instant>),
     /// Whether the window is in front and moving things may move.
     running: bool,
-    /// Whether anything moves at every step, rather than drifting.
-    lively: bool,
-    /// Whether the clock that steps the ground is going.
-    pub(super) ticking: bool,
 }
 
 impl Default for Ground {
@@ -996,8 +1015,6 @@ impl Ground {
             wake: None,
             past: (0.0, None),
             running: false,
-            lively: false,
-            ticking: false,
         }
     }
 
@@ -1016,21 +1033,9 @@ impl Ground {
         (step * STEP_MS) as f32 / 1000.0
     }
 
-    /// Whether the ground is in the middle of a change that wants every
-    /// frame rather than every step: an ink dissolving.
-    pub(super) fn transitioning(&self) -> bool {
-        self.dissolve.is_some() || self.wake.is_some()
-    }
-
-    /// How long until the ground next needs drawing on its own, or `None`
-    /// when it holds still.
-    pub(super) fn next_step(&self, now: Instant) -> Option<Duration> {
-        if !self.running {
-            return None;
-        }
-        let every = if self.lively { 1 } else { IDLE_STEPS };
-        let next = (self.step(now) / every + 1) * every;
-        Some((self.epoch + Duration::from_millis(next * STEP_MS)).saturating_duration_since(now))
+    /// Whether the ground is moving, and so wants drawing again.
+    pub(super) fn moving(&self) -> bool {
+        self.dissolve.is_some() || self.wake.is_some() || self.running
     }
 
     /// Send a wake out when the tab has changed, and put away one that has
@@ -1120,11 +1125,6 @@ impl Ground {
         let past = (past * 16.0).round() / 16.0;
 
         self.running = scene.active && !still;
-        self.lively = !still
-            && (!scene.calls.is_empty()
-                || scene.busy.iter().any(|&(_, busy)| busy > 0.0)
-                || dissolve.is_some()
-                || (past - target).abs() > f32::EPSILON);
         let drift = if still {
             0
         } else {
@@ -1164,7 +1164,7 @@ impl Ground {
     fn grain(&mut self, laid: &Laid) -> Grain {
         let scene = &laid.scene;
         let (width, height) = scene.viewport;
-        let cell = if width * height > FINE_AREA { 2.0 } else { 1.0 };
+        let cell = CELL;
         let key = (width, height, laid.drift);
         let ambient = match &self.ambient {
             Some((cached, ambient)) if *cached == key => Rc::clone(ambient),
@@ -1227,7 +1227,7 @@ impl Ground {
             leaving: laid
                 .dissolve
                 .map(|(_, origin, reached)| Leaving::new(origin, reached)),
-            tide: (!scene.still).then(|| (Self::seconds(laid.drift), laid.drift)),
+            tide: (!scene.still).then(|| (Self::seconds(laid.step), laid.step)),
             wake: laid.wake,
             shades,
         });
@@ -1245,6 +1245,86 @@ impl Ground {
     }
 }
 
+/// What the window's two views share of the ground: the panes' view says
+/// what is on screen, and the ground's own view lays and draws the grain.
+#[derive(Default)]
+pub(super) struct Shared {
+    ground: Ground,
+    scene: Option<Scene>,
+    grain: Option<Rc<Grain>>,
+    /// Whether the panes' view is looking at the scene again while panes
+    /// are busy.
+    watching: bool,
+}
+
+pub(super) type SharedGround = Rc<RefCell<Shared>>;
+
+/// The ground as a view of its own, under the panes' view. While it moves
+/// it draws itself again every frame; the panes' view, which costs far more
+/// to draw, is left as it was.
+pub(super) struct GroundView {
+    shared: SharedGround,
+    drawn: Instant,
+    waiting: bool,
+}
+
+impl GroundView {
+    pub(super) fn new(shared: SharedGround, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // The ground stops when the window goes behind, and has to be drawn
+        // once to stop, and once to start again.
+        cx.observe_window_activation(window, |_, _, cx| cx.notify())
+            .detach();
+        Self {
+            shared,
+            drawn: Instant::now(),
+            waiting: false,
+        }
+    }
+
+    /// Draw again on the first frame at least `FRAME` after the last.
+    fn await_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.waiting = true;
+        cx.on_next_frame(window, |this, window, cx| {
+            if this.drawn.elapsed() >= FRAME {
+                this.waiting = false;
+                cx.notify();
+            } else {
+                this.await_frame(window, cx);
+            }
+        });
+    }
+}
+
+impl Render for GroundView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let now = Instant::now();
+        let laid = {
+            let mut shared = self.shared.borrow_mut();
+            let shared = &mut *shared;
+            shared.scene.clone().map(|mut scene| {
+                scene.active = window.is_window_active();
+                let grain = shared.ground.lay(scene, now);
+                shared.grain = Some(Rc::clone(&grain));
+                (grain, shared.ground.moving())
+            })
+        };
+        self.drawn = now;
+        let ground = div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .bg(color(GROUND));
+        let Some((grain, moving)) = laid else {
+            return ground;
+        };
+        if moving && !self.waiting {
+            self.await_frame(window, cx);
+        }
+        ground.child(paint(&grain))
+    }
+}
+
 impl MuxApp {
     /// What the ground shows this frame, given the layout as drawn.
     pub(super) fn ground_scene(
@@ -1254,7 +1334,7 @@ impl MuxApp {
         window: &Window,
         now: Instant,
     ) -> Scene {
-        let at = self.ground.step_began(now);
+        let at = self.ground.borrow().ground.step_began(now);
         let agent_pane = self.active_agent_pane();
         let mut slabs = Vec::new();
         let mut focus = drawn.ring.map(|(frame, _)| frame);
@@ -1366,44 +1446,59 @@ impl MuxApp {
         chip
     }
 
-    /// Lay the ground for this frame, keeping its clock going while
-    /// anything on it moves.
-    pub(super) fn lay_ground(
+    /// Hand the ground this frame's scene. The ground draws itself, in its
+    /// own view under this one, so its light can move on every frame without
+    /// the panes being drawn again.
+    pub(super) fn publish_ground(
         &mut self,
         drawn: &motion::DrawnLayout,
         viewport: gpui::Size<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Rc<Grain> {
+    ) {
         let now = Instant::now();
         let scene = self.ground_scene(drawn, viewport, window, now);
-        let grain = self.ground.lay(scene, now);
-        if self.ground.transitioning() {
-            window.request_animation_frame();
-        }
         self.pane_activity
             .retain(|_, activity| activity.is_recent(now));
-        if !self.ground.ticking && self.ground.next_step(now).is_some() {
-            self.ground.ticking = true;
+        let changed = {
+            let mut shared = self.ground.borrow_mut();
+            let changed = shared.scene.as_ref() != Some(&scene);
+            shared.scene = Some(scene);
+            self.grain.clone_from(&shared.grain);
+            changed
+        };
+        if changed {
+            let ground = self.ground_view.clone();
+            cx.defer(move |cx| ground.update(cx, |_, cx| cx.notify()));
+        }
+        // A pane's busyness fades with time, not with anything happening,
+        // so while any is busy the scene is looked at again a few times a
+        // second.
+        let watching = std::mem::replace(
+            &mut self.ground.borrow_mut().watching,
+            !self.pane_activity.is_empty(),
+        );
+        if !self.pane_activity.is_empty() && !watching {
             cx.spawn(async move |entity, cx| {
                 loop {
-                    let wait = entity
-                        .update(cx, |this, _| this.ground.next_step(Instant::now()))
-                        .ok()
-                        .flatten();
-                    let Some(wait) = wait else {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(250))
+                        .await;
+                    let watching = entity
+                        .update(cx, |this, cx| {
+                            cx.notify();
+                            let watching = !this.pane_activity.is_empty();
+                            this.ground.borrow_mut().watching = watching;
+                            watching
+                        })
+                        .unwrap_or(false);
+                    if !watching {
                         break;
-                    };
-                    cx.background_executor().timer(wait).await;
-                    if entity.update(cx, |_, cx| cx.notify()).is_err() {
-                        return;
                     }
                 }
-                let _ = entity.update(cx, |this, _| this.ground.ticking = false);
             })
             .detach();
         }
-        grain
     }
 
     /// Output reached a pane: a sign of work, unless it echoes typing.
@@ -1469,7 +1564,7 @@ mod tests {
     }
 
     fn cells(area: layout::Rect) -> f32 {
-        area.width * area.height
+        area.width * area.height / (CELL * CELL)
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -1546,8 +1641,8 @@ mod tests {
     fn the_same_step_paints_the_same_grain() {
         let epoch = Instant::now();
         let mut ground = Ground::new(epoch);
-        let first = ground.lay(scene(), epoch + Duration::from_millis(10));
-        let again = ground.lay(scene(), epoch + Duration::from_millis(60));
+        let first = ground.lay(scene(), epoch + Duration::from_millis(STEP_MS));
+        let again = ground.lay(scene(), epoch + Duration::from_millis(STEP_MS * 2 - 1));
         assert!(Rc::ptr_eq(&first, &again));
     }
 
@@ -1638,7 +1733,7 @@ mod tests {
             counts.iter().copied().max().unwrap_or_default(),
         );
         assert!(
-            most as f32 > least as f32 * 1.5 + 8.0,
+            most as f32 > least as f32 * 1.4,
             "the margin's grain barely changed as the tide passed: {counts:?}"
         );
     }
@@ -1712,7 +1807,7 @@ mod tests {
         let first = ground.lay(still.clone(), epoch);
         let later = ground.lay(still, epoch + Duration::from_secs(30));
         assert!(Rc::ptr_eq(&first, &later));
-        assert!(ground.next_step(epoch).is_none());
+        assert!(!ground.moving());
     }
 
     #[test]
@@ -1722,10 +1817,9 @@ mod tests {
         let mut away = scene();
         away.active = false;
         let _ = ground.lay(away, epoch);
-        assert!(ground.next_step(epoch).is_none());
+        assert!(!ground.moving());
         let _ = ground.lay(scene(), epoch);
-        let wait = ground.next_step(epoch).expect("running in front");
-        assert!(wait <= Duration::from_millis(STEP_MS * IDLE_STEPS));
+        assert!(ground.moving());
     }
 
     #[test]
