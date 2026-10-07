@@ -1399,11 +1399,24 @@ impl GroundView {
 impl Render for GroundView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(target_os = "macos")]
-        if let Some(moving) = self.draw_on_gpu(window) {
-            if moving && !self.waiting {
-                self.follow_frames(window, cx);
+        {
+            // While the ground is following the display's frames it has
+            // already been drawn for this one. Drawing it here as well would
+            // ask the layer for a second buffer in the same frame, and the
+            // main thread would wait a whole frame for one to come free:
+            // with a pane printing, that left the app stalled almost all of
+            // the time. The scene handed over is picked up on the next frame.
+            let drawn = if self.waiting && self.gpu.is_some() {
+                Some(false)
+            } else {
+                self.draw_on_gpu(window)
+            };
+            if let Some(moving) = drawn {
+                if moving && !self.waiting {
+                    self.follow_frames(window, cx);
+                }
+                return div().absolute().top_0().left_0().size_full();
             }
-            return div().absolute().top_0().left_0().size_full();
         }
         let now = Instant::now();
         let laid = {

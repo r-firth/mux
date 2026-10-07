@@ -306,6 +306,9 @@ impl Gpu {
         layer.set_framebuffer_only(true);
         layer.set_opaque(true);
         layer.set_presents_with_transaction(false);
+        // Each frame is shown as soon as it is drawn rather than held for the
+        // display, so asking for the next buffer never waits on the last.
+        layer.set_display_sync_enabled(false);
 
         // SAFETY: `content` is GPUI's live content view, on the main thread
         // that owns it, for as long as `window` is borrowed. The view made
