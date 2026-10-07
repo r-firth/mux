@@ -5,6 +5,74 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0](https://github.com/r-firth/mux/compare/v0.8.2...v0.9.0) (2026-10-07)
+
+
+### Features
+
+* a change of tab sends a wake of grain across the window ([b01f0df](https://github.com/r-firth/mux/commit/b01f0df48156ec19c141ba59949cb08db6f6706a))
+* a living ground that shows focus, work and calls ([aba3c5f](https://github.com/r-firth/mux/commit/aba3c5f32ea4607ed76d299475ac3bbce1b9bbdc))
+* a pane says when its shell has exited ([a4467cd](https://github.com/r-firth/mux/commit/a4467cd4fa21bd49fbdf68bf7b3a07e4dc9eeef5))
+* a pane's size shows while it changes, then goes ([e0007b1](https://github.com/r-firth/mux/commit/e0007b1e179a46e62985a3b9882ae68da271fa5b))
+* a pane's title sits on its edge, not in a row of its own ([4e9dcf4](https://github.com/r-firth/mux/commit/4e9dcf400136fc327e739b223c4df49c8f4d8bb3))
+* a strip that holds twenty tabs ([e34c3a6](https://github.com/r-firth/mux/commit/e34c3a659a8dd9778083daca4bb922024ae202c5))
+* a tide keeps the resting ground moving ([d302365](https://github.com/r-firth/mux/commit/d3023657b38d302dcc8c88e60cfa51dc0341da04))
+* answer slash commands in the composer, not in toasts ([99ee5c8](https://github.com/r-firth/mux/commit/99ee5c8749d189696567046caec1881265523cd8))
+* calmer tab strip, roomier slabs, gofer grain ([5abdd64](https://github.com/r-firth/mux/commit/5abdd645c976cf34b728a9ab994699b5c138088b))
+* cmd-click opens links in a pane's output ([21b3ec4](https://github.com/r-firth/mux/commit/21b3ec4e7ae060aa510a6ad30fe287831c927b90))
+* cmd-f finds text in a pane, history included ([f501d97](https://github.com/r-firth/mux/commit/f501d9765517a8b9e21f46496f7aae891b3f1231))
+* cmd-p goes to any tab, pane, session or command ([73e239c](https://github.com/r-firth/mux/commit/73e239c8898d381379519bfedc6e21e0e4ebe6b2))
+* drag the gap between panes to resize them ([8090913](https://github.com/r-firth/mux/commit/8090913e586a625597ec1e52f8db95d44faef4f5))
+* errors say themselves in the strip, tooltips in mono ([f793d14](https://github.com/r-firth/mux/commit/f793d14baabdaeb07f54fa181d73badfcf1d6885))
+* install a missing agent from the launcher ([588639d](https://github.com/r-firth/mux/commit/588639dd79699a1b7bdb021aa839c454a55f38dd))
+* no two of the ground's dots are alike ([acb1181](https://github.com/r-firth/mux/commit/acb11817fb344884922dc537ad5064c183fdee54))
+* panes keep Ghostty's history, even across tab switches ([610665f](https://github.com/r-firth/mux/commit/610665f0908c45f8efd6d1d95951915683909983))
+* panes out of sight say when they want you ([63aa900](https://github.com/r-firth/mux/commit/63aa9005f7cb25eae1506e5b59b45c15fdff1fb5))
+* quick select puts a key on every URL, path and hash on screen ([89bc221](https://github.com/r-firth/mux/commit/89bc2215655e755cc7a5852e8fc152d48bfd2c26))
+* rebuild the agent pane in gofer's style ([be5ce5e](https://github.com/r-firth/mux/commit/be5ce5e07476e5deda7ed60029af314d5f79d5ba))
+* rename a tab in its own chip ([af99ae5](https://github.com/r-firth/mux/commit/af99ae51317528771900d7f67dba18084968fc54))
+* sessions in a sheet under the session's name ([4ad52cf](https://github.com/r-firth/mux/commit/4ad52cfc26f31163cedf23b18648d4b4d0096214))
+* settings as a slab of agents, read fresh each time ([86d1282](https://github.com/r-firth/mux/commit/86d12820ff62133b1803b27d6ecc0f1b8bc6bbd4))
+* slabs glide into place, and focus glows across ([f430769](https://github.com/r-firth/mux/commit/f43076937cfacf204352da3a37e32f63641b0728))
+* steadier keys and clearer steps in the agent pane ([ece460c](https://github.com/r-firth/mux/commit/ece460c8e07601c96bbdb7793420ec3233bc6da8))
+* the grain moves on every frame, in a view of its own ([2d670f2](https://github.com/r-firth/mux/commit/2d670f2f0d03bcf60be7a29119c170fe191cff08))
+* the ground is a panel of round dots ([02d3243](https://github.com/r-firth/mux/commit/02d3243ca378e9164d25c05db325d5a154aa7acb))
+* the ground is drawn by the GPU ([04fad24](https://github.com/r-firth/mux/commit/04fad24e1e00b7ecbe3e4d6bfb0997badeec260e))
+* the ground is the same dots wherever it is drawn ([a716844](https://github.com/r-firth/mux/commit/a716844d5df4dc99fecdfa6fcfef4dfdabbe1d30))
+* the strip says what a copy took ([e29d2e5](https://github.com/r-firth/mux/commit/e29d2e58075e0219c86b19f3dc2273dec39c4e91))
+* typing returns a scrolled pane to its latest output ([516373e](https://github.com/r-firth/mux/commit/516373e686143076a86d3b8de5255dc575a3c1d9))
+* warm slab chrome with per-tab inks ([4748fa2](https://github.com/r-firth/mux/commit/4748fa23380048a6173f0e76778f3437f6624da4))
+
+
+### Bug Fixes
+
+* a drag whose release was missed no longer holds the pointer ([b895809](https://github.com/r-firth/mux/commit/b8958095bf4056698289184733aa9c12eb006722))
+* a tab's only pane wears its legend too ([1324b4c](https://github.com/r-firth/mux/commit/1324b4c0a533043b6197ba0b5dddd5654ec2e0ff))
+* bring back the dithered grounds ([e0ad6e7](https://github.com/r-firth/mux/commit/e0ad6e734f8fb4c14310be52b5a2160adb334c2f))
+* go to sits beside the session name, apart from ctrl-p ([a4cfdb7](https://github.com/r-firth/mux/commit/a4cfdb74b4968ea3c1bbf68d7513c1bb5b06c446))
+* keep a macOS-only field out of other builds ([314ecc5](https://github.com/r-firth/mux/commit/314ecc5359bbb0133940451fa8d8af785aa7d5b5))
+* the agent pane's head no longer spells out the folder name ([6603c41](https://github.com/r-firth/mux/commit/6603c41f7ecc8c76b59fc74732aba38e3703bdfd))
+* the first tab keeps clear of the traffic lights ([6c68658](https://github.com/r-firth/mux/commit/6c68658c765cb3b937df6caa5b7dc747257f2bdf))
+* the wake runs through the grain, never over a pane ([4f340e3](https://github.com/r-firth/mux/commit/4f340e36da0797cfe9c2d976255112b018931b5c))
+
+
+### Performance Improvements
+
+* a frame rewrites only the rows that changed ([9b98f89](https://github.com/r-firth/mux/commit/9b98f898ddc12a41a77ab2c9c0d2acbfa1ff36d0))
+* a pane that didn't change is not drawn again ([50658a6](https://github.com/r-firth/mux/commit/50658a64584921e5ce9b215daac70d8b8502d5dd))
+* a typed key's echo is sent without waiting ([0b561a5](https://github.com/r-firth/mux/commit/0b561a57e75a5daec1cb5a01c3799bbac74ef6e3))
+* backgrounds are painted as runs, not cell by cell ([7e2226d](https://github.com/r-firth/mux/commit/7e2226da4e8944e0f9d76e9fcfb2895938c91a37))
+* heavy output no longer freezes the window ([35a04ef](https://github.com/r-firth/mux/commit/35a04ef80e77cf02f05b6ed76f85901f2b8a03b7))
+* pane output is parsed on a thread of its own ([9a30bb1](https://github.com/r-firth/mux/commit/9a30bb17033c8c62a3894e9398488d8a860a5660))
+* read pane output as byte runs ([85238cf](https://github.com/r-firth/mux/commit/85238cf248d8ceb15bfc28bf450d1488ece0f505))
+* skip the dots under panes ([1a3dd5f](https://github.com/r-firth/mux/commit/1a3dd5f09e8cda290e98a3b39c7549bc4de69744))
+* the ground no longer stalls the app while a pane prints ([baf0c47](https://github.com/r-firth/mux/commit/baf0c47ecedcd6dde7633a5115d211d8bc93fa98))
+
+
+### Reverts
+
+* the ground is the same dots wherever it is drawn ([ff7c658](https://github.com/r-firth/mux/commit/ff7c658d0cab61805f5fc2ec78c675d528676a08))
+
 ## [0.8.2](https://github.com/r-firth/mux/compare/v0.8.1...v0.8.2) (2026-08-21)
 
 
