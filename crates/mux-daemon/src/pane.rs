@@ -28,6 +28,9 @@ const OUTPUT_BATCH_SIZE: usize = 64 * 1024;
 const OUTPUT_BATCH_IDLE: Duration = Duration::from_micros(500);
 /// Output that comes this soon after the last batch is part of a stream.
 const OUTPUT_STREAM_GAP: Duration = Duration::from_millis(2);
+/// How long output after a lull waits for more: long enough that a screen
+/// drawn in one go is sent whole, short enough not to hold up a key's echo.
+const OUTPUT_LULL_IDLE: Duration = Duration::from_micros(150);
 
 #[derive(Debug)]
 struct ForegroundProcessTracker {
@@ -76,12 +79,18 @@ impl PaneOutputWorker {
         let mut foreground = ForegroundProcessTracker::new(self.shell_process_id);
         let mut last_batch: Option<Instant> = None;
         while let Ok(first) = output_receiver.recv() {
-            // Output after a lull, such as the echo of a key, goes out at
-            // once. Output that keeps coming waits a moment for more, so a
-            // flood is applied and sent in large batches.
+            // Output after a lull, such as the echo of a key, goes out almost
+            // at once, with the rest of the screen if more is being drawn.
+            // Output that keeps coming waits a moment for more, so a flood is
+            // applied and sent in large batches.
             let streaming = last_batch.is_some_and(|at| at.elapsed() < OUTPUT_STREAM_GAP);
-            let wait = streaming.then_some(OUTPUT_BATCH_IDLE);
-            let (mut bytes, disconnected) = collect_output_batch(first, output_receiver, wait);
+            let wait = if streaming {
+                OUTPUT_BATCH_IDLE
+            } else {
+                OUTPUT_LULL_IDLE
+            };
+            let (mut bytes, disconnected) =
+                collect_output_batch(first, output_receiver, Some(wait));
             last_batch = Some(Instant::now());
             let shell_regained = foreground.observe(foreground_process_id(&self.master));
             let (output_sequence, responses, reset_keyboard) = match self
