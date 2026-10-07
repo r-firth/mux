@@ -33,7 +33,9 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 /// share of that, and how much bigger it burns; how bright a dot the light
 /// has not reached is, against one it has; and how brightly the light glows
 /// on the ground under the dots.
-const PITCH: f32 = CELL;
+const PITCH: f32 = 10.0 / 3.0;
+const DOT_SIZE: f32 = 0.26;
+const DOT_SWELL: f32 = 0.2;
 const UNLIT: f32 = 0.1;
 const WASH: f32 = 0.07;
 /// How much the light is sharpened into dark reaches and bright ones, and
