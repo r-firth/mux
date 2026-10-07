@@ -77,6 +77,8 @@ typedef struct {
   uint8_t wrapped;
   uint8_t continuation;
   uint8_t dirty;
+  /* Whether this frame wrote the row's cells; a kept row's cells are absent. */
+  uint8_t rebuilt;
 } mux_ghostty_render_row_t;
 
 typedef struct {
@@ -111,6 +113,10 @@ typedef struct {
   size_t cell_capacity;
   uint8_t *text;
   size_t text_capacity;
+  /* The default colours the last frame's cells were resolved against. */
+  bool has_last_colors;
+  GhosttyColorRgb last_background;
+  GhosttyColorRgb last_foreground;
 } mux_ghostty_renderer_impl_t;
 
 enum {
@@ -1360,9 +1366,17 @@ void mux_ghostty_render_frame_free(mux_ghostty_render_frame_t *frame) {
   memset(frame, 0, sizeof(*frame));
 }
 
+static bool same_rgb(GhosttyColorRgb a, GhosttyColorRgb b) {
+  return a.r == b.r && a.g == b.g && a.b == b.b;
+}
+
+/* With keep_clean_rows, the caller still holds the cells of the previous
+ * frame, so rows libghostty has not changed since are left out and only the
+ * changed rows are written; each row says which it was. */
 int32_t mux_ghostty_renderer_frame(
     mux_ghostty_renderer_t raw_renderer,
     mux_ghostty_terminal_t raw_terminal,
+    bool keep_clean_rows,
     mux_ghostty_render_frame_t *out_frame) {
   mux_ghostty_renderer_impl_t *renderer = raw_renderer;
   GhosttyTerminal terminal = (GhosttyTerminal)raw_terminal;
@@ -1404,6 +1418,14 @@ int32_t mux_ghostty_renderer_frame(
   if (result != GHOSTTY_SUCCESS) goto error;
   frame.background = to_mux_rgb(colors.background);
   frame.foreground = to_mux_rgb(colors.foreground);
+  /* Cells without a colour of their own take the defaults, and a program can
+   * change those (OSC 10/11) without marking a row dirty. */
+  const bool colors_changed =
+      !renderer->has_last_colors ||
+      !same_rgb(renderer->last_background, colors.background) ||
+      !same_rgb(renderer->last_foreground, colors.foreground);
+  const bool rebuild_all = !keep_clean_rows || colors_changed ||
+                           dirty == GHOSTTY_RENDER_STATE_DIRTY_FULL;
   frame.cursor_color = to_mux_rgb(
       colors.cursor_has_value ? colors.cursor : colors.foreground);
 
@@ -1463,9 +1485,6 @@ int32_t mux_ghostty_renderer_frame(
   if (frame.rows > 0) {
     memset(frame.row_metadata, 0, frame.rows * sizeof(*frame.row_metadata));
   }
-  if (cell_count > 0) {
-    memset(frame.cells, 0, cell_count * sizeof(*frame.cells));
-  }
 
   result = ghostty_render_state_get(
       renderer->state, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
@@ -1494,6 +1513,13 @@ int32_t mux_ghostty_renderer_frame(
     if (result != GHOSTTY_SUCCESS) goto error;
     out_row->wrapped = wrapped ? 1 : 0;
     out_row->continuation = continuation ? 1 : 0;
+    if (!rebuild_all && !row_dirty) {
+      y++;
+      continue;
+    }
+    out_row->rebuilt = 1;
+    memset(&frame.cells[(size_t)y * frame.cols], 0,
+           frame.cols * sizeof(*frame.cells));
 
     result = ghostty_render_state_row_get(
         renderer->rows, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
@@ -1653,11 +1679,20 @@ int32_t mux_ghostty_renderer_frame(
     if (result != GHOSTTY_SUCCESS) goto error;
     y++;
   }
+  /* Rows the iterator did not reach are blank rather than kept. */
+  for (; y < frame.rows; y++) {
+    frame.row_metadata[y].rebuilt = 1;
+    memset(&frame.cells[(size_t)y * frame.cols], 0,
+           frame.cols * sizeof(*frame.cells));
+  }
 
   GhosttyRenderStateDirty clean = GHOSTTY_RENDER_STATE_DIRTY_FALSE;
   result = ghostty_render_state_set(
       renderer->state, GHOSTTY_RENDER_STATE_OPTION_DIRTY, &clean);
   if (result != GHOSTTY_SUCCESS) goto error;
+  renderer->has_last_colors = true;
+  renderer->last_background = colors.background;
+  renderer->last_foreground = colors.foreground;
 
   *out_frame = frame;
   return (int32_t)GHOSTTY_SUCCESS;
