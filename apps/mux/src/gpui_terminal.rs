@@ -399,27 +399,45 @@ fn paint_terminal(
         bounds.origin.y + px(padding.top),
     );
 
+    // A full-screen program usually paints every cell, so each run of one
+    // fill along a row is one quad rather than one per cell.
+    let fill_of = |cell: &RenderCell| {
+        let background = effective_background(cell);
+        (background != frame.background || cell.selected).then_some((background, cell.selected))
+    };
     for row in 0..usize::from(frame.rows) {
-        for column in 0..columns {
-            let cell = &frame.cells[row * columns + column];
-            let background = effective_background(cell);
-            if background != frame.background || cell.selected {
-                let color = if cell.selected {
-                    selection_color(background)
-                } else {
-                    terminal_color(background)
-                };
-                window.paint_quad(fill(
-                    Bounds::new(
-                        point(
-                            origin.x + px(metrics.cell_width) * column,
-                            origin.y + px(metrics.cell_height) * row,
-                        ),
-                        size(px(metrics.cell_width), px(metrics.cell_height)),
-                    ),
-                    color,
-                ));
+        let cells = &frame.cells[row * columns..(row + 1) * columns];
+        let mut column = 0;
+        while column < columns {
+            let Some(run) = fill_of(&cells[column]) else {
+                column += 1;
+                continue;
+            };
+            let start = column;
+            column += 1;
+            while column < columns && fill_of(&cells[column]) == Some(run) {
+                column += 1;
             }
+            let (background, selected) = run;
+            let color = if selected {
+                selection_color(background)
+            } else {
+                terminal_color(background)
+            };
+            // Both edges from the grid, so neighbouring runs meet exactly.
+            window.paint_quad(fill(
+                Bounds::from_corners(
+                    point(
+                        origin.x + px(metrics.cell_width) * start,
+                        origin.y + px(metrics.cell_height) * row,
+                    ),
+                    point(
+                        origin.x + px(metrics.cell_width) * column,
+                        origin.y + px(metrics.cell_height) * (row + 1),
+                    ),
+                ),
+                color,
+            ));
         }
     }
 
