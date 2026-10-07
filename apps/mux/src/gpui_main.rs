@@ -31,6 +31,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use agent_completion::{
@@ -205,8 +206,16 @@ enum UserEvent {
 struct PaneReplica {
     engine: GhosttyEngine,
     frame: Rc<RenderFrame>,
+    /// Which frame `frame` holds, unique across panes, so a pane's view can
+    /// tell whether what it drew is still current.
+    frame_serial: u64,
     render_cache: Rc<RefCell<TerminalRenderCache>>,
     title: TitleScanner,
+}
+
+fn next_frame_serial() -> u64 {
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    SERIAL.fetch_add(1, Ordering::Relaxed)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -228,6 +237,7 @@ impl PaneReplica {
         Self {
             engine,
             frame: Rc::new(frame),
+            frame_serial: next_frame_serial(),
             render_cache: Rc::new(RefCell::new(TerminalRenderCache::default())),
             title: TitleScanner::default(),
         }
@@ -255,6 +265,7 @@ impl PaneReplica {
         // updating; otherwise libghostty writes into the existing allocation.
         // Either way, a draw can never combine shaped text from one terminal
         // state with backgrounds or a cursor from another.
+        self.frame_serial = next_frame_serial();
         self.engine
             .render_frame_into(Rc::make_mut(&mut self.frame))?;
         Ok(())
@@ -509,6 +520,8 @@ struct MuxApp {
     ground: ground::SharedGround,
     ground_view: Entity<ground::GroundView>,
     grain: Option<Rc<ground::Grain>>,
+    /// Each shown pane's terminal view, kept while what it draws is unchanged.
+    terminal_views: HashMap<PaneId, Entity<gpui_terminal::TerminalView>>,
     /// Each pane's recent output, to tell a pane at work from one echoing
     /// what is typed, and the pane a key last went to, and when.
     pane_activity: HashMap<PaneId, ground::Activity>,
@@ -673,6 +686,7 @@ impl MuxApp {
             ground,
             ground_view,
             grain: None,
+            terminal_views: HashMap::new(),
             pane_activity: HashMap::new(),
             last_key: Cell::new(None),
             quick_select: None,
@@ -3965,21 +3979,56 @@ impl MuxApp {
         slab.into_any_element()
     }
 
+    /// The pane's terminal view: the one it has while nothing it draws has
+    /// changed, so what it drew is kept, or else a new one.
+    fn terminal_view(
+        &mut self,
+        geometry: layout::PaneGeometry,
+        opacity: f32,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<gpui_terminal::TerminalView>> {
+        let pane_id = geometry.pane_id;
+        let pane = self.panes.get(&pane_id)?;
+        let props = gpui_terminal::TerminalProps {
+            frame_serial: pane.frame_serial,
+            font_family: self.terminal_font.clone(),
+            metrics: self.metrics,
+            // A dead shell has no cursor to show.
+            focused: geometry.focused && !self.pane_has_exited(pane_id),
+            chrome: gpui_terminal::TerminalChrome {
+                surface: color(SURFACE),
+                cursor: self.active_ink().color(),
+            },
+            marks: self
+                .quick_select_marks(pane_id)
+                .unwrap_or_else(|| self.find_marks(pane_id)),
+            opacity,
+        };
+        if let Some(view) = self.terminal_views.get(&pane_id)
+            && view.read(cx).props() == &props
+        {
+            return Some(view.clone());
+        }
+        let frame = Rc::clone(&pane.frame);
+        let cache = Rc::clone(&pane.render_cache);
+        let view = cx.new(|_| gpui_terminal::TerminalView::new(props, &frame, cache));
+        self.terminal_views.insert(pane_id, view.clone());
+        Some(view)
+    }
+
     fn render_terminal_pane(
         &self,
         geometry: layout::PaneGeometry,
         opacity: f32,
+        terminal: Entity<gpui_terminal::TerminalView>,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        let pane = self.panes.get(&geometry.pane_id)?;
+    ) -> gpui::AnyElement {
         let pane_id = geometry.pane_id;
         // The grid, which pointer maths use, and the slab's body it shows
         // through: the same settled, but while the slab glides the grid
         // keeps the size it settles at.
         let rect = geometry.rect;
         let body = geometry.surface();
-        // A dead shell has no cursor to show.
-        let focused = geometry.focused && !self.pane_has_exited(pane_id);
         let pointer_app = cx.weak_entity();
         let hover_app = pointer_app.clone();
         let scroll_app = pointer_app.clone();
@@ -4033,22 +4082,10 @@ impl MuxApp {
                     .left_0()
                     .w(px(rect.width))
                     .h(px(rect.height))
-                    .child(gpui_terminal::terminal_canvas(
-                        Rc::clone(&pane.frame),
-                        Rc::clone(&pane.render_cache),
-                        self.terminal_font.clone(),
-                        self.metrics,
-                        focused,
-                        gpui_terminal::TerminalChrome {
-                            surface: color(SURFACE),
-                            cursor: self.active_ink().color(),
-                        },
-                        self.quick_select_marks(pane_id)
-                            .unwrap_or_else(|| self.find_marks(pane_id)),
-                    )),
+                    .child(terminal.cached(gpui::StyleRefinement::default().size_full())),
             )
             .children(self.render_quick_select_labels(pane_id, rect));
-        Some(surface.into_any_element())
+        surface.into_any_element()
     }
 }
 
@@ -4152,6 +4189,7 @@ impl Render for MuxApp {
         for leaving in drawn.leaving {
             root = root.children(self.render_leaving_pane(leaving));
         }
+        let mut shown_terminals = HashSet::new();
         for pane in drawn.panes {
             let (geometry, opacity) = (pane.geometry, pane.opacity);
             let pane_id = geometry.pane_id;
@@ -4160,7 +4198,10 @@ impl Render for MuxApp {
                 let (frame, focused) = (geometry.frame, geometry.focused);
                 root = root.child(self.render_agent_pane(pane_id, frame, focused, window, cx));
             } else {
-                root = root.children(self.render_terminal_pane(geometry, opacity, cx));
+                if let Some(terminal) = self.terminal_view(geometry, opacity, cx) {
+                    shown_terminals.insert(pane_id);
+                    root = root.child(self.render_terminal_pane(geometry, opacity, terminal, cx));
+                }
                 root = root.children(self.render_pane_exit(geometry));
                 root = root.children(self.render_scroll_thumb(geometry));
                 root = root.children(self.render_find_ticks(geometry));
@@ -4175,6 +4216,8 @@ impl Render for MuxApp {
                 ));
             }
         }
+        self.terminal_views
+            .retain(|pane_id, _| shown_terminals.contains(pane_id));
         for (index, seam) in geometry.seams.into_iter().enumerate() {
             root = root.child(self.render_seam(index, seam, cx));
         }
@@ -4390,18 +4433,18 @@ impl Render for MuxLayerHost {
             .relative()
             .size_full()
             .overflow_hidden()
-            // The ground under everything, then the panes. The panes' view
-            // is kept from one frame to the next until something in it
-            // changes, so the ground can move without it being drawn again.
+            // The ground under everything, then the panes. The panes' view is
+            // not kept whole from one frame to the next: GPUI draws again
+            // every view inside one it draws again, so each pane's terminal
+            // is kept instead, and output in one pane draws only that pane.
             .child(self.ground.clone())
             .child(
-                self.view.clone().cached(
-                    gpui::StyleRefinement::default()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full(),
-                ),
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .child(self.view.clone()),
             );
         if let Some(sheet) = gpui_component::Root::render_sheet_layer(window, cx) {
             root = root.child(sheet);

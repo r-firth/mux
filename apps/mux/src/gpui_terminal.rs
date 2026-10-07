@@ -1,12 +1,17 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    rc::{Rc, Weak},
+};
 
 use gpui::{
-    App, Bounds, Font, Hsla, IntoElement, Pixels, ShapedLine, SharedString, StrikethroughStyle,
-    Styled, TextRun, TextSystem, UnderlineStyle, Window, canvas, fill, font, point, px, size,
+    App, Bounds, Context, Font, Hsla, IntoElement, ParentElement as _, Pixels, Render, ShapedLine,
+    SharedString, StrikethroughStyle, Styled, TextRun, TextSystem, UnderlineStyle, Window, canvas,
+    div, fill, font, point, px, size,
 };
 use mux_terminal::{CellStyle, CellWidth, CursorStyle, RenderCell, RenderFrame, Rgb};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GridMetrics {
     pub cell_width: f32,
     pub cell_height: f32,
@@ -17,7 +22,7 @@ pub struct GridMetrics {
 
 /// Colours the window chrome lends the terminal: the slab it sits on, and the
 /// tab's ink for the cursor.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TerminalChrome {
     pub surface: Hsla,
     pub cursor: Hsla,
@@ -27,7 +32,7 @@ pub struct TerminalChrome {
 /// is painted solid with its text in `current_text`; the rest take a wash
 /// under their own colours. With `dim`, text off the marks fades toward it
 /// so the marks stand out.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TerminalMarks {
     pub spans: Vec<MarkSpan>,
     pub wash: Hsla,
@@ -263,6 +268,69 @@ struct PreparedRun {
 
 struct PreparedTerminal {
     runs: Vec<PreparedRun>,
+}
+
+/// Everything a pane's terminal is drawn from, but the frame itself, which
+/// `frame_serial` stands for.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TerminalProps {
+    pub frame_serial: u64,
+    pub font_family: String,
+    pub metrics: GridMetrics,
+    pub focused: bool,
+    pub chrome: TerminalChrome,
+    pub marks: Rc<TerminalMarks>,
+    /// Not drawn here, but a parent's opacity is baked into what is drawn,
+    /// so a fading pane cannot reuse what it drew a moment ago.
+    pub opacity: f32,
+}
+
+/// A pane's terminal as a view of its own. GPUI keeps what a view drew until
+/// the view changes, so a pane is given a new view whenever its props do,
+/// and the other panes are not drawn again when one of them prints.
+pub struct TerminalView {
+    props: TerminalProps,
+    // Weak, so the pane can still update its frame in place.
+    frame: Weak<RenderFrame>,
+    cache: Rc<RefCell<TerminalRenderCache>>,
+}
+
+impl TerminalView {
+    pub fn new(
+        props: TerminalProps,
+        frame: &Rc<RenderFrame>,
+        cache: Rc<RefCell<TerminalRenderCache>>,
+    ) -> Self {
+        Self {
+            props,
+            frame: Rc::downgrade(frame),
+            cache,
+        }
+    }
+
+    pub const fn props(&self) -> &TerminalProps {
+        &self.props
+    }
+}
+
+impl Render for TerminalView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let props = &self.props;
+        // A frame updated since is drawn by the pane's next view instead.
+        div()
+            .size_full()
+            .children(self.frame.upgrade().map(|frame| {
+                terminal_canvas(
+                    frame,
+                    Rc::clone(&self.cache),
+                    props.font_family.clone(),
+                    props.metrics,
+                    props.focused,
+                    props.chrome,
+                    Rc::clone(&props.marks),
+                )
+            }))
+    }
 }
 
 pub fn terminal_canvas(
