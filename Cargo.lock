@@ -4486,6 +4486,7 @@ dependencies = [
  "mux-workspace",
  "postcard",
  "serde",
+ "serde_bytes",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
@@ -4495,6 +4496,7 @@ dependencies = [
 name = "mux-terminal"
 version = "0.8.2"
 dependencies = [
+ "memchr",
  "serde",
  "thiserror 2.0.20",
 ]

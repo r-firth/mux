@@ -63,7 +63,18 @@ impl TitleScanner {
     }
 
     pub fn scan(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
+        let mut rest = bytes;
+        while let Some((&byte, after)) = rest.split_first() {
+            if self.state == TitleScan::Ground && byte != ESC && byte != BEL {
+                // Nearly all of any output is plain text, which changes
+                // nothing here: skip straight to the next byte that could.
+                match memchr::memchr2(ESC, BEL, after) {
+                    Some(at) => rest = &after[at..],
+                    None => return,
+                }
+                continue;
+            }
+            rest = after;
             self.state = match (self.state, byte) {
                 (TitleScan::Title, BEL) | (TitleScan::TitleEscape, b'\\') => {
                     self.commit();
@@ -164,6 +175,26 @@ impl TitleScanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_text_is_skipped_without_losing_what_follows_it() {
+        let mut scanner = TitleScanner::default();
+        let mut output = vec![b'a'; 10_000];
+        output.extend_from_slice(b"\x1b]2;after the text\x07");
+        output.extend(vec![b'b'; 10_000]);
+        output.push(BEL);
+        // In one piece, and in pieces that split the text and the sequence.
+        scanner.scan(&output);
+        assert_eq!(scanner.title(), Some("after the text"));
+        assert_eq!(scanner.take_attention(), Some(Attention::Bell));
+
+        let mut pieces = TitleScanner::default();
+        for piece in output.chunks(977) {
+            pieces.scan(piece);
+        }
+        assert_eq!(pieces.title(), Some("after the text"));
+        assert_eq!(pieces.take_attention(), Some(Attention::Bell));
+    }
 
     #[test]
     fn title_scanner_reads_bel_and_st_terminated_titles() {
