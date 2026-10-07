@@ -71,8 +71,13 @@ const COOLING: Duration = Duration::from_millis(500);
 const FIELD_CELL: f32 = 12.0;
 /// A slab's corner radius: cells this close to a corner can show past it.
 const CORNER: f32 = 12.0;
-/// A cell of grain, in points: two a side, as gofer's is.
-const CELL: f32 = 2.0;
+/// A cell of the ground, in points: each holds one round dot, and three
+/// cells make ten points.
+const CELL: f32 = 10.0 / 3.0;
+/// How big a dot is, as a share of its cell, and how much bigger one the
+/// light has reached burns.
+const DOT_SIZE: f32 = 0.26;
+const DOT_SWELL: f32 = 0.2;
 /// The warm ink under everything, as red, green and blue.
 const GROUND_RGB: [f32; 3] = [12.0, 10.0, 9.0];
 
@@ -928,15 +933,43 @@ fn rect_of(bounds: Bounds<Pixels>) -> layout::Rect {
     }
 }
 
-/// Paint runs as one layer, clipped to `bounds`: many small quads, ordered
-/// together rather than each on its own.
+/// How a dot differs from its neighbours, from 0 to 1: read from the same
+/// tile, at the same place, as the GPU's ground reads it, so a dot is the
+/// same size and brightness whichever draws it.
+#[allow(clippy::cast_sign_loss)]
+fn quirk(column: i32, row: i32) -> f32 {
+    f32::from(NOISE[((((row + 53) & 63) << 6) | ((column + 11) & 63)) as usize]) / 255.0
+}
+
+/// Paint runs as one layer, clipped to `bounds`: a round dot for each lit
+/// cell, no two the same size or brightness, as the GPU's ground draws
+/// them. Many small quads, ordered together rather than each on its own.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 fn paint_runs(runs: &[Run], cell: f32, bounds: Bounds<Pixels>, window: &mut Window) {
     window.paint_layer(bounds, |window| {
         for run in runs {
-            window.paint_quad(fill(
-                Bounds::new(point(px(run.x), px(run.y)), size(px(run.width), px(cell))),
-                run.color,
-            ));
+            let row = (run.y / cell).round() as i32;
+            let first = (run.x / cell).round() as i32;
+            let cells = (run.width / cell).round() as i32;
+            for column in first..first + cells {
+                let quirk = quirk(column, row);
+                let radius = cell * (DOT_SIZE * (0.55 + 0.45 * quirk) + DOT_SWELL * 0.6);
+                let center = ((column as f32 + 0.5) * cell, (row as f32 + 0.5) * cell);
+                window.paint_quad(
+                    fill(
+                        Bounds::new(
+                            point(px(center.0 - radius), px(center.1 - radius)),
+                            size(px(radius * 2.0), px(radius * 2.0)),
+                        ),
+                        run.color.opacity(0.5 + 0.5 * quirk),
+                    )
+                    .corner_radii(px(radius)),
+                );
+            }
         }
     });
 }
@@ -1791,15 +1824,15 @@ mod tests {
         let first = epoch + Duration::from_millis(800);
         let ringing = ground.lay(calling.clone(), first);
         let base = still_ground.lay(quiet.clone(), first);
-        let near = rect(307.0, 25.0, 10.0, 15.0);
-        let further = rect(244.0, 25.0, 10.0, 15.0);
+        let near = rect(302.0, 12.0, 20.0, 28.0);
+        let further = rect(239.0, 12.0, 20.0, 28.0);
         assert!(density(&ringing, near) > density(&base, near) + 0.1);
         assert!(density(&ringing, further) < density(&base, further) + 0.05);
-        // Half a second on it has spread to 156 points.
+        // Half a second on it has spread to 156 points, and grown fainter.
         let later = first + Duration::from_millis(500);
         let ringing = ground.lay(calling, later);
         let base = still_ground.lay(quiet, later);
-        assert!(density(&ringing, further) > density(&base, further) + 0.1);
+        assert!(density(&ringing, further) > density(&base, further) + 0.05);
         // The margin far beyond its reach is untouched.
         let far = rect(0.0, 100.0, 10.0, 300.0);
         assert!((density(&ringing, far) - density(&base, far)).abs() < 0.01);
