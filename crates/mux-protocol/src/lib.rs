@@ -22,7 +22,8 @@ use tokio::task::JoinHandle;
 /// Version 7 requires daemon-side recovery of orphaned terminal keyboard modes
 /// when the shell regains its PTY after a child process exits.
 /// Version 8 adds daemon-stamped times, file diffs, tool locations, turn ends
-/// and queued prompts to agent snapshots and events.
+/// and queued prompts to agent snapshots and events, a remembered title on
+/// each pane attachment, and a workspace command that sets a split's ratio.
 pub const PROTOCOL_VERSION: u16 = 8;
 /// Request id zero is reserved for latency-sensitive messages whose successful
 /// completion does not require a response.

@@ -31,9 +31,45 @@ pub struct PaneGeometry {
     pub focused: bool,
 }
 
+/// The gap a split leaves between its two sides, where the split is held to
+/// drag it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Seam {
+    pub axis: SplitAxis,
+    /// The gap itself.
+    pub rect: Rect,
+    /// A pane from each side, which together name the split.
+    pub first: PaneId,
+    pub second: PaneId,
+    /// Where the split's region starts along its axis, and the length its
+    /// two sides share once the gap is taken out.
+    pub start: f32,
+    pub available: f32,
+}
+
+impl Seam {
+    /// The ratio that puts the middle of the gap under `along`, a point on
+    /// the split's axis, in thousandths of the shared length.
+    #[must_use]
+    pub fn thousandths_at(&self, along: f32) -> u16 {
+        let first = along - self.start - PANE_GAP / 2.0;
+        let fraction = (first / self.available.max(1.0)).clamp(0.001, 0.999);
+        // The clamp keeps the product within 1..=999.
+        (fraction * 1_000.0).round() as u16
+    }
+
+    /// The point on the split's axis where the gap sits when the split is
+    /// even.
+    #[must_use]
+    pub fn middle(&self) -> f32 {
+        self.start + PANE_GAP / 2.0 + self.available / 2.0
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct WorkspaceGeometry {
     pub panes: Vec<PaneGeometry>,
+    pub seams: Vec<Seam>,
 }
 
 #[must_use]
@@ -51,7 +87,7 @@ pub fn calculate(session: &Session, width: f32, height: f32) -> WorkspaceGeometr
         if let Some(zoomed) = tab.zoomed_pane {
             geometry.panes.push(pane_geometry(zoomed, bounds, true));
         } else {
-            layout_panes(&tab.layout, bounds, tab.focused_pane, &mut geometry.panes);
+            layout_panes(&tab.layout, bounds, tab.focused_pane, &mut geometry);
         }
     }
     geometry
@@ -75,11 +111,13 @@ fn layout_panes(
     layout: &PaneLayout,
     bounds: Rect,
     focused_pane: PaneId,
-    output: &mut Vec<PaneGeometry>,
+    output: &mut WorkspaceGeometry,
 ) {
     match layout {
         PaneLayout::Leaf(pane_id) => {
-            output.push(pane_geometry(*pane_id, bounds, *pane_id == focused_pane));
+            output
+                .panes
+                .push(pane_geometry(*pane_id, bounds, *pane_id == focused_pane));
         }
         PaneLayout::Split {
             axis,
@@ -88,7 +126,7 @@ fn layout_panes(
             second,
         } => {
             let ratio = f32::from(ratio.thousandths()) / 1_000.0;
-            let (first_rect, second_rect) = match axis {
+            let (first_rect, second_rect, gap, start, available) = match axis {
                 SplitAxis::Horizontal => {
                     let available = (bounds.width - PANE_GAP).max(0.0);
                     let first_width = (available * ratio).round();
@@ -102,6 +140,13 @@ fn layout_panes(
                             width: available - first_width,
                             ..bounds
                         },
+                        Rect {
+                            x: bounds.x + first_width,
+                            width: PANE_GAP,
+                            ..bounds
+                        },
+                        bounds.x,
+                        available,
                     )
                 }
                 SplitAxis::Vertical => {
@@ -117,9 +162,24 @@ fn layout_panes(
                             height: available - first_height,
                             ..bounds
                         },
+                        Rect {
+                            y: bounds.y + first_height,
+                            height: PANE_GAP,
+                            ..bounds
+                        },
+                        bounds.y,
+                        available,
                     )
                 }
             };
+            output.seams.push(Seam {
+                axis: *axis,
+                rect: gap,
+                first: first.first_pane(),
+                second: second.first_pane(),
+                start,
+                available,
+            });
             layout_panes(first, first_rect, focused_pane, output);
             layout_panes(second, second_rect, focused_pane, output);
         }
@@ -145,6 +205,39 @@ mod tests {
                 height: 600.0 - TAB_BAR_HEIGHT - WORKSPACE_TOP_GAP - WORKSPACE_INSET,
             }
         );
+    }
+
+    #[test]
+    fn a_split_leaves_a_seam_that_maps_back_to_its_ratio() {
+        let left = PaneId::new();
+        let right = PaneId::new();
+        let session = Session::with_panes("daily", &[left, right]).expect("session");
+        let geometry = calculate(&session, 800.0, 600.0);
+        let [seam] = geometry.seams[..] else {
+            panic!("one split, one seam");
+        };
+
+        let (left_slab, right_slab) = (geometry.panes[0].frame, geometry.panes[1].frame);
+        assert_eq!((seam.first, seam.second), (left, right));
+        assert_eq!(
+            seam.rect,
+            Rect {
+                x: left_slab.x + left_slab.width,
+                width: right_slab.x - (left_slab.x + left_slab.width),
+                ..left_slab
+            }
+        );
+        assert_eq!(
+            Rect {
+                width: PANE_GAP,
+                ..seam.rect
+            },
+            seam.rect
+        );
+        // Its own middle is the ratio it was laid out at.
+        assert_eq!(seam.thousandths_at(seam.rect.x + PANE_GAP / 2.0), 500);
+        assert_eq!(seam.thousandths_at(seam.middle()), 500);
+        assert_eq!(seam.thousandths_at(seam.start), 1);
     }
 
     #[test]

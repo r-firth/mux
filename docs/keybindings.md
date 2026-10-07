@@ -41,6 +41,10 @@ the nearest boundary in that direction. Enter or Escape returns to Normal.
 This nested prefix preserves Zellij's resize muscle memory without stealing
 Normal-mode `Ctrl+n` from Vim and other terminal applications.
 
+The gaps between panes resize them too: drag one, and each pane's head shows
+its size as it goes. The middle holds a gap for a moment on the way past, and
+a double click evens the split out.
+
 ## Tab mode
 
 | Keys | Action |

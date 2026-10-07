@@ -482,6 +482,13 @@ impl SessionRuntime {
                 let focused = tab.focused_pane;
                 tab.layout.resize_toward(focused, direction)?;
             }
+            WorkspaceCommand::ResizeSplit {
+                first,
+                second,
+                ratio,
+            } => {
+                self.model.write().resize_split(first, second, ratio)?;
+            }
             WorkspaceCommand::SetFocusedPane(pane_id) => {
                 self.model
                     .write()

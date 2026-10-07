@@ -225,6 +225,51 @@ impl PaneLayout {
         true
     }
 
+    /// Set the ratio of the split between `first` and `second`: the one split
+    /// with `first` somewhere on its first side and `second` on its other, so
+    /// a pane from each side of a seam names it. The ratio is held to the same
+    /// bounds keyboard resizing keeps. Returns whether it changed.
+    pub fn set_split_between(
+        &mut self,
+        first: PaneId,
+        second: PaneId,
+        ratio: SplitRatio,
+    ) -> Result<bool, WorkspaceError> {
+        let Self::Split {
+            ratio: current,
+            first: first_side,
+            second: second_side,
+            ..
+        } = self
+        else {
+            return Err(WorkspaceError::UnknownPane(second));
+        };
+        match (first_side.contains(first), second_side.contains(second)) {
+            (true, true) => {
+                let next = SplitRatio(
+                    ratio
+                        .0
+                        .clamp(Self::MIN_SPLIT_THOUSANDTHS, Self::MAX_SPLIT_THOUSANDTHS),
+                );
+                let changed = *current != next;
+                *current = next;
+                Ok(changed)
+            }
+            (true, false) => first_side.set_split_between(first, second, ratio),
+            (false, true) => second_side.set_split_between(first, second, ratio),
+            (false, false) => Err(WorkspaceError::UnknownPane(first)),
+        }
+    }
+
+    /// The first pane in reading order: the top-left one.
+    #[must_use]
+    pub fn first_pane(&self) -> PaneId {
+        match self {
+            Self::Leaf(pane_id) => *pane_id,
+            Self::Split { first, .. } => first.first_pane(),
+        }
+    }
+
     fn regions(&self, bounds: Region, output: &mut Vec<(PaneId, Region)>) {
         match self {
             Self::Leaf(pane_id) => output.push((*pane_id, bounds)),
@@ -444,6 +489,22 @@ impl Session {
         self.tabs.iter_mut().find(|tab| tab.id == self.active_tab)
     }
 
+    /// Set the split between two panes in whichever tab holds them. See
+    /// [`PaneLayout::set_split_between`].
+    pub fn resize_split(
+        &mut self,
+        first: PaneId,
+        second: PaneId,
+        ratio: SplitRatio,
+    ) -> Result<bool, WorkspaceError> {
+        self.tabs
+            .iter_mut()
+            .find(|tab| tab.layout.contains(first))
+            .ok_or(WorkspaceError::UnknownPane(first))?
+            .layout
+            .set_split_between(first, second, ratio)
+    }
+
     /// Keep automatically numbered tabs aligned with their stable position.
     /// Text titles are user-owned and remain unchanged.
     pub fn normalize_numeric_tab_titles(&mut self) {
@@ -580,6 +641,13 @@ pub enum WorkspaceCommand {
     // stable for live development daemons that still own terminal processes.
     FocusPaneOrTab(Direction),
     ResizePane(Direction),
+    /// Set the split between two panes, one from each side of it, as a
+    /// dragged seam does. See [`PaneLayout::set_split_between`].
+    ResizeSplit {
+        first: PaneId,
+        second: PaneId,
+        ratio: SplitRatio,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -1133,6 +1201,69 @@ mod tests {
             panic!("split layout");
         };
         assert_eq!(ratio.thousandths(), 550);
+    }
+
+    #[test]
+    fn a_pane_from_each_side_names_the_split_between_them() {
+        let left = PaneId::new();
+        let top_right = PaneId::new();
+        let bottom_right = PaneId::new();
+        let mut layout = PaneLayout::Split {
+            axis: SplitAxis::Horizontal,
+            ratio: SplitRatio::HALF,
+            first: Box::new(PaneLayout::Leaf(left)),
+            second: Box::new(PaneLayout::Split {
+                axis: SplitAxis::Vertical,
+                ratio: SplitRatio::HALF,
+                first: Box::new(PaneLayout::Leaf(top_right)),
+                second: Box::new(PaneLayout::Leaf(bottom_right)),
+            }),
+        };
+        let ratios = |layout: &PaneLayout| {
+            let PaneLayout::Split { ratio, second, .. } = layout else {
+                panic!("split layout");
+            };
+            let PaneLayout::Split { ratio: inner, .. } = second.as_ref() else {
+                panic!("nested split");
+            };
+            (ratio.thousandths(), inner.thousandths())
+        };
+
+        let ratio = SplitRatio::new(300).expect("ratio");
+        assert!(
+            layout
+                .set_split_between(top_right, bottom_right, ratio)
+                .expect("inner")
+        );
+        assert_eq!(ratios(&layout), (500, 300));
+        assert!(
+            layout
+                .set_split_between(left, bottom_right, ratio)
+                .expect("outer")
+        );
+        assert_eq!(ratios(&layout), (300, 300));
+        assert!(
+            !layout
+                .set_split_between(left, top_right, ratio)
+                .expect("same")
+        );
+
+        // A drag past the edge stops where keyboard resizing would.
+        let edge = SplitRatio::new(990).expect("ratio");
+        assert!(
+            layout
+                .set_split_between(left, top_right, edge)
+                .expect("edge")
+        );
+        assert_eq!(ratios(&layout), (900, 300));
+
+        // The pane on the first side comes first.
+        assert!(
+            layout
+                .set_split_between(bottom_right, top_right, ratio)
+                .is_err()
+        );
+        assert_eq!(layout.first_pane(), left);
     }
 
     #[test]
