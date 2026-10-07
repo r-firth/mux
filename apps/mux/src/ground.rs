@@ -24,8 +24,23 @@ static NOISE: &[u8; 4096] = include_bytes!("../assets/blue-noise-64.bin");
 /// One step of the grain's clock, about twelve a second: often enough to
 /// read as moving, seldom enough to read as dither rather than video.
 const STEP_MS: u64 = 83;
-/// With nothing happening the fields only drift, a step in every four.
-const IDLE_STEPS: u64 = 4;
+/// With nothing happening the tide still runs, a step in every two.
+const IDLE_STEPS: u64 = 2;
+/// The tide: swells that cross the ground all the time and carry its light
+/// with them, so the grain is never still. How little of the ground's light
+/// a trough keeps and how much a crest adds of its own; then how far apart
+/// crests are in points and how many pass a point each second, for the swell
+/// and for the slower one that crosses it and breaks it up.
+const TIDE_TROUGH: f32 = 0.3;
+const TIDE_CREST: f32 = 0.1;
+const TIDE_WAVE: (f32, f32) = (260.0, 0.27);
+const TIDE_CROSS: (f32, f32) = (410.0, 0.12);
+/// How much of the tide reaches the strip, where the words are.
+const TIDE_IN_STRIP: f32 = 0.3;
+/// The share of dots each step that light a little early, out of 256, and by
+/// how much: the grain's shimmer.
+const SHIMMER_SHARE: u64 = 22;
+const SHIMMER: f32 = 0.07;
 /// How long a new ink takes to dissolve across the ground.
 const DISSOLVE: Duration = Duration::from_millis(640);
 /// How far a dissolving edge frays either side of where it has got, in points.
@@ -300,8 +315,12 @@ impl Thresholds {
     /// The threshold the dot of `ink` in `column` lights past, from 0 to 1.
     #[allow(clippy::cast_sign_loss)]
     fn at(&self, column: i32, ink: usize) -> f32 {
-        let value = self.0[ink][((column + CORNERS[ink].0) & 63) as usize];
-        (f32::from(value) + 0.5) / 256.0
+        (f32::from(self.raw(column, ink)) + 0.5) / 256.0
+    }
+
+    #[allow(clippy::cast_sign_loss)]
+    fn raw(&self, column: i32, ink: usize) -> u8 {
+        self.0[ink][((column + CORNERS[ink].0) & 63) as usize]
     }
 }
 
@@ -500,6 +519,8 @@ pub(super) struct Field {
     busy: Vec<(layout::Rect, f32)>,
     calls: Vec<Ringing>,
     leaving: Option<Leaving>,
+    /// The tide's clock, in seconds and in steps; `None` holds it still.
+    tide: Option<(f32, u64)>,
     /// The colour of each mix of levels a cell can show: two bits for each
     /// of the four inks, then one for showing the ink dissolving away.
     shades: Vec<Hsla>,
@@ -592,6 +613,7 @@ impl Field {
             }
         }
         let [own, _, _, signal] = &mut line.values;
+        self.swell(y, from, own);
         if let Some((rect, strength)) = self.focus {
             self.around(rect, y, (0.0, FOCUS_REACH), from, own, |distance| {
                 strength * (0.42 * fall(distance, FOCUS_REACH) + 0.18 * fall(distance, FOCUS_RIM))
@@ -629,6 +651,15 @@ impl Field {
 
         let thresholds = Thresholds::new(row);
         let [own, first, second, signal] = &line.values;
+        // Each step a different few dots light a little early.
+        let shimmer = |column: i32| match self.tide {
+            Some((_, step))
+                if (u64::from(thresholds.raw(column, 3)) + step * 29) & 255 < SHIMMER_SHARE =>
+            {
+                SHIMMER
+            }
+            _ => 0.0,
+        };
         line.mixes.clear();
         line.mixes.extend(
             own.iter()
@@ -637,7 +668,7 @@ impl Field {
                 .zip(signal)
                 .zip(from..)
                 .map(|((((&own, &first), &second), &signal), column)| {
-                    level(own, thresholds.at(column, 0))
+                    level(own + shimmer(column), thresholds.at(column, 0))
                         | level(first, thresholds.at(column, 1)) << 2
                         | level(second, thresholds.at(column, 2)) << 4
                         | level(signal, thresholds.at(column, 3)) << 6
@@ -652,11 +683,22 @@ impl Field {
             }
         }
 
+        self.gather(row, from, &line.mixes, runs);
+    }
+
+    /// Gather a row's cells, from column `from`, into runs of one colour.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_precision_loss
+    )]
+    fn gather(&self, row: i32, from: i32, mixes: &[u16], runs: &mut Vec<Run>) {
+        let cell = self.cell;
         let mut index = 0;
-        while index < count {
-            let mix = line.mixes[index];
+        while index < mixes.len() {
+            let mix = mixes[index];
             let mut end = index + 1;
-            while end < count && line.mixes[end] == mix {
+            while end < mixes.len() && mixes[end] == mix {
                 end += 1;
             }
             if mix != 0 {
@@ -668,6 +710,30 @@ impl Field {
                 });
             }
             index = end;
+        }
+    }
+
+    /// Carry the row's light on the tide: each cell keeps less of it in a
+    /// trough and gains on a crest.
+    #[allow(clippy::cast_precision_loss)]
+    fn swell(&self, y: f32, from: i32, values: &mut [f32]) {
+        let Some((time, _)) = self.tide else {
+            return;
+        };
+        let reach = if y < layout::TAB_BAR_HEIGHT {
+            TIDE_IN_STRIP
+        } else {
+            1.0
+        };
+        let turn = std::f32::consts::TAU;
+        for (index, value) in values.iter_mut().enumerate() {
+            let x = (from as f32 + index as f32 + 0.5) * self.cell;
+            let wave = ((x * 0.86 + y * 0.5) / TIDE_WAVE.0 - time * TIDE_WAVE.1) * turn;
+            let cross = ((y * 0.86 - x * 0.5) / TIDE_CROSS.0 - time * TIDE_CROSS.1) * turn;
+            let crest = 0.5 + 0.5 * wave.sin();
+            let swell = crest * crest * (0.6 + 0.4 * cross.sin());
+            let carried = TIDE_TROUGH + (1.6 - TIDE_TROUGH) * swell;
+            *value = *value * (1.0 + (carried - 1.0) * reach) + TIDE_CREST * swell * reach;
         }
     }
 
@@ -1060,6 +1126,7 @@ impl Ground {
             leaving: laid
                 .dissolve
                 .map(|(_, origin, reached)| Leaving::new(origin, reached)),
+            tide: (!scene.still).then(|| (Self::seconds(laid.drift), laid.drift)),
             shades,
         });
         let window = layout::Rect {
@@ -1448,6 +1515,28 @@ mod tests {
         let done = ground.lay(next.clone(), done_at);
         let fresh = Ground::new(epoch).lay(next, done_at);
         assert!(done.lit().eq(fresh.lit()));
+    }
+
+    #[test]
+    fn the_tide_keeps_a_resting_ground_moving() {
+        let mut ground = Ground::new(Instant::now());
+        let epoch = ground.epoch;
+        let margin = rect(0.0, 300.0, 10.0, 300.0);
+        let lit_at = |ground: &mut Ground, seconds: u64| {
+            let grain = ground.lay(scene(), epoch + Duration::from_secs(seconds));
+            lit(&grain, margin)
+        };
+        let counts = (0..8)
+            .map(|second| lit_at(&mut ground, second))
+            .collect::<Vec<_>>();
+        let (least, most) = (
+            counts.iter().copied().min().unwrap_or_default(),
+            counts.iter().copied().max().unwrap_or_default(),
+        );
+        assert!(
+            most as f32 > least as f32 * 1.5 + 8.0,
+            "the margin's grain barely changed as the tide passed: {counts:?}"
+        );
     }
 
     #[test]
