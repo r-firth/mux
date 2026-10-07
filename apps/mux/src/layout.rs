@@ -1,10 +1,13 @@
 use mux_workspace::{PaneId, PaneLayout, Session, SplitAxis};
 
 /// The single top strip: traffic lights, tabs, mode and session.
-pub const TAB_BAR_HEIGHT: f32 = 34.0;
-/// Ground left visible around the slabs on the left, right and bottom.
-pub const WORKSPACE_INSET: f32 = 8.0;
-pub const PANE_GAP: f32 = 8.0;
+pub const TAB_BAR_HEIGHT: f32 = 36.0;
+/// Breathing room between the strip and the first row of slabs.
+pub const WORKSPACE_TOP_GAP: f32 = 4.0;
+/// Ground left visible around the slabs on the left, right and bottom. The
+/// gaps match gofer's: wide enough to read as ground, not as a seam.
+pub const WORKSPACE_INSET: f32 = 10.0;
+pub const PANE_GAP: f32 = 10.0;
 /// The slim title row at the top of every pane slab.
 pub const PANE_HEAD_HEIGHT: f32 = 24.0;
 const PANE_BODY_INSET_X: f32 = 6.0;
@@ -36,11 +39,12 @@ pub struct WorkspaceGeometry {
 #[must_use]
 pub fn calculate(session: &Session, width: f32, height: f32) -> WorkspaceGeometry {
     let mut geometry = WorkspaceGeometry::default();
+    let top = TAB_BAR_HEIGHT + WORKSPACE_TOP_GAP;
     let bounds = Rect {
         x: WORKSPACE_INSET,
-        y: TAB_BAR_HEIGHT,
+        y: top,
         width: (width - WORKSPACE_INSET * 2.0).max(1.0),
-        height: (height - TAB_BAR_HEIGHT - WORKSPACE_INSET).max(1.0),
+        height: (height - top - WORKSPACE_INSET).max(1.0),
     };
 
     if let Some(tab) = session.active_tab() {
@@ -136,9 +140,9 @@ mod tests {
             geometry.panes[0].frame,
             Rect {
                 x: WORKSPACE_INSET,
-                y: TAB_BAR_HEIGHT,
+                y: TAB_BAR_HEIGHT + WORKSPACE_TOP_GAP,
                 width: 800.0 - WORKSPACE_INSET * 2.0,
-                height: 600.0 - TAB_BAR_HEIGHT - WORKSPACE_INSET,
+                height: 600.0 - TAB_BAR_HEIGHT - WORKSPACE_TOP_GAP - WORKSPACE_INSET,
             }
         );
     }

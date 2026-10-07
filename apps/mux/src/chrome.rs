@@ -159,8 +159,10 @@ pub fn dot_matrix(text: &str, pitch: f32, lit: Hsla) -> Option<gpui::AnyElement>
     let columns = dot_columns(text, 16)?;
     let width = pitch * columns.len() as f32;
     let height = pitch * PANEL_ROWS as f32;
-    let radius = pitch * 0.38;
-    let unlit = lit.opacity(0.08);
+    let radius = pitch * 0.4;
+    // gofer keeps unlit cells at 5%: present enough to read as a panel, quiet
+    // enough that the lit glyph is all the eye takes in.
+    let unlit = lit.opacity(0.05);
     Some(
         canvas(
             |_, _, _| (),
@@ -187,6 +189,62 @@ pub fn dot_matrix(text: &str, pitch: f32, lit: Hsla) -> Option<gpui::AnyElement>
         .h(px(height))
         .into_any_element(),
     )
+}
+
+/// The place a terminal title names. Shells commonly title a window
+/// `user@host:~/path`; the user and host repeat in every pane and say nothing
+/// a terminal on this machine needs, so only the place is kept.
+#[must_use]
+pub fn terminal_place(title: &str) -> &str {
+    let title = title.trim();
+    if let Some((who, place)) = title.split_once(':')
+        && let Some((user, host)) = who.split_once('@')
+        && !user.is_empty()
+        && !host.is_empty()
+        && !who.contains(char::is_whitespace)
+    {
+        let place = place.trim();
+        if !place.is_empty() {
+            return place;
+        }
+    }
+    title
+}
+
+/// A tab-sized name for a terminal title: the last component of a directory,
+/// or the command that is running, cut to fit.
+#[must_use]
+pub fn tab_label(title: &str) -> String {
+    let place = terminal_place(title);
+    let path_like =
+        (place.starts_with('~') || place.starts_with('/')) && !place.contains(char::is_whitespace);
+    let label = if path_like {
+        place
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .filter(|component| !component.is_empty())
+            .unwrap_or(place)
+    } else {
+        place
+    };
+    truncate_chars(label, 24)
+}
+
+/// `text` cut to at most `limit` characters, marking the cut with an ellipsis.
+#[must_use]
+pub fn truncate_chars(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_owned();
+    }
+    let mut cut = text
+        .chars()
+        .take(limit.saturating_sub(1))
+        .collect::<String>()
+        .trim_end()
+        .to_owned();
+    cut.push('…');
+    cut
 }
 
 /// Follows OSC 0/2 window-title sequences in a pane's output so the pane head
@@ -295,6 +353,26 @@ mod tests {
         let columns = dot_columns("main", 16).expect("glyphs");
         assert_eq!(columns.len(), 4 * GLYPH_COLUMNS + 3);
         assert!(dot_columns("✨", 16).is_none());
+    }
+
+    #[test]
+    fn shell_titles_lose_the_user_and_host() {
+        assert_eq!(terminal_place("ryanfirth@Personal-Mac:~"), "~");
+        assert_eq!(terminal_place("me@box: ~/projects/mux"), "~/projects/mux");
+        assert_eq!(terminal_place("nvim layout.rs"), "nvim layout.rs");
+        assert_eq!(terminal_place("ssh me@box: test"), "ssh me@box: test");
+    }
+
+    #[test]
+    fn tab_labels_name_the_directory_or_the_command() {
+        assert_eq!(tab_label("ryanfirth@Personal-Mac:~"), "~");
+        assert_eq!(tab_label("ryanfirth@Personal-Mac:~/projects/mux"), "mux");
+        assert_eq!(tab_label("/"), "/");
+        assert_eq!(tab_label("cargo test -p mux"), "cargo test -p mux");
+        assert_eq!(
+            tab_label("vim apps/mux/src/gpui_main.rs"),
+            "vim apps/mux/src/gpui_m…"
+        );
     }
 
     #[test]
