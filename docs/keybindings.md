@@ -71,6 +71,13 @@ pane to its latest output.
 | `Cmd+PageUp` / `Cmd+PageDown` | Move a page through the history |
 | `Shift+PageUp` / `Shift+PageDown` | The same, unless the program has no history (a full-screen program keeps them) |
 
+## Links
+
+Hold `Cmd` over a link in a pane's output, an OSC 8 hyperlink or a URL
+written out in the text (even one wrapped across rows), to underline it and
+see where it goes in the strip. `Cmd`-click opens it. File links are shown in
+Finder rather than opened.
+
 ## Panes that call
 
 A pane out of sight that rings the bell, or sends a desktop notification
