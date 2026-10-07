@@ -5257,7 +5257,13 @@ fn run_graphical_application(
                             .new(|cx| MuxApp::new(window, cx, state_dir, settings, settings_error));
                         let ground = view.read(cx).ground_view.clone();
                         let host = cx.new(|_| MuxLayerHost { view, ground });
-                        cx.new(|cx| gpui_component::Root::new(host, window, cx))
+                        // The ground is the window's background, and on
+                        // the GPU it lies under GPUI altogether: the root
+                        // paints none of its own.
+                        cx.new(|cx| {
+                            gpui_component::Root::new(host, window, cx)
+                                .bg(gpui::transparent_black())
+                        })
                     }
                 },
             );

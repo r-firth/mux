@@ -46,6 +46,10 @@ tempfile.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { workspace = true, default-features = false, features = ["NSAccessibility", "NSWorkspace"] }
+# The ground's own Metal layer, under GPUI's content.
+metal = "0.33"
+objc = "0.2"
+raw-window-handle = "0.6"
 
 [[bin]]
 name = "mux"
