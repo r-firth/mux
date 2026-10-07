@@ -68,6 +68,9 @@ pub enum Request {
     },
     WriteInput {
         pane_id: PaneId,
+        // As one run of bytes rather than a byte at a time: the same on the
+        // wire, and much the quicker to read and write.
+        #[serde(with = "serde_bytes")]
         bytes: Vec<u8>,
     },
     ResizePane {
@@ -197,6 +200,7 @@ pub enum ServerEvent {
         session_id: SessionId,
         pane_id: PaneId,
         sequence: u64,
+        #[serde(with = "serde_bytes")]
         bytes: Vec<u8>,
     },
     PaneExited {
@@ -434,5 +438,36 @@ mod tests {
             frames.next().await.expect("reader active").expect("frame"),
             expected
         );
+    }
+}
+
+#[cfg(test)]
+mod byte_runs {
+    use super::*;
+
+    /// Output and input carry their bytes as one run. A daemon and a window
+    /// of the same protocol version must still agree, whichever was built
+    /// before the bytes were written that way.
+    #[test]
+    fn bytes_written_as_a_run_read_as_the_sequence_they_were() {
+        #[derive(Serialize)]
+        struct AsSequence {
+            sequence: u64,
+            bytes: Vec<u8>,
+        }
+        #[derive(Deserialize)]
+        struct AsRun {
+            sequence: u64,
+            #[serde(with = "serde_bytes")]
+            bytes: Vec<u8>,
+        }
+        let bytes = (0..=255).cycle().take(1000).collect::<Vec<u8>>();
+        let old = postcard::to_allocvec(&AsSequence {
+            sequence: 7,
+            bytes: bytes.clone(),
+        })
+        .expect("encode");
+        let new: AsRun = postcard::from_bytes(&old).expect("decode");
+        assert_eq!((new.sequence, new.bytes), (7, bytes));
     }
 }
