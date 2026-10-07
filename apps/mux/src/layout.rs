@@ -8,8 +8,15 @@ pub const WORKSPACE_TOP_GAP: f32 = 4.0;
 /// gaps match gofer's: wide enough to read as ground, not as a seam.
 pub const WORKSPACE_INSET: f32 = 10.0;
 pub const PANE_GAP: f32 = 10.0;
-/// The slim title row at the top of every pane slab.
+/// The title row at the top of a slab that needs one to hold something: an
+/// agent's head, or the find bar.
 pub const PANE_HEAD_HEIGHT: f32 = 24.0;
+/// What an ordinary pane keeps above its terminal instead of a row: room for
+/// the lower half of its legend, the small label set into its top edge.
+pub const PANE_LEGEND_TOP: f32 = 8.0;
+/// What a tab's only pane keeps: nothing but clearance for the slab's
+/// rounded corners. Its tab already says where it is.
+pub const PANE_BARE_TOP: f32 = 4.0;
 const PANE_BODY_INSET_X: f32 = 6.0;
 const PANE_BODY_INSET_Y: f32 = 2.0;
 
@@ -28,6 +35,9 @@ pub struct PaneGeometry {
     pub frame: Rect,
     /// The terminal surface inside the slab. Pointer and grid maths use this.
     pub rect: Rect,
+    /// How much of the slab's top is kept from its terminal: one of
+    /// `PANE_HEAD_HEIGHT`, `PANE_LEGEND_TOP` and `PANE_BARE_TOP`.
+    pub head: f32,
     pub focused: bool,
 }
 
@@ -37,7 +47,19 @@ impl PaneGeometry {
     /// terminal settles at, rides the corner of.
     #[must_use]
     pub fn surface(&self) -> Rect {
-        surface_of(self.frame)
+        surface_of(self.frame, self.head)
+    }
+
+    /// Whether the slab has a head row.
+    #[must_use]
+    pub fn headed(&self) -> bool {
+        self.head >= PANE_HEAD_HEIGHT
+    }
+
+    /// Whether the slab is named by a legend on its top edge.
+    #[must_use]
+    pub fn legended(&self) -> bool {
+        !self.headed() && self.head >= PANE_LEGEND_TOP
     }
 }
 
@@ -82,8 +104,16 @@ pub struct WorkspaceGeometry {
     pub seams: Vec<Seam>,
 }
 
+/// Lay out the active tab. Only a pane `headed` picks out gets a head row,
+/// as an agent or the find bar needs to sit in; the rest wear a legend on
+/// their top edge, and a tab's only pane not even that.
 #[must_use]
-pub fn calculate(session: &Session, width: f32, height: f32) -> WorkspaceGeometry {
+pub fn calculate(
+    session: &Session,
+    width: f32,
+    height: f32,
+    headed: impl Fn(PaneId) -> bool,
+) -> WorkspaceGeometry {
     let mut geometry = WorkspaceGeometry::default();
     let top = TAB_BAR_HEIGHT + WORKSPACE_TOP_GAP;
     let bounds = Rect {
@@ -95,45 +125,70 @@ pub fn calculate(session: &Session, width: f32, height: f32) -> WorkspaceGeometr
 
     if let Some(tab) = session.active_tab() {
         if let Some(zoomed) = tab.zoomed_pane {
-            geometry.panes.push(pane_geometry(zoomed, bounds, true));
+            // A zoomed pane keeps its legend, which says it is zoomed.
+            let head = if headed(zoomed) {
+                PANE_HEAD_HEIGHT
+            } else {
+                PANE_LEGEND_TOP
+            };
+            geometry
+                .panes
+                .push(pane_geometry(zoomed, bounds, head, true));
         } else {
-            layout_panes(&tab.layout, bounds, tab.focused_pane, &mut geometry);
+            let rest = if matches!(tab.layout, PaneLayout::Leaf(_)) {
+                PANE_BARE_TOP
+            } else {
+                PANE_LEGEND_TOP
+            };
+            let head = |pane_id| {
+                if headed(pane_id) {
+                    PANE_HEAD_HEIGHT
+                } else {
+                    rest
+                }
+            };
+            layout_panes(&tab.layout, bounds, &head, tab.focused_pane, &mut geometry);
         }
     }
     geometry
 }
 
-fn pane_geometry(pane_id: PaneId, frame: Rect, focused: bool) -> PaneGeometry {
+fn pane_geometry(pane_id: PaneId, frame: Rect, head: f32, focused: bool) -> PaneGeometry {
     PaneGeometry {
         pane_id,
         frame,
-        rect: surface_of(frame),
+        rect: surface_of(frame, head),
+        head,
         focused,
     }
 }
 
 /// The terminal surface a slab holds: below its head, inset from its sides.
 #[must_use]
-pub fn surface_of(frame: Rect) -> Rect {
+pub fn surface_of(frame: Rect, head: f32) -> Rect {
     Rect {
         x: frame.x + PANE_BODY_INSET_X,
-        y: frame.y + PANE_HEAD_HEIGHT + PANE_BODY_INSET_Y,
+        y: frame.y + head + PANE_BODY_INSET_Y,
         width: (frame.width - PANE_BODY_INSET_X * 2.0).max(1.0),
-        height: (frame.height - PANE_HEAD_HEIGHT - PANE_BODY_INSET_Y * 2.0).max(1.0),
+        height: (frame.height - head - PANE_BODY_INSET_Y * 2.0).max(1.0),
     }
 }
 
 fn layout_panes(
     layout: &PaneLayout,
     bounds: Rect,
+    head: &impl Fn(PaneId) -> f32,
     focused_pane: PaneId,
     output: &mut WorkspaceGeometry,
 ) {
     match layout {
         PaneLayout::Leaf(pane_id) => {
-            output
-                .panes
-                .push(pane_geometry(*pane_id, bounds, *pane_id == focused_pane));
+            output.panes.push(pane_geometry(
+                *pane_id,
+                bounds,
+                head(*pane_id),
+                *pane_id == focused_pane,
+            ));
         }
         PaneLayout::Split {
             axis,
@@ -196,8 +251,8 @@ fn layout_panes(
                 start,
                 available,
             });
-            layout_panes(first, first_rect, focused_pane, output);
-            layout_panes(second, second_rect, focused_pane, output);
+            layout_panes(first, first_rect, head, focused_pane, output);
+            layout_panes(second, second_rect, head, focused_pane, output);
         }
     }
 }
@@ -210,7 +265,7 @@ mod tests {
     fn pane_slab_sits_on_the_ground_below_the_strip() {
         let pane = PaneId::new();
         let session = Session::with_panes("daily", &[pane]).expect("session");
-        let geometry = calculate(&session, 800.0, 600.0);
+        let geometry = calculate(&session, 800.0, 600.0, |_| false);
 
         assert_eq!(
             geometry.panes[0].frame,
@@ -228,7 +283,7 @@ mod tests {
         let left = PaneId::new();
         let right = PaneId::new();
         let session = Session::with_panes("daily", &[left, right]).expect("session");
-        let geometry = calculate(&session, 800.0, 600.0);
+        let geometry = calculate(&session, 800.0, 600.0, |_| false);
         let [seam] = geometry.seams[..] else {
             panic!("one split, one seam");
         };
@@ -257,10 +312,41 @@ mod tests {
     }
 
     #[test]
+    fn a_pane_only_gets_a_head_row_when_something_sits_in_it() {
+        let pane = PaneId::new();
+        let mut session = Session::with_panes("daily", &[pane]).expect("session");
+        let top = |geometry: PaneGeometry| geometry.rect.y - geometry.frame.y - PANE_BODY_INSET_Y;
+
+        // A tab's only pane: no head, no legend.
+        let bare = calculate(&session, 800.0, 600.0, |_| false).panes[0];
+        assert!(!bare.headed() && !bare.legended());
+        assert!((top(bare) - PANE_BARE_TOP).abs() < f32::EPSILON);
+
+        // An agent or the find bar asks for the head to sit in.
+        let asked = calculate(&session, 800.0, 600.0, |_| true).panes[0];
+        assert!(asked.headed());
+        assert!((top(asked) - PANE_HEAD_HEIGHT).abs() < f32::EPSILON);
+
+        // Beside another pane each wears a legend to be told apart, and only
+        // the one asked for takes a row.
+        let other = PaneId::new();
+        session
+            .active_tab_mut()
+            .expect("tab")
+            .split_focused(other, SplitAxis::Horizontal)
+            .expect("split");
+        let split = calculate(&session, 800.0, 600.0, |pane_id| pane_id == other);
+        for geometry in &split.panes {
+            assert_eq!(geometry.headed(), geometry.pane_id == other);
+            assert_eq!(geometry.legended(), geometry.pane_id != other);
+        }
+    }
+
+    #[test]
     fn terminal_surface_sits_inside_the_slab_below_its_head() {
         let pane = PaneId::new();
         let session = Session::with_panes("daily", &[pane]).expect("session");
-        let geometry = calculate(&session, 800.0, 600.0);
+        let geometry = calculate(&session, 800.0, 600.0, |_| true);
         let pane = geometry.panes[0];
 
         assert_eq!(

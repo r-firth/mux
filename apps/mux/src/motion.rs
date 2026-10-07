@@ -156,7 +156,7 @@ impl LayoutMotion {
                 ),
                 _ => (pane.frame, 1.0, false),
             };
-            let body = layout::surface_of(frame);
+            let body = layout::surface_of(frame, pane.head);
             let drawn = DrawnPane {
                 index,
                 geometry: layout::PaneGeometry {
@@ -500,7 +500,7 @@ impl MuxApp {
             .child(head)
             .into_any_element();
         let surface = shown.map(|(shown, cache)| {
-            let body = layout::surface_of(frame);
+            let body = layout::surface_of(frame, layout::PANE_HEAD_HEIGHT);
             div()
                 .absolute()
                 .left(px(body.x))
@@ -554,7 +554,8 @@ mod tests {
                 .map(|&(pane_id, frame)| layout::PaneGeometry {
                     pane_id,
                     frame,
-                    rect: layout::surface_of(frame),
+                    rect: layout::surface_of(frame, layout::PANE_HEAD_HEIGHT),
+                    head: layout::PANE_HEAD_HEIGHT,
                     focused: Some(pane_id) == focused,
                 })
                 .collect(),
@@ -642,7 +643,11 @@ mod tests {
             .panes
             .iter()
             .find(|pane| pane.geometry.pane_id == new);
-        let (body, settles) = (layout::surface_of(coming), layout::surface_of(RIGHT));
+        let head = layout::PANE_HEAD_HEIGHT;
+        let (body, settles) = (
+            layout::surface_of(coming, head),
+            layout::surface_of(RIGHT, head),
+        );
         assert_eq!(
             pane.expect("drawn").geometry.rect,
             layout::Rect {
