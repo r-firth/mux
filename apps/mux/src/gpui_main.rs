@@ -11,6 +11,7 @@ mod chrome;
 mod gpui_terminal;
 mod layout;
 mod links;
+mod palette;
 mod pane_calls;
 mod pane_exit;
 mod scrollback;
@@ -140,6 +141,8 @@ gpui::actions!(
     [
         AcceptAgentCompletion,
         CancelAgentTurn,
+        ChoosePaletteRow,
+        ClosePalette,
         DismissAgentCompletion,
         ForwardTerminalBacktab,
         ForwardTerminalTab,
@@ -149,8 +152,11 @@ gpui::actions!(
         NavigateAgentRight,
         NavigateAgentUp,
         NextAgentChoice,
+        NextPaletteRow,
+        OpenMuxPalette,
         OpenMuxSettings,
         PreviousAgentChoice,
+        PreviousPaletteRow,
         QuitMux,
         SelectNextAgentCompletion,
         SelectPreviousAgentCompletion,
@@ -451,6 +457,9 @@ struct MuxApp {
     size_readout_serial: u64,
     session_sheet: Option<session_sheet::SessionSheet>,
     settings_sheet: Option<settings_sheet::SettingsSheet>,
+    palette: Option<palette::Palette>,
+    /// The tab that was active before the one on screen.
+    previous_tab: Option<TabId>,
     /// Panes whose program has exited, and how. The daemon keeps them until
     /// they are closed.
     pane_exits: HashMap<PaneId, ProcessExit>,
@@ -590,6 +599,8 @@ impl MuxApp {
             size_readout_serial: 0,
             session_sheet: None,
             settings_sheet: None,
+            palette: None,
+            previous_tab: None,
             pane_exits: HashMap::new(),
             pane_restart: None,
             pane_calls: HashMap::new(),
@@ -1010,6 +1021,10 @@ impl MuxApp {
         // stable tab IDs or user-authored text titles.
         attachment.session.normalize_numeric_tab_titles();
         let session_id = attachment.session.id;
+        let before = self
+            .session
+            .as_ref()
+            .map(|session| (session.id, session.active_tab));
         let exits = attachment
             .panes
             .iter()
@@ -1025,6 +1040,7 @@ impl MuxApp {
         }
         self.note_pane_exits(exits);
         self.forget_closed_pane_calls();
+        self.remember_previous_tab(before);
         self.sync_agent_draft_for_active_tab(window, cx);
         let agent_pane = self.active_agent_pane();
         if let Some(pane_id) = agent_pane
@@ -1237,7 +1253,10 @@ impl MuxApp {
     /// A sheet or a chip's rename field is open over the panes. It keeps the
     /// keyboard until it closes, whatever the workspace does meanwhile.
     fn field_has_keyboard(&self) -> bool {
-        self.tab_rename.is_some() || self.session_sheet.is_some() || self.settings_sheet.is_some()
+        self.tab_rename.is_some()
+            || self.session_sheet.is_some()
+            || self.settings_sheet.is_some()
+            || self.palette.is_some()
     }
 
     fn focus_agent_composer(&self, window: &mut Window) {
@@ -1487,15 +1506,7 @@ impl MuxApp {
     }
 
     fn active_agent(&self) -> Option<&AgentSessionSnapshot> {
-        let tab_id = self.active_tab_id()?;
-        match self.selected_agents.get(&tab_id) {
-            Some(Some(session_id)) => self
-                .agents_for_active_tab()
-                .find(|agent| agent.id == *session_id)
-                .or_else(|| self.agents_for_active_tab().next()),
-            Some(None) => None,
-            None => self.agents_for_active_tab().next(),
-        }
+        self.tab_agent(self.active_tab_id()?)
     }
 
     fn select_active_tab_agent(&mut self, selection: Option<AgentSessionId>) {
@@ -1737,9 +1748,7 @@ impl MuxApp {
             Action::DetachSession => cx.quit(),
             Action::OpenAgentSurface => self.toggle_agents(window, cx),
             Action::OpenSettings => self.toggle_settings_sheet(window, cx),
-            Action::OpenCommandPalette => {
-                self.say_in_strip("there's no command palette yet", false, cx);
-            }
+            Action::OpenCommandPalette => self.toggle_palette(window, cx),
         }
         cx.notify();
     }
@@ -3407,7 +3416,12 @@ impl MuxApp {
     /// form. In normal mode each hint is also the button for what it names.
     fn render_mode_hints(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let hints: &[(&str, &str)] = match self.mode {
-            InputMode::Normal => &[("⌃a", "agent"), ("⌃p", "pane"), ("⌃t", "tab")],
+            InputMode::Normal => &[
+                ("⌘p", "go to"),
+                ("⌃p", "pane"),
+                ("⌃t", "tab"),
+                ("⌃a", "agent"),
+            ],
             InputMode::Pane => &[
                 ("hjkl", "focus"),
                 ("r", "right"),
@@ -3460,6 +3474,7 @@ impl MuxApp {
                     .hover(|style| style.bg(wash(0.05)).text_color(color(TEXT)))
                     .active(|style| style.bg(wash(0.10)))
                     .on_click(cx.listener(move |this, _, window, cx| match label {
+                        "go to" => this.toggle_palette(window, cx),
                         "agent" => this.toggle_agents(window, cx),
                         "pane" => this.mode = InputMode::Pane,
                         _ => this.mode = InputMode::Tab,
@@ -3853,6 +3868,9 @@ impl Render for MuxApp {
             .on_action(cx.listener(|this, _: &OpenMuxSettings, window, cx| {
                 this.toggle_settings_sheet(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &OpenMuxPalette, window, cx| {
+                this.toggle_palette(window, cx);
+            }))
             .on_key_down(cx.listener(Self::handle_key_down))
             .on_key_up(cx.listener(Self::handle_key_up));
         let mut root = Self::with_pointer_capture(root, cx)
@@ -3890,6 +3908,7 @@ impl Render for MuxApp {
         }
         root.children(self.render_session_sheet(cx))
             .children(self.render_settings_sheet(cx))
+            .children(self.render_palette(viewport, cx))
     }
 }
 
@@ -4699,6 +4718,7 @@ fn configure_application_menu(cx: &mut App) {
         name: "Mux".into(),
         disabled: false,
         items: vec![
+            MenuItem::action("Go to…", OpenMuxPalette),
             MenuItem::action("Settings…", OpenMuxSettings),
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
@@ -4713,6 +4733,21 @@ fn configure_application_actions(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-q", QuitMux, None),
         KeyBinding::new("cmd-,", OpenMuxSettings, None),
+        KeyBinding::new("cmd-p", OpenMuxPalette, None),
+        KeyBinding::new("cmd-shift-p", OpenMuxPalette, None),
+    ]);
+    // The palette's field keeps typing; the keys that move through the
+    // list, choose from it and close it are the palette's.
+    let palette = Some("MuxPalette > Input");
+    cx.bind_keys([
+        KeyBinding::new("up", PreviousPaletteRow, palette),
+        KeyBinding::new("ctrl-p", PreviousPaletteRow, palette),
+        KeyBinding::new("shift-tab", PreviousPaletteRow, palette),
+        KeyBinding::new("down", NextPaletteRow, palette),
+        KeyBinding::new("ctrl-n", NextPaletteRow, palette),
+        KeyBinding::new("tab", NextPaletteRow, palette),
+        KeyBinding::new("enter", ChoosePaletteRow, palette),
+        KeyBinding::new("escape", ClosePalette, palette),
     ]);
     // Terminal panes own Tab; the component root must not turn it into focus traversal.
     cx.bind_keys([

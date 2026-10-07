@@ -40,7 +40,7 @@ fn pane_end(panes_in_tab: usize, tabs: usize) -> PaneEnd {
 }
 
 /// How an exit reads: the code only when it says something went wrong.
-fn exit_words(status: ProcessExit) -> String {
+pub(super) fn exit_words(status: ProcessExit) -> String {
     match status.code {
         Some(code) if !status.success => format!("exited {code}"),
         _ => "exited".to_owned(),

@@ -33,6 +33,7 @@ impl MuxApp {
         }
         self.finish_tab_rename(true, window, cx);
         self.session_sheet = None;
+        self.palette = None;
         let focus = cx.focus_handle();
         let deferred = focus.clone();
         window.on_next_frame(move |window, cx| deferred.focus(window, cx));
