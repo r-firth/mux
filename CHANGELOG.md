@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1](https://github.com/r-firth/mux/compare/v0.9.0...v0.9.1) (2026-10-07)
+
+
+### Performance Improvements
+
+* a pane's parser lets the window in between parts of a long output ([df4774b](https://github.com/r-firth/mux/commit/df4774bda4763102684fc529fe5df969010c2f66))
+
 ## [0.9.0](https://github.com/r-firth/mux/compare/v0.8.2...v0.9.0) (2026-10-07)
 
 
