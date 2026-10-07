@@ -488,6 +488,11 @@ mod linked {
             out_len: *mut usize,
             out_has_selection: *mut bool,
         ) -> i32;
+        fn mux_ghostty_terminal_screen_text(
+            terminal: *mut c_void,
+            out_bytes: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32;
         fn mux_ghostty_terminal_encode_paste(
             terminal: *mut c_void,
             bytes: *const u8,
@@ -796,6 +801,31 @@ mod linked {
                 descriptor: descriptor(),
                 next_sequence: checkpoint.next_sequence,
             })
+        }
+
+        /// The whole screen as plain text, history first: one line per row,
+        /// so a line's index is its row counted from the top of the history.
+        /// Rows past the last one with text may be left out.
+        pub fn screen_text(&self) -> Result<String, GhosttyError> {
+            let mut bytes = ptr::null_mut();
+            let mut length = 0_usize;
+            // SAFETY: output pointers are valid; the returned allocation is
+            // copied before it is released with the matching shim function.
+            let result = unsafe {
+                mux_ghostty_terminal_screen_text(
+                    self.terminal.as_ptr(),
+                    &raw mut bytes,
+                    &raw mut length,
+                )
+            };
+            check(result)?;
+            let text =
+                String::from_utf8_lossy(borrowed_slice(bytes.cast_const(), length, "screen text")?)
+                    .into_owned();
+            // SAFETY: the pointer is the allocation returned by the shim, and
+            // freeing null for an empty screen is supported.
+            unsafe { mux_ghostty_buffer_free(bytes) };
+            Ok(text)
         }
 
         fn checkpoint(&self) -> Result<TerminalCheckpoint, GhosttyError> {
@@ -1822,6 +1852,32 @@ mod linked {
                     .any(|window| window == env!("CARGO_PKG_VERSION").as_bytes())
             );
             assert!(engine.take_pty_responses().expect("drained").is_empty());
+        }
+
+        #[test]
+        fn screen_text_has_a_line_for_every_row_history_included() {
+            let mut engine = GhosttyEngine::new(TerminalSize {
+                cols: 12,
+                rows: 4,
+                ..TerminalSize::default()
+            })
+            .expect("new terminal");
+            // A blank first row, a blank row between, a row that wraps, and
+            // enough rows to push the top of it into the history.
+            engine
+                .apply_output(
+                    1,
+                    b"\r\none\r\n\r\nthree  x\r\nabcdefghijklmnop\r\nlast\r\n\r\n",
+                )
+                .expect("terminal output");
+            let text = engine.screen_text().expect("screen text");
+            let lines: Vec<&str> = text.lines().collect();
+            assert_eq!(
+                &lines[..7],
+                &["", "one", "", "three  x", "abcdefghijkl", "mnop", "last"]
+            );
+            let frame = engine.render_frame().expect("frame");
+            assert!(lines.len() <= usize::try_from(frame.scroll.total).expect("rows"));
         }
 
         #[test]

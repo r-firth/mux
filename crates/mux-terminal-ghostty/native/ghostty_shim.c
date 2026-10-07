@@ -940,6 +940,51 @@ int32_t mux_ghostty_terminal_selected_text(
   return (int32_t)GHOSTTY_SUCCESS;
 }
 
+/* The whole screen as plain text, history included: one line per row, top
+ * row first, soft wraps kept as line breaks so a line's index is its row. */
+int32_t mux_ghostty_terminal_screen_text(
+    mux_ghostty_terminal_t raw_terminal,
+    uint8_t **out_bytes,
+    size_t *out_len) {
+  if (out_bytes == NULL || out_len == NULL) {
+    return (int32_t)GHOSTTY_INVALID_VALUE;
+  }
+  *out_bytes = NULL;
+  *out_len = 0;
+  GhosttyFormatterTerminalOptions options =
+      GHOSTTY_INIT_SIZED(GhosttyFormatterTerminalOptions);
+  options.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN;
+  options.unwrap = false;
+  options.trim = true;
+  options.extra.size = sizeof(GhosttyFormatterTerminalExtra);
+  options.extra.screen.size = sizeof(GhosttyFormatterScreenExtra);
+  options.selection = NULL;
+  GhosttyFormatter formatter = NULL;
+  GhosttyResult result = ghostty_formatter_terminal_new(
+      NULL, &formatter, (GhosttyTerminal)raw_terminal, options);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+  uint8_t *ghostty_bytes = NULL;
+  size_t ghostty_len = 0;
+  result = ghostty_formatter_format_alloc(
+      formatter, NULL, &ghostty_bytes, &ghostty_len);
+  ghostty_formatter_free(formatter);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+
+  uint8_t *copy = NULL;
+  if (ghostty_len > 0) {
+    copy = malloc(ghostty_len);
+    if (copy == NULL) {
+      ghostty_free(NULL, ghostty_bytes, ghostty_len);
+      return (int32_t)GHOSTTY_OUT_OF_MEMORY;
+    }
+    memcpy(copy, ghostty_bytes, ghostty_len);
+  }
+  ghostty_free(NULL, ghostty_bytes, ghostty_len);
+  *out_bytes = copy;
+  *out_len = ghostty_len;
+  return (int32_t)GHOSTTY_SUCCESS;
+}
+
 int32_t mux_ghostty_terminal_encode_paste(
     mux_ghostty_terminal_t raw_terminal,
     const uint8_t *bytes,

@@ -83,7 +83,11 @@ impl MuxApp {
         }
     }
 
-    fn scroll_viewport(&mut self, pane_id: PaneId, movement: TerminalViewportScroll) -> bool {
+    pub(super) fn scroll_viewport(
+        &mut self,
+        pane_id: PaneId,
+        movement: TerminalViewportScroll,
+    ) -> bool {
         let Some(pane) = self.panes.get_mut(&pane_id) else {
             return false;
         };
@@ -98,13 +102,20 @@ impl MuxApp {
         true
     }
 
-    /// The thumb on a scrolled-back pane's right edge.
+    /// The thumb on a scrolled-back pane's right edge. While find is open in
+    /// a pane with history, it shows there too, beside the ticks for what was
+    /// found.
     pub(super) fn render_scroll_thumb(
         &self,
         geometry: layout::PaneGeometry,
     ) -> Option<gpui::AnyElement> {
         let scroll = self.panes.get(&geometry.pane_id)?.frame.scroll;
-        if !scroll.is_scrolled() {
+        let finding = self
+            .find
+            .as_ref()
+            .is_some_and(|find| find.pane_id == geometry.pane_id)
+            && scroll.total > scroll.len;
+        if !scroll.is_scrolled() && !finding {
             return None;
         }
         let rect = geometry.rect;

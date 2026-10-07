@@ -71,6 +71,23 @@ pane to its latest output.
 | `Cmd+PageUp` / `Cmd+PageDown` | Move a page through the history |
 | `Shift+PageUp` / `Shift+PageDown` | The same, unless the program has no history (a full-screen program keeps them) |
 
+## Find
+
+`Cmd+F` opens find in the focused pane's head, so it takes no rows from the
+terminal. Every place the text appears in the pane, its history included, is
+marked: the current one solid in the tab's ink, the rest washed in it, with a
+tick for each on the pane's right edge to show where in the history it is.
+The search starts from the latest output and works up. Lowercase text finds
+either case; a capital makes the search exact. New output is searched as it
+arrives.
+
+| Keys | Action |
+| --- | --- |
+| Return, Up or `Cmd+G` | The next place up, in older output |
+| Shift+Return, Down or `Cmd+Shift+G` | The next place down, in newer output |
+| Escape | Close find, leaving the pane where it is |
+| `Cmd+F` | Back to the field with its text selected, to type over it |
+
 ## Links
 
 Hold `Cmd` over a link in a pane's output, an OSC 8 hyperlink or a URL

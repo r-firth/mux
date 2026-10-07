@@ -8,6 +8,7 @@ mod agent_completion;
 mod agent_view;
 mod backend;
 mod chrome;
+mod find;
 mod gpui_terminal;
 mod layout;
 mod links;
@@ -142,8 +143,11 @@ gpui::actions!(
         AcceptAgentCompletion,
         CancelAgentTurn,
         ChoosePaletteRow,
+        CloseFind,
         ClosePalette,
         DismissAgentCompletion,
+        FindNewer,
+        FindOlder,
         ForwardTerminalBacktab,
         ForwardTerminalTab,
         InsertAgentCompletion,
@@ -153,6 +157,7 @@ gpui::actions!(
         NavigateAgentUp,
         NextAgentChoice,
         NextPaletteRow,
+        OpenFind,
         OpenMuxPalette,
         OpenMuxSettings,
         PreviousAgentChoice,
@@ -458,6 +463,7 @@ struct MuxApp {
     session_sheet: Option<session_sheet::SessionSheet>,
     settings_sheet: Option<settings_sheet::SettingsSheet>,
     palette: Option<palette::Palette>,
+    find: Option<find::PaneFind>,
     /// The tab that was active before the one on screen.
     previous_tab: Option<TabId>,
     /// Panes whose program has exited, and how. The daemon keeps them until
@@ -600,6 +606,7 @@ impl MuxApp {
             session_sheet: None,
             settings_sheet: None,
             palette: None,
+            find: None,
             previous_tab: None,
             pane_exits: HashMap::new(),
             pane_restart: None,
@@ -1549,7 +1556,10 @@ impl MuxApp {
             // the window lost focus before GPUI delivered the prior key-up.
             self.terminal_key_presses.remove(&event.keystroke.key);
         }
-        if window.has_active_dialog(cx) || window.has_active_sheet(cx) || self.field_has_keyboard()
+        if window.has_active_dialog(cx)
+            || window.has_active_sheet(cx)
+            || self.field_has_keyboard()
+            || self.find_has_keyboard(window, cx)
         {
             cx.propagate();
             return;
@@ -3831,6 +3841,7 @@ impl MuxApp {
                     surface: color(SURFACE),
                     cursor: self.active_ink().color(),
                 },
+                self.find_marks(pane_id),
             ));
         Some(surface.into_any_element())
     }
@@ -3860,6 +3871,7 @@ impl Render for MuxApp {
         let geometry =
             self.sync_terminal_sizes(f32::from(viewport.width), f32::from(viewport.height));
         self.settle_frame_state(window, cx);
+        self.refresh_find(window, cx);
         let pane_count = geometry.panes.len();
         let root = div()
             .id("mux-root")
@@ -3876,6 +3888,9 @@ impl Render for MuxApp {
             .on_action(cx.listener(|this, _: &OpenMuxPalette, window, cx| {
                 this.toggle_palette(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &OpenFind, window, cx| this.open_find(window, cx)))
+            .on_action(cx.listener(|this, _: &FindOlder, _, cx| this.step_find(true, cx)))
+            .on_action(cx.listener(|this, _: &FindNewer, _, cx| this.step_find(false, cx)))
             .on_key_down(cx.listener(Self::handle_key_down))
             .on_key_up(cx.listener(Self::handle_key_up));
         let mut root = Self::with_pointer_capture(root, cx)
@@ -3905,6 +3920,8 @@ impl Render for MuxApp {
                 root = root.children(self.render_terminal_pane(geometry, cx));
                 root = root.children(self.render_pane_exit(geometry));
                 root = root.children(self.render_scroll_thumb(geometry));
+                root = root.children(self.render_find_ticks(geometry));
+                root = root.children(self.render_pane_find(geometry, cx));
                 root = root.children(self.render_link_underline(geometry));
             }
             if let Some(letter) = hints.get(&pane_id) {
@@ -4740,6 +4757,9 @@ fn configure_application_actions(cx: &mut App) {
         KeyBinding::new("cmd-,", OpenMuxSettings, None),
         KeyBinding::new("cmd-p", OpenMuxPalette, None),
         KeyBinding::new("cmd-shift-p", OpenMuxPalette, None),
+        KeyBinding::new("cmd-f", OpenFind, None),
+        KeyBinding::new("cmd-g", FindOlder, None),
+        KeyBinding::new("cmd-shift-g", FindNewer, None),
     ]);
     // The palette's field keeps typing; the keys that move through the
     // list, choose from it and close it are the palette's.
@@ -4753,6 +4773,14 @@ fn configure_application_actions(cx: &mut App) {
         KeyBinding::new("tab", NextPaletteRow, palette),
         KeyBinding::new("enter", ChoosePaletteRow, palette),
         KeyBinding::new("escape", ClosePalette, palette),
+    ]);
+    let find = Some("MuxFind > Input");
+    cx.bind_keys([
+        KeyBinding::new("enter", FindOlder, find),
+        KeyBinding::new("up", FindOlder, find),
+        KeyBinding::new("shift-enter", FindNewer, find),
+        KeyBinding::new("down", FindNewer, find),
+        KeyBinding::new("escape", CloseFind, find),
     ]);
     // Terminal panes own Tab; the component root must not turn it into focus traversal.
     cx.bind_keys([
