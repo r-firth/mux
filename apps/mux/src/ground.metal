@@ -1,4 +1,7 @@
-// The ground's light, cell for cell as `Field` works it out in ground.rs.
+// The ground: a panel of round dots, the same dots the session's name is
+// set in, lit by the light `Field` works out in ground.rs. Every dot is
+// always faintly there; the light brings dots up through an ordered dither,
+// so a swell crossing the panel reads as a pattern shifting, not as noise.
 // Names between dollar signs are the ground's own numbers, written in when
 // the shader is built.
 #include <metal_stdlib>
@@ -49,9 +52,58 @@ static float outside(float2 point, float4 rect) {
     return length(away);
 }
 
-static float dot_level(float value, float threshold) {
-    return float(value > threshold) + float(value > threshold + 1.0)
-        + float(value > threshold + 2.0);
+// gofer's 4x4 ordered dither.
+static float bayer(uint2 at) {
+    const float order[16] = {
+        0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0
+    };
+    return (order[(at.x & 3) + (at.y & 3) * 4] + 0.5) / 16.0;
+}
+
+// How far a light of this strength brings up a dot whose turn comes at
+// `threshold`: softly, as gofer's signal does, so a dot fades up rather than
+// snapping on.
+static float lit(float value, float threshold) {
+    return smoothstep(threshold - 0.12, threshold + 0.12, value);
+}
+
+// The light a focused slab, the active chip, busy panes and a wake cast at a
+// point, apart from the slow fields and the tide: what glows under the dots
+// as well as lighting them.
+static float cast(float2 point, constant Frame &frame, thread float &signal) {
+    float own = 0.0;
+    if (frame.wake.w > 0.0) {
+        float behind = frame.wake.z - distance(point, frame.wake.xy);
+        if (behind >= 0.0 && behind < $wake_trail$) {
+            float tail = 1.0 - behind / $wake_trail$;
+            own += frame.wake.w * tail * tail * smoothstep(0.0, 8.0, behind);
+        }
+    }
+    if (frame.focus_light.y > 0.5) {
+        float away = outside(point, frame.focus);
+        own += frame.focus_light.x
+            * (0.42 * fall(away, $focus_reach$) + 0.18 * fall(away, $focus_rim$));
+    }
+    if (frame.chip_light.x > 0.5) {
+        own += 0.3 * fall(outside(point, frame.chip), $chip_glow$);
+    }
+    for (int index = 0; index < int(frame.counts.x); index++) {
+        own += frame.busy_light[index / 4][index % 4] * 0.45
+            * fall(outside(point, frame.busy[index]), $busy_reach$);
+    }
+    for (int index = 0; index < int(frame.counts.y); index++) {
+        float away = outside(point, frame.calls[index]);
+        signal += 0.3 * fall(away, 20.0);
+        if (frame.ringing[index / 4][index % 4] > 0.5) {
+            float4 rings = frame.rings[index];
+            float near = max(1.0 - abs(away - rings.x) / $ring_width$, 0.0);
+            float far = max(1.0 - abs(away - rings.z) / $ring_width$, 0.0);
+            signal += rings.y * near * near + rings.w * far * far;
+        } else {
+            signal += 0.3 * fall(away, 48.0);
+        }
+    }
+    return own;
 }
 
 fragment float4 ground_fragment(
@@ -59,19 +111,14 @@ fragment float4 ground_fragment(
     constant Frame &frame [[buffer(0)]],
     texture2d<float> noise [[texture(0)]]
 ) {
-    const uint2 corners[4] = { $corners$ };
     const float turn = 6.28318530718;
-    float cell = frame.view.z;
-    uint2 at = uint2(in.position.xy);
-    float2 point = (float2(at) + 0.5) * cell;
-
-    // Each ink reads the noise from its own corner of the tile.
-    float raw[4];
-    float threshold[4];
-    for (int ink = 0; ink < 4; ink++) {
-        raw[ink] = noise.read((at + corners[ink]) % 64).r * 255.0;
-        threshold[ink] = (raw[ink] + 0.5) / 256.0;
-    }
+    const float pitch = $pitch$;
+    float scale = frame.clock.w;
+    float2 here = in.position.xy / scale;
+    uint2 at = uint2(here / pitch);
+    // The middle of the dot this pixel belongs to: the light is worked out
+    // there, so a dot is one colour all over.
+    float2 point = (float2(at) + 0.5) * pitch;
 
     // The slow fields.
     float fields[3] = { 0.0, 0.0, 0.0 };
@@ -98,70 +145,52 @@ fragment float4 ground_fragment(
         float carried = $trough$ + (1.6 - $trough$) * swell;
         own = own * (1.0 + (carried - 1.0) * reach) + $crest$ * swell * reach;
     }
+    own += cast(point, frame, signal);
 
-    // A wake passing.
-    if (frame.wake.w > 0.0) {
-        float behind = frame.wake.z - distance(point, frame.wake.xy);
-        if (behind >= 0.0 && behind < $wake_trail$) {
-            float tail = 1.0 - behind / $wake_trail$;
-            own += frame.wake.w * tail * tail * smoothstep(0.0, 8.0, behind);
-        }
-    }
-
-    if (frame.focus_light.y > 0.5) {
-        float away = outside(point, frame.focus);
-        own += frame.focus_light.x
-            * (0.42 * fall(away, $focus_reach$) + 0.18 * fall(away, $focus_rim$));
-    }
-    if (frame.chip_light.x > 0.5) {
-        own += 0.3 * fall(outside(point, frame.chip), $chip_glow$);
-    }
-    for (int index = 0; index < int(frame.counts.x); index++) {
-        own += frame.busy_light[index / 4][index % 4] * 0.45
-            * fall(outside(point, frame.busy[index]), $busy_reach$);
-    }
-    for (int index = 0; index < int(frame.counts.y); index++) {
-        float away = outside(point, frame.calls[index]);
-        signal += 0.3 * fall(away, 20.0);
-        if (frame.ringing[index / 4][index % 4] > 0.5) {
-            float4 rings = frame.rings[index];
-            float near = max(1.0 - abs(away - rings.x) / $ring_width$, 0.0);
-            float far = max(1.0 - abs(away - rings.z) / $ring_width$, 0.0);
-            signal += rings.y * near * near + rings.w * far * far;
-        } else {
-            signal += 0.3 * fall(away, 48.0);
-        }
-    }
-
-    // Each step a different few dots light a little early.
-    if (moving && ((uint(raw[3] + 0.5) + uint(frame.clock.z)) & 255) < $shimmer_share$) {
+    // Each step a different few dots come up a little early.
+    float chance = noise.read(at % 64).r * 255.0;
+    if (moving && ((uint(chance + 0.5) + uint(frame.clock.z)) & 255) < $shimmer_share$) {
         own += $shimmer$;
     }
 
-    int levels[4] = {
-        int(dot_level(own, threshold[0])),
-        int(dot_level(first, threshold[1])),
-        int(dot_level(second, threshold[2])),
-        int(dot_level(signal, threshold[3])),
+    // Each ink takes its turn from its own corner of the dither.
+    float threshold = bayer(at);
+    float up[4] = {
+        lit(own, threshold),
+        lit(first, bayer(at + uint2(1, 2))),
+        lit(second, bayer(at + uint2(2, 1))),
+        lit(signal, bayer(at + uint2(3, 3))),
     };
-    bool lit = (levels[0] + levels[1] + levels[2] + levels[3]) > 0;
+    // Light past a dot's turn makes it burn brighter.
+    float burn = lit(own - 1.0, threshold);
 
-    // An ink dissolving away keeps the cells the new one has not reached,
-    // its edge frayed by each cell's threshold.
+    // An ink dissolving away keeps the dots the new one has not reached,
+    // its edge frayed by each dot's turn.
     bool old = false;
-    if (lit && frame.leaving.w > 0.5) {
+    if (frame.leaving.w > 0.5) {
         float reached = frame.leaving.z;
         float away = distance(point, frame.leaving.xy);
-        bool inside = reached > $fray$ && away <= reached - $fray$;
-        old = !inside
-            && (away > reached + $fray$
-                || away + (threshold[0] - 0.5) * $fray$ * 2.0 > reached);
+        old = away + (threshold - 0.5) * $fray$ * 2.0 > reached;
     }
 
-    float3 colour = frame.ground.rgb;
-    for (int ink = 0; ink < 4; ink++) {
-        int tone = ink * 4 + levels[ink];
-        colour += old ? frame.old_tones[tone].rgb : frame.tones[tone].rgb;
-    }
-    return float4(min(colour, float3(1.0)), 1.0);
+    // The dot: always faintly there, and brought up by each ink's light.
+    float3 own_ink = old ? frame.old_tones[3].rgb : frame.tones[3].rgb;
+    float3 glow = $unlit$ * own_ink;
+    glow += up[0] * (0.82 + 0.38 * burn) * own_ink;
+    glow += up[1] * (old ? frame.old_tones[7].rgb : frame.tones[7].rgb);
+    glow += up[2] * (old ? frame.old_tones[11].rgb : frame.tones[11].rgb);
+    glow += up[3] * frame.tones[15].rgb;
+
+    // Round, with a soft edge a pixel wide.
+    float radius = pitch * ($dot_size$ + $dot_swell$ * up[0] * burn);
+    float cover = clamp((radius - distance(here, point)) * scale + 0.5, 0.0, 1.0);
+
+    // Under the dots, the light a focused slab casts glows on the ground
+    // itself, smoothly: worked out at the pixel, not the dot.
+    float spare = 0.0;
+    float wash = cast(here, frame, spare);
+    float3 colour = frame.ground.rgb + $wash$ * min(wash, 1.2) * own_ink;
+
+    colour = mix(colour, min(colour + glow, float3(1.0)), cover);
+    return float4(colour, 1.0);
 }

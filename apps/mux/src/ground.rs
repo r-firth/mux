@@ -1357,9 +1357,12 @@ impl GroundView {
             return Some(false);
         };
         scene.active = window.is_window_active();
-        let (frame, grain) = shared
-            .ground
-            .gpu_frame(scene, Instant::now(), shared.wants_field);
+        let (frame, grain) = shared.ground.gpu_frame(
+            scene,
+            Instant::now(),
+            window.scale_factor(),
+            shared.wants_field,
+        );
         shared.grain = grain;
         gpu.draw(&frame);
         Some(shared.ground.moving())
