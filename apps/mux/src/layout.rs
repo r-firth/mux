@@ -14,9 +14,6 @@ pub const PANE_HEAD_HEIGHT: f32 = 24.0;
 /// What an ordinary pane keeps above its terminal instead of a row: room for
 /// the lower half of its legend, the small label set into its top edge.
 pub const PANE_LEGEND_TOP: f32 = 8.0;
-/// What a tab's only pane keeps: nothing but clearance for the slab's
-/// rounded corners. Its tab already says where it is.
-pub const PANE_BARE_TOP: f32 = 4.0;
 const PANE_BODY_INSET_X: f32 = 6.0;
 const PANE_BODY_INSET_Y: f32 = 2.0;
 
@@ -35,8 +32,8 @@ pub struct PaneGeometry {
     pub frame: Rect,
     /// The terminal surface inside the slab. Pointer and grid maths use this.
     pub rect: Rect,
-    /// How much of the slab's top is kept from its terminal: one of
-    /// `PANE_HEAD_HEIGHT`, `PANE_LEGEND_TOP` and `PANE_BARE_TOP`.
+    /// How much of the slab's top is kept from its terminal:
+    /// `PANE_HEAD_HEIGHT` or `PANE_LEGEND_TOP`.
     pub head: f32,
     pub focused: bool,
 }
@@ -59,7 +56,7 @@ impl PaneGeometry {
     /// Whether the slab is named by a legend on its top edge.
     #[must_use]
     pub fn legended(&self) -> bool {
-        !self.headed() && self.head >= PANE_LEGEND_TOP
+        !self.headed()
     }
 }
 
@@ -105,8 +102,9 @@ pub struct WorkspaceGeometry {
 }
 
 /// Lay out the active tab. Only a pane `headed` picks out gets a head row,
-/// as an agent or the find bar needs to sit in; the rest wear a legend on
-/// their top edge, and a tab's only pane not even that.
+/// as an agent or the find bar needs to sit in; every other pane wears a
+/// legend on its top edge, alone in its tab or not, so a pane looks the same
+/// wherever it is.
 #[must_use]
 pub fn calculate(
     session: &Session,
@@ -135,16 +133,11 @@ pub fn calculate(
                 .panes
                 .push(pane_geometry(zoomed, bounds, head, true));
         } else {
-            let rest = if matches!(tab.layout, PaneLayout::Leaf(_)) {
-                PANE_BARE_TOP
-            } else {
-                PANE_LEGEND_TOP
-            };
             let head = |pane_id| {
                 if headed(pane_id) {
                     PANE_HEAD_HEIGHT
                 } else {
-                    rest
+                    PANE_LEGEND_TOP
                 }
             };
             layout_panes(&tab.layout, bounds, &head, tab.focused_pane, &mut geometry);
@@ -317,10 +310,10 @@ mod tests {
         let mut session = Session::with_panes("daily", &[pane]).expect("session");
         let top = |geometry: PaneGeometry| geometry.rect.y - geometry.frame.y - PANE_BODY_INSET_Y;
 
-        // A tab's only pane: no head, no legend.
-        let bare = calculate(&session, 800.0, 600.0, |_| false).panes[0];
-        assert!(!bare.headed() && !bare.legended());
-        assert!((top(bare) - PANE_BARE_TOP).abs() < f32::EPSILON);
+        // A tab's only pane wears a legend like any other.
+        let alone = calculate(&session, 800.0, 600.0, |_| false).panes[0];
+        assert!(alone.legended());
+        assert!((top(alone) - PANE_LEGEND_TOP).abs() < f32::EPSILON);
 
         // An agent or the find bar asks for the head to sit in.
         let asked = calculate(&session, 800.0, 600.0, |_| true).panes[0];
