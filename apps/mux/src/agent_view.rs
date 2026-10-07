@@ -477,9 +477,9 @@ impl MuxApp {
             .into_any_element()
     }
 
-    /// No agent in this tab yet: where one would start, in dot-matrix, and the
-    /// agents this machine can run. ↑↓ choose, enter starts, typing asks the
-    /// chosen one straight away.
+    /// No agent in this tab yet: where one would start, and the agents this
+    /// machine can run. ↑↓ choose, enter starts, typing asks the chosen one
+    /// straight away.
     fn launcher(&self, view: &PaneView<'_>) -> Vec<AnyElement> {
         let grid = view.grid;
         let cwd = self
@@ -489,9 +489,6 @@ impl MuxApp {
             .map(chrome::terminal_place)
             .filter(|place| place.starts_with('~') || place.starts_with('/'))
             .map(str::to_owned);
-        let place = cwd
-            .as_deref()
-            .map_or_else(|| "agent".to_owned(), place_name);
         let chosen = self.launcher_profile().map(|profile| profile.id.clone());
         let ready = self
             .enabled_profiles()
@@ -520,7 +517,6 @@ impl MuxApp {
         vec![
             thread_head(
                 grid,
-                &place,
                 div()
                     .font_weight(FontWeight::BOLD)
                     .child("new agent")
@@ -1052,25 +1048,17 @@ fn session_intro(view: &PaneView<'_>, agent: &AgentSessionSnapshot) -> Vec<AnyEl
 /// gofer's slab head, set at the top of the thread rather than over it: one
 /// dot-matrix fact (where), then two quiet lines beside it. It scrolls away
 /// with the thread, so it never costs the pane a row.
-fn thread_head(grid: Grid, place: &str, title: AnyElement, meta: String) -> AnyElement {
-    let pitch = if grid.compact { 3.5 } else { 5.0 };
-    let place: String = place
-        .chars()
-        .take(if grid.compact { 8 } else { 12 })
-        .collect();
-    h_flex()
-        .w_full()
+fn thread_head(grid: Grid, title: AnyElement, meta: String) -> AnyElement {
+    v_flex()
         .min_w_0()
-        .gap(px(16.0))
-        .children(chrome::dot_matrix(&place, pitch, color(TEXT)))
+        .ml(px(grid.column))
+        .child(title)
         .child(
-            v_flex().min_w_0().child(title).child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(color(FAINT_TEXT))
-                    .child(meta),
-            ),
+            div()
+                .min_w_0()
+                .truncate()
+                .text_color(color(FAINT_TEXT))
+                .child(meta),
         )
         .into_any_element()
 }
@@ -1100,22 +1088,7 @@ fn session_head(view: &PaneView<'_>, agent: &AgentSessionSnapshot) -> AnyElement
     if agent.started_at > 0 {
         meta.push(format!("since {}", clock(agent.started_at)));
     }
-    thread_head(
-        view.grid,
-        &place_name(&agent.cwd.display().to_string()),
-        title,
-        meta.join(" · "),
-    )
-}
-
-/// A directory's last component, as the dot-matrix shows a place.
-fn place_name(path: &str) -> String {
-    let path = path.trim_end_matches('/');
-    match path.rsplit('/').next() {
-        Some("~") | None => "home".to_owned(),
-        Some("") => "root".to_owned(),
-        Some(name) => name.to_lowercase(),
-    }
+    thread_head(view.grid, title, meta.join(" · "))
 }
 
 /// One agent the launcher can start.
