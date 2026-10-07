@@ -387,6 +387,8 @@ struct MuxApp {
     agent_availability: HashMap<String, bool>,
     /// The launcher's chosen agent while no agent runs in the tab.
     launcher_choice: Option<String>,
+    /// The launcher choice whose install command was just copied.
+    launcher_copied: Option<String>,
     /// The option a pending permission card highlights, by request.
     permission_choice: Option<(String, usize)>,
     agent_placeholder: String,
@@ -512,6 +514,7 @@ impl MuxApp {
             agent_pulse_running: false,
             agent_availability: HashMap::new(),
             launcher_choice: None,
+            launcher_copied: None,
             permission_choice: None,
             agent_placeholder: String::new(),
             agent_unseen: HashSet::new(),
@@ -589,8 +592,6 @@ impl MuxApp {
         .detach();
     }
 
-    /// Keep the agent pulse stepping while something in a visible agent pane
-    /// is live, and let it stop by itself once nothing is.
     /// Keep the slow pulse ticking while anything shows it: a live agent
     /// pane, or a tab chip whose agent is at work behind the scenes. It stops
     /// by itself once nothing is working, so an idle window never redraws.
@@ -1266,6 +1267,7 @@ impl MuxApp {
             self.backend.send(CommandMessage::ListAgents);
             self.backend
                 .send(CommandMessage::RefreshAgentFiles { pane_id });
+            self.recheck_missing_agents(window, cx);
             self.focus_agent_composer(window);
         }
         self.mode = InputMode::Normal;
@@ -1941,7 +1943,11 @@ impl MuxApp {
                 && self.pending_agent_prompt.is_none()
                 && let Some(profile) = self.launcher_profile().cloned()
             {
-                self.launch_agent_profile(&profile, window, cx);
+                if self.launcher_profile_still_missing() {
+                    self.copy_launcher_install_command(cx);
+                } else {
+                    self.launch_agent_profile(&profile, window, cx);
+                }
             }
             return;
         }
@@ -1970,6 +1976,12 @@ impl MuxApp {
                 );
                 return;
             };
+            if self.launcher_profile_still_missing() {
+                // Enter does what the launcher says: copy how to install it.
+                // The draft stays for once it is.
+                self.copy_launcher_install_command(cx);
+                return;
+            }
             let prompt = AgentPrompt {
                 text: draft.to_owned(),
                 context: self.agent_prompt_context().unwrap_or_default(),
@@ -2377,6 +2389,62 @@ impl MuxApp {
             .unwrap_or_default();
         let next = wrapping_step(current, delta, ids.len());
         self.launcher_choice = Some(ids[next].clone());
+        self.launcher_copied = None;
+    }
+
+    /// Whether the launcher's choice is known not to be installed here.
+    fn launcher_profile_missing(&self) -> bool {
+        self.launcher_profile()
+            .is_some_and(|profile| self.agent_availability.get(&profile.id) == Some(&false))
+    }
+
+    /// Whether the launcher's choice is still missing after one more look: it
+    /// may have been installed in a shell since. The login shell's PATH was
+    /// learned by the first look, so this is a few file checks, quick enough
+    /// for a keypress.
+    fn launcher_profile_still_missing(&mut self) -> bool {
+        if !self.launcher_profile_missing() {
+            return false;
+        }
+        let Some(profile) = self.launcher_profile().cloned() else {
+            return false;
+        };
+        let available = profile.spec.command_available();
+        self.agent_availability.insert(profile.id, available);
+        !available
+    }
+
+    /// Look again, off the UI thread, for agents last seen missing, so the
+    /// launcher catches up with whatever was installed in the meantime.
+    fn recheck_missing_agents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.launcher_copied = None;
+        let missing = self
+            .profiles
+            .iter()
+            .filter(|profile| self.agent_availability.get(&profile.id) == Some(&false))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            Self::check_agent_availability(&missing, window, cx);
+        }
+    }
+
+    /// Put the command that installs the launcher's choice on the clipboard,
+    /// ready to paste into the shell behind ⌃a.
+    fn copy_launcher_install_command(&mut self, cx: &mut Context<Self>) {
+        let Some(profile) = self.launcher_profile() else {
+            return;
+        };
+        let id = profile.id.clone();
+        let Some(command) = agent_view::install_command(&id) else {
+            return;
+        };
+        if let Some(clipboard) = &mut self.clipboard
+            && clipboard.set_text(command).is_ok()
+        {
+            self.launcher_copied = Some(id);
+            cx.notify();
+        }
     }
 
     /// Move the highlight of whatever the empty composer is choosing: a
