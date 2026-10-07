@@ -89,6 +89,8 @@ const FAINT_TEXT: u32 = 0x0084_7d71;
 const SAGE: u32 = 0x00a7_b89c;
 const SIGNAL: u32 = 0x00f2_9a6b;
 const EMBEDDED_TERMINAL_FONT: &str = "JetBrainsMono Nerd Font Mono";
+/// One character of the strip's 12.5px mono face: 600 of its 1000 units.
+const STRIP_CHAR_WIDTH: f32 = 7.5;
 const INITIAL_USER_EVENT_BATCH_CAPACITY: usize = 8;
 /// One step of the agent pane's breath; eight make a cycle.
 const AGENT_PULSE_MS: u64 = 300;
@@ -356,6 +358,18 @@ enum SlashOutcome {
     Keep,
 }
 
+/// A tab being renamed where its name is shown, in the chip itself.
+struct TabRename {
+    tab_id: TabId,
+    input: Entity<InputState>,
+    /// What the chip said before. Entering it unchanged leaves the tab as it
+    /// was, so a tab that follows its shell keeps following it.
+    shown: String,
+    /// The tab's place, which stands for "no name" when the field is cleared.
+    number: usize,
+    _subscription: gpui::Subscription,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MotionPreference {
     Full,
@@ -412,6 +426,7 @@ struct MuxApp {
     /// GUI-local tab colours. New tabs take the next ink by position and keep
     /// it, so closing a tab never repaints its neighbours.
     tab_inks: HashMap<TabId, Ink>,
+    tab_rename: Option<TabRename>,
     selected_pane: Option<PaneId>,
     pending_focused_pane: Option<PaneId>,
     selection_drag: Option<TerminalPointerCapture>,
@@ -535,6 +550,7 @@ impl MuxApp {
             agent_placeholder: String::new(),
             agent_unseen: HashSet::new(),
             tab_inks: HashMap::new(),
+            tab_rename: None,
             selected_pane: None,
             pending_focused_pane: None,
             selection_drag: None,
@@ -1419,7 +1435,8 @@ impl MuxApp {
             // the window lost focus before GPUI delivered the prior key-up.
             self.terminal_key_presses.remove(&event.keystroke.key);
         }
-        if window.has_active_dialog(cx) || window.has_active_sheet(cx) {
+        if window.has_active_dialog(cx) || window.has_active_sheet(cx) || self.tab_rename.is_some()
+        {
             cx.propagate();
             return;
         }
@@ -1902,41 +1919,78 @@ impl MuxApp {
             .into_any_element()
     }
 
+    /// Rename the active tab in its own chip: the name turns into a field
+    /// with the text selected, enter keeps it, esc puts it back. Clearing it
+    /// hands the name back to whatever the tab's shell shows.
     fn open_rename_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self
-            .session
-            .as_ref()
-            .and_then(Session::active_tab)
-            .map(|tab| tab.title.clone())
-            .unwrap_or_default();
+        let Some((position, tab)) = self.session.as_ref().and_then(|session| {
+            session
+                .tabs
+                .iter()
+                .enumerate()
+                .find(|(_, tab)| tab.id == session.active_tab)
+        }) else {
+            return;
+        };
+        let tab_id = tab.id;
+        let shown = self.tab_label(tab);
         let input = cx.new(|cx| {
-            let mut input = InputState::new(window, cx).placeholder("Tab name");
-            input.set_value(current, window, cx);
+            let mut input = InputState::new(window, cx);
+            input.set_value(shown.clone(), window, cx);
+            input.select_all(window, cx);
             input
         });
-        let submit_input = input.clone();
-        let app = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let submit_app = app.clone();
-            let input_for_button = submit_input.clone();
-            dialog.title("Rename tab").w(px(420.0)).child(
-                v_flex().gap_3().child(Input::new(&submit_input)).child(
-                    Button::new("rename-tab-submit")
-                        .label("Rename")
-                        .primary()
-                        .on_click(move |_, window, cx| {
-                            let value = input_for_button.read(cx).value().to_string();
-                            if !value.trim().is_empty() {
-                                let _ = submit_app.update(cx, |this, _| {
-                                    this.send_workspace(WorkspaceCommand::RenameTab(value));
-                                    this.mode = InputMode::Normal;
-                                });
-                                window.close_dialog(cx);
-                            }
-                        }),
-                ),
-            )
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                    this.finish_tab_rename(true, window, cx);
+                }
+                // The chip grows with the name.
+                InputEvent::Change => cx.notify(),
+                InputEvent::Focus => {}
+            },
+        );
+        let focus = input.clone();
+        window.on_next_frame(move |window, cx| {
+            focus.update(cx, |input, cx| input.focus(window, cx));
         });
+        self.tab_rename = Some(TabRename {
+            tab_id,
+            input,
+            shown,
+            number: position + 1,
+            _subscription: subscription,
+        });
+        self.mode = InputMode::Normal;
+        cx.notify();
+    }
+
+    fn finish_tab_rename(&mut self, keep: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rename) = self.tab_rename.take() else {
+            return;
+        };
+        let value = rename.input.read(cx).value().trim().to_owned();
+        if keep && value != rename.shown {
+            // The daemon wants a name, and a bare number is what reads as
+            // none, so a cleared field gives back the tab's place.
+            let title = if value.is_empty() {
+                rename.number.to_string()
+            } else {
+                value
+            };
+            let selected = self
+                .session
+                .as_ref()
+                .is_some_and(|session| session.active_tab == rename.tab_id);
+            if !selected {
+                self.send_workspace(WorkspaceCommand::SelectTab(rename.tab_id));
+            }
+            self.send_workspace(WorkspaceCommand::RenameTab(title));
+        }
+        self.focus_handle.focus(window, cx);
+        cx.notify();
     }
 
     fn toggle_agents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3298,9 +3352,15 @@ impl MuxApp {
             _ if active => ink.color(),
             _ => ink.color().opacity(0.72),
         };
-        chip = chip
-            .child(div().flex_none().size(px(6.0)).rounded_full().bg(dot))
-            .child(
+        chip = chip.child(div().flex_none().size(px(6.0)).rounded_full().bg(dot));
+        if let Some(rename) = self
+            .tab_rename
+            .as_ref()
+            .filter(|rename| rename.tab_id == tab_id)
+        {
+            chip = chip.child(Self::render_tab_rename_field(rename, cx));
+        } else {
+            chip = chip.child(
                 div()
                     .min_w_0()
                     .max_w(px(200.0))
@@ -3314,6 +3374,7 @@ impl MuxApp {
                     .group_hover(group, |style| style.text_color(color(TEXT)))
                     .child(label),
             );
+        }
         if activity == Some(AgentTabActivity::Attention) {
             chip = chip.child(
                 div()
@@ -3328,6 +3389,38 @@ impl MuxApp {
             chip.hover(|style| style.bg(wash(0.05)))
                 .active(|style| style.bg(wash(0.10)))
         }
+    }
+
+    /// The chip's name as a field while it is being renamed, set exactly
+    /// where the name was and as wide as what is typed.
+    fn render_tab_rename_field(rename: &TabRename, cx: &mut Context<Self>) -> impl IntoElement {
+        #[allow(clippy::cast_precision_loss)]
+        let chars = rename.input.read(cx).value().chars().count().clamp(6, 32) as f32;
+        div()
+            .flex_none()
+            // The field pads its text by 4px; shift it back onto the name.
+            // (A negative margin here would drop the field from the chip's
+            // width.)
+            .relative()
+            .left(px(-4.0))
+            // Room for the text, the caret after it, and the field's own
+            // padding on both sides, so it never has to scroll.
+            .w(px((chars + 2.0) * STRIP_CHAR_WIDTH + 8.0))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    this.finish_tab_rename(false, window, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(
+                Input::new(&rename.input)
+                    .appearance(false)
+                    .xsmall()
+                    .font_family(EMBEDDED_TERMINAL_FONT)
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(color(TEXT)),
+            )
     }
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
