@@ -91,7 +91,7 @@ impl MuxApp {
         let Some(pane) = self.panes.get_mut(&pane_id) else {
             return false;
         };
-        if let Err(error) = pane.engine.scroll_viewport(movement) {
+        if let Err(error) = pane.with_engine(|engine| engine.scroll_viewport(movement)) {
             error!(%pane_id, %error, "could not scroll terminal viewport");
             return false;
         }

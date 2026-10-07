@@ -479,7 +479,7 @@ impl MuxApp {
     ) {
         if paste {
             if let Some(pane) = self.panes.get(&pane_id)
-                && let Ok(bytes) = pane.engine.encode_paste(text)
+                && let Ok(bytes) = pane.with_engine(|engine| engine.encode_paste(text))
             {
                 self.backend.send(CommandMessage::Write { pane_id, bytes });
                 self.return_to_latest(pane_id, cx);
