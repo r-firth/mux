@@ -3625,8 +3625,10 @@ impl MuxApp {
             .text_color(color(MUTED_TEXT))
             .whitespace_nowrap();
         if cfg!(target_os = "macos") {
-            // Room for the traffic lights, which sit inside the strip.
-            strip = strip.child(div().flex_none().w(px(62.0)).h_full());
+            // Room for the traffic lights, which sit inside the strip, and
+            // a clear gap after the green one: the lights are wider on
+            // macOS 26 than they were, and the first tab sat against them.
+            strip = strip.child(div().flex_none().w(px(72.0)).h_full());
         }
         strip
             .child(tabs)
