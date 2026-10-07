@@ -2990,6 +2990,9 @@ impl MuxApp {
     }
 
     fn pointer_move(&mut self, event: &gpui::MouseMoveEvent) -> bool {
+        if event.pressed_button.is_none() && self.end_missed_release(event) {
+            return true;
+        }
         if self.drag_seam(event) {
             return true;
         }
@@ -3010,6 +3013,36 @@ impl MuxApp {
         };
         self.drag_selection(capture, event);
         true
+    }
+
+    /// A drag holds the pointer until its button comes up. If that release
+    /// never arrives, as when the window loses the pointer part-way through,
+    /// the hold would swallow every later move and no new drag could start.
+    /// A move with no button down means the release was missed: end
+    /// whatever was held, as the release would have. Returns whether
+    /// anything was.
+    fn end_missed_release(&mut self, event: &gpui::MouseMoveEvent) -> bool {
+        let mut ended = self.end_seam_drag();
+        if let Some(capture) = self.mouse_reporting.take() {
+            let _ = self.report_mouse_event(
+                capture.pane_id,
+                capture.rect,
+                event.position,
+                TerminalMouseAction::Release,
+                Some(TerminalMouseButton::Left),
+                event.modifiers,
+                false,
+            );
+            ended = true;
+        }
+        if let Some(capture) = self.selection_drag.take() {
+            let _ = self.apply_selection_gesture(
+                capture.pane_id,
+                TerminalSelectionGestureEvent::Release { point: None },
+            );
+            ended = true;
+        }
+        ended
     }
 
     fn pointer_hover(
