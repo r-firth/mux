@@ -17,6 +17,7 @@ mod motion;
 mod palette;
 mod pane_calls;
 mod pane_exit;
+mod pane_parser;
 mod quick_select;
 mod scrollback;
 mod seams;
@@ -30,8 +31,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use agent_completion::{
@@ -201,10 +202,20 @@ enum UserEvent {
         files: agent_completion::AgentFileIndex,
     },
     BackendError(String),
+    /// A pane's parser has taken in output, or failed to.
+    PaneParsed {
+        pane_id: PaneId,
+        error: Option<String>,
+    },
 }
 
 struct PaneReplica {
-    engine: GhosttyEngine,
+    engine: pane_parser::SharedEngine,
+    /// The sequence the next output must carry: the engine's own, past
+    /// whatever is still waiting for the parser.
+    next_sequence: u64,
+    /// Started the first time output is too much to parse in place.
+    parser: Option<pane_parser::OutputParser>,
     frame: Rc<RenderFrame>,
     /// Which frame `frame` holds, unique across panes, so a pane's view can
     /// tell whether what it drew is still current.
@@ -221,8 +232,13 @@ fn next_frame_serial() -> u64 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PaneOutputUpdate {
     Applied,
+    /// Handed to the pane's parser, which says when it has taken it in.
+    Parsing,
     Duplicate,
-    Gap { expected: u64, actual: u64 },
+    Gap {
+        expected: u64,
+        actual: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -235,7 +251,9 @@ enum AgentTabActivity {
 impl PaneReplica {
     fn new(engine: GhosttyEngine, frame: RenderFrame) -> Self {
         Self {
-            engine,
+            next_sequence: engine.next_output_sequence(),
+            engine: Arc::new(parking_lot::Mutex::new(engine)),
+            parser: None,
             frame: Rc::new(frame),
             frame_serial: next_frame_serial(),
             render_cache: Rc::new(RefCell::new(TerminalRenderCache::default())),
@@ -243,8 +261,21 @@ impl PaneReplica {
         }
     }
 
-    fn apply_output(&mut self, sequence: u64, bytes: &[u8]) -> Result<PaneOutputUpdate> {
-        let expected = self.engine.next_output_sequence();
+    /// Works on the pane's terminal, once the parser is between outputs.
+    fn with_engine<R>(&self, work: impl FnOnce(&mut GhosttyEngine) -> R) -> R {
+        work(&mut self.engine.lock())
+    }
+
+    /// Takes in the next output. A little, with nothing ahead of it, is
+    /// parsed here and now; the rest goes to the pane's parser, started by
+    /// `start_parser` the first time, so the window carries on meanwhile.
+    fn apply_output(
+        &mut self,
+        sequence: u64,
+        bytes: Vec<u8>,
+        start_parser: impl FnOnce(&pane_parser::SharedEngine) -> Result<pane_parser::OutputParser>,
+    ) -> Result<PaneOutputUpdate> {
+        let expected = self.next_sequence;
         if sequence < expected {
             return Ok(PaneOutputUpdate::Duplicate);
         }
@@ -254,9 +285,30 @@ impl PaneReplica {
                 actual: sequence,
             });
         }
-        self.engine.apply_output(sequence, bytes)?;
-        self.title.scan(bytes);
-        Ok(PaneOutputUpdate::Applied)
+        self.title.scan(&bytes);
+        if bytes.len() <= pane_parser::PARSE_IN_PLACE_BYTES
+            && let Some(mut engine) = self.engine.try_lock()
+            && engine.next_output_sequence() == sequence
+        {
+            engine.apply_output(sequence, &bytes)?;
+            self.next_sequence += 1;
+            return Ok(PaneOutputUpdate::Applied);
+        }
+        let parser = match self.parser.take() {
+            Some(parser) => parser,
+            None => start_parser(&self.engine)?,
+        };
+        parser.send(sequence, bytes);
+        self.parser = Some(parser);
+        self.next_sequence += 1;
+        Ok(PaneOutputUpdate::Parsing)
+    }
+
+    /// The parser has said it took in output; it says so again next time.
+    fn parser_heard(&self) {
+        if let Some(parser) = &self.parser {
+            parser.heard();
+        }
     }
 
     fn publish_frame(&mut self) -> Result<()> {
@@ -265,9 +317,9 @@ impl PaneReplica {
         // updating; otherwise libghostty writes into the existing allocation.
         // Either way, a draw can never combine shaped text from one terminal
         // state with backgrounds or a cursor from another.
+        let mut engine = self.engine.lock();
         self.frame_serial = next_frame_serial();
-        self.engine
-            .render_frame_into(Rc::make_mut(&mut self.frame))?;
+        engine.render_frame_into(Rc::make_mut(&mut self.frame))?;
         Ok(())
     }
 }
@@ -338,6 +390,22 @@ fn restore_pane_replicas(
         .collect()
 }
 
+/// A parser for the pane's output that tells the window when to draw it.
+fn start_pane_parser(
+    pane_id: PaneId,
+    engine: &pane_parser::SharedEngine,
+    events: async_channel::Sender<UserEvent>,
+) -> Result<pane_parser::OutputParser> {
+    pane_parser::OutputParser::spawn(
+        format!("mux-pane-parse-{pane_id}"),
+        Arc::clone(engine),
+        Box::new(move |error| {
+            let _ = events.send_blocking(UserEvent::PaneParsed { pane_id, error });
+        }),
+    )
+    .context("start a pane's output parser")
+}
+
 /// Keep the window's copy of each pane where it can be trusted, restoring
 /// the rest from the snapshot. A copy as new as the snapshot is kept; so is
 /// one behind it when `output_continues`, since the output it lacks is still
@@ -353,9 +421,9 @@ fn reconcile_pane_replicas(
     for pane in attachments {
         let replica = match existing.remove(&pane.pane_id) {
             Some(replica)
-                if replica.engine.next_output_sequence() == pane.terminal.next_sequence
+                if replica.next_sequence == pane.terminal.next_sequence
                     || (output_continues
-                        && replica.engine.next_output_sequence() < pane.terminal.next_sequence) =>
+                        && replica.next_sequence < pane.terminal.next_sequence) =>
             {
                 replica
             }
@@ -446,6 +514,9 @@ enum MotionPreference {
 struct MuxApp {
     focus_handle: FocusHandle,
     backend: BackendHandle,
+    /// Where the window's events arrive, for the panes' parsers to say they
+    /// have taken in output.
+    events: async_channel::Sender<UserEvent>,
     state_dir: Option<PathBuf>,
     settings: AppSettings,
     profiles: Vec<AgentProfile>,
@@ -616,7 +687,7 @@ impl MuxApp {
         let agent_completion = Rc::new(AgentCompletionProvider::default());
         let (agent_input, agent_input_subscription) = create_agent_input(window, cx);
         let (events, receiver) = async_channel::unbounded();
-        let backend = backend::spawn(events, state_dir.clone());
+        let backend = backend::spawn(events.clone(), state_dir.clone());
         backend.send(CommandMessage::ListAgents);
         info!("GPUI workspace view initialized");
         Self::spawn_backend_event_loop(receiver, window, cx);
@@ -632,6 +703,7 @@ impl MuxApp {
         let mut app = Self {
             focus_handle,
             backend,
+            events,
             state_dir,
             settings,
             profiles,
@@ -918,13 +990,19 @@ impl MuxApp {
                     bytes,
                 }) => {
                     let visible = self.terminal_pane_is_visible(pane_id);
-                    let result = self
-                        .panes
-                        .get_mut(&pane_id)
-                        .map_or(Ok(PaneOutputUpdate::Duplicate), |pane| {
-                            pane.apply_output(sequence, &bytes)
-                        });
-                    if matches!(result, Ok(PaneOutputUpdate::Applied)) {
+                    let events = self.events.clone();
+                    let result = self.panes.get_mut(&pane_id).map_or(
+                        Ok(PaneOutputUpdate::Duplicate),
+                        |pane| {
+                            pane.apply_output(sequence, bytes, |engine| {
+                                start_pane_parser(pane_id, engine, events)
+                            })
+                        },
+                    );
+                    if matches!(
+                        result,
+                        Ok(PaneOutputUpdate::Applied | PaneOutputUpdate::Parsing)
+                    ) {
                         self.note_pane_output(pane_id);
                     }
                     match result {
@@ -932,7 +1010,11 @@ impl MuxApp {
                             dirty_panes.insert(pane_id);
                             needs_render = true;
                         }
-                        Ok(PaneOutputUpdate::Applied | PaneOutputUpdate::Duplicate) => {}
+                        Ok(
+                            PaneOutputUpdate::Applied
+                            | PaneOutputUpdate::Parsing
+                            | PaneOutputUpdate::Duplicate,
+                        ) => {}
                         Ok(PaneOutputUpdate::Gap { expected, actual }) => {
                             if self.terminal_resync_pending != Some(session_id) {
                                 warn!(
@@ -947,6 +1029,18 @@ impl MuxApp {
                             }
                         }
                         Err(error) => self.report_ui_error(&error, cx),
+                    }
+                }
+                UserEvent::PaneParsed { pane_id, error } => {
+                    if let Some(pane) = self.panes.get(&pane_id) {
+                        pane.parser_heard();
+                    }
+                    if let Some(error) = error {
+                        self.report_ui_error(&anyhow!(error), cx);
+                    }
+                    if self.terminal_pane_is_visible(pane_id) {
+                        dirty_panes.insert(pane_id);
+                        needs_render = true;
                     }
                 }
                 event @ (UserEvent::Attached(_) | UserEvent::WorkspaceUpdated { .. }) => {
@@ -1105,6 +1199,13 @@ impl MuxApp {
             UserEvent::BackendError(message) => {
                 self.pending_agent_prompt = None;
                 Err(anyhow!(message))
+            }
+            UserEvent::PaneParsed { pane_id, error } => {
+                if let Some(pane) = self.panes.get_mut(&pane_id) {
+                    pane.parser_heard();
+                    let _ = pane.publish_frame();
+                }
+                error.map_or(Ok(()), |error| Err(anyhow!(error)))
             }
         };
         if let Err(error) = result {
@@ -1279,10 +1380,14 @@ impl MuxApp {
                 sequence,
                 bytes,
             } => {
+                let events = self.events.clone();
                 if let Some(pane) = self.panes.get_mut(&pane_id) {
-                    match pane.apply_output(sequence, &bytes)? {
+                    let update = pane.apply_output(sequence, bytes, |engine| {
+                        start_pane_parser(pane_id, engine, events)
+                    })?;
+                    match update {
                         PaneOutputUpdate::Applied => pane.publish_frame()?,
-                        PaneOutputUpdate::Duplicate => {}
+                        PaneOutputUpdate::Parsing | PaneOutputUpdate::Duplicate => {}
                         PaneOutputUpdate::Gap { expected, actual } => {
                             if self.terminal_resync_pending != Some(session_id) {
                                 warn!(
@@ -1728,7 +1833,11 @@ impl MuxApp {
             let selected = self.selected_pane.or_else(|| self.focused_pane_id());
             if let Some(text) = selected
                 .and_then(|pane_id| self.panes.get(&pane_id))
-                .and_then(|pane| pane.engine.selected_text().ok().flatten())
+                .and_then(|pane| {
+                    pane.with_engine(|engine| engine.selected_text())
+                        .ok()
+                        .flatten()
+                })
                 && let Some(clipboard) = &mut self.clipboard
             {
                 let lines = text.lines().count().max(1);
@@ -1751,7 +1860,7 @@ impl MuxApp {
                 && let Ok(text) = clipboard.get_text()
                 && let Some(pane_id) = self.terminal_input_pane_id()
                 && let Some(pane) = self.panes.get(&pane_id)
-                && let Ok(bytes) = pane.engine.encode_paste(&text)
+                && let Ok(bytes) = pane.with_engine(|engine| engine.encode_paste(&text))
             {
                 self.write_focused(bytes);
                 self.return_to_latest(pane_id, cx);
@@ -1789,7 +1898,7 @@ impl MuxApp {
             return false;
         };
         let terminal_event = terminal_key_event(keystroke, release, held, caps_lock);
-        match pane.engine.encode_key(&terminal_event) {
+        match pane.with_engine(|engine| engine.encode_key(&terminal_event)) {
             Ok(bytes) => {
                 if !bytes.is_empty() {
                     self.note_pane_key(pane_id);
@@ -2938,7 +3047,7 @@ impl MuxApp {
             .panes
             .get_mut(&pane_id)
             .ok_or_else(|| anyhow!("selection pane is unavailable"))?;
-        let status = pane.engine.selection_gesture(event)?;
+        let status = pane.with_engine(|engine| engine.selection_gesture(event))?;
         pane.publish_frame()?;
         self.selected_pane = status.has_selection.then_some(pane_id);
         Ok(())
@@ -2982,7 +3091,7 @@ impl MuxApp {
         let bytes = self
             .panes
             .get_mut(&pane_id)
-            .and_then(|pane| pane.engine.encode_mouse(&event).ok())
+            .and_then(|pane| pane.with_engine(|engine| engine.encode_mouse(&event)).ok())
             .unwrap_or_default();
         if bytes.is_empty() {
             false
@@ -3130,7 +3239,7 @@ impl MuxApp {
             && let Some(previous) = self.selected_pane.take()
             && let Some(pane) = self.panes.get_mut(&previous)
         {
-            let _ = pane.engine.set_selection(None);
+            let _ = pane.with_engine(|engine| engine.set_selection(None));
             let _ = pane.publish_frame();
         }
         let Some(frame) = self.panes.get(&pane_id).map(|pane| Rc::clone(&pane.frame)) else {
@@ -3239,9 +3348,8 @@ impl MuxApp {
             self.pane_scrolls.remove(&pane_id);
             return false;
         };
-        if let Err(error) = pane
-            .engine
-            .scroll_viewport(TerminalViewportScroll::Delta(rows))
+        if let Err(error) =
+            pane.with_engine(|engine| engine.scroll_viewport(TerminalViewportScroll::Delta(rows)))
         {
             error!(pane_id = %pane_id, %error, "could not scroll terminal viewport");
             return false;
@@ -3268,7 +3376,7 @@ impl MuxApp {
                 let Some(replica) = self.panes.get_mut(&pane_id) else {
                     continue;
                 };
-                let resized = replica.engine.resize(size);
+                let resized = replica.with_engine(|engine| engine.resize(size));
                 if let Err(error) = resized {
                     error!(%pane_id, %error, "could not resize terminal replica");
                     continue;
@@ -4126,6 +4234,7 @@ impl UserEvent {
             Self::Agent(_) => "agent",
             Self::AgentFiles { .. } => "agent-files",
             Self::BackendError(_) => "backend-error",
+            Self::PaneParsed { .. } => "pane-parsed",
         }
     }
 }
@@ -5451,12 +5560,68 @@ mod tests {
         AgentTabActivity, GridMetrics, PaneOutputUpdate, PaneReplica, PaneScrollState,
         agent_session_is_visible, agent_tab_activity, agent_tab_activity_label,
         command_needs_agent, format_agent_context_usage, format_session_pane_count,
-        input_position_at, layout, or_list, pane_needs_live_frame, reconcile_pane_replicas,
-        strip_wording, take_terminal_key_release, terminal_frame_text, terminal_input_pane,
-        terminal_key_down_target, terminal_key_event, terminal_sizes_for_geometry,
-        terminal_tab_keystroke,
+        input_position_at, layout, or_list, pane_needs_live_frame, pane_parser,
+        reconcile_pane_replicas, strip_wording, take_terminal_key_release, terminal_frame_text,
+        terminal_input_pane, terminal_key_down_target, terminal_key_event,
+        terminal_sizes_for_geometry, terminal_tab_keystroke,
     };
     use mux_acp::AgentSessionStatus;
+
+    /// A little output with nothing ahead of it is parsed in place.
+    fn no_parser(_: &pane_parser::SharedEngine) -> anyhow::Result<pane_parser::OutputParser> {
+        panic!("a little output with nothing ahead of it is parsed in place")
+    }
+
+    #[test]
+    fn a_lot_of_output_is_parsed_elsewhere_then_published() {
+        let mut engine = GhosttyEngine::new(TerminalSize {
+            cols: 20,
+            rows: 4,
+            ..TerminalSize::default()
+        })
+        .expect("new terminal");
+        let frame = engine.render_frame().expect("initial frame");
+        let mut pane = PaneReplica::new(engine, frame);
+        let (said, heard) = std::sync::mpsc::channel();
+        let start = |engine: &pane_parser::SharedEngine| {
+            let parser = pane_parser::OutputParser::spawn(
+                "test-parser".into(),
+                std::sync::Arc::clone(engine),
+                Box::new(move |error| {
+                    let _ = said.send(error);
+                }),
+            )?;
+            Ok(parser)
+        };
+        let mut flood = vec![b'x'; pane_parser::PARSE_IN_PLACE_BYTES];
+        flood.extend_from_slice(b"\r\nend");
+
+        assert_eq!(
+            pane.apply_output(1, flood, start).expect("flood"),
+            PaneOutputUpdate::Parsing
+        );
+        // What follows is taken in after it, wherever it is parsed.
+        let after = pane
+            .apply_output(2, b" after".to_vec(), no_parser)
+            .expect("output after the flood");
+        assert!(matches!(
+            after,
+            PaneOutputUpdate::Applied | PaneOutputUpdate::Parsing
+        ));
+        assert_eq!(pane.next_sequence, 3);
+
+        let waited = std::time::Instant::now();
+        while pane.with_engine(|engine| engine.next_output_sequence()) < 3 {
+            assert!(waited.elapsed() < std::time::Duration::from_secs(10));
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            heard.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(None)
+        );
+        pane.publish_frame().expect("publish frame");
+        assert!(terminal_frame_text(&pane.frame).contains("end after"));
+    }
 
     #[test]
     fn composer_notes_list_choices_the_way_people_say_them() {
@@ -5684,11 +5849,13 @@ mod tests {
         let displayed = Rc::clone(&pane.frame);
 
         assert_eq!(
-            pane.apply_output(1, b"one ").expect("first output"),
+            pane.apply_output(1, b"one ".to_vec(), no_parser)
+                .expect("first output"),
             PaneOutputUpdate::Applied
         );
         assert_eq!(
-            pane.apply_output(2, b"two").expect("second output"),
+            pane.apply_output(2, b"two".to_vec(), no_parser)
+                .expect("second output"),
             PaneOutputUpdate::Applied
         );
 
@@ -5751,7 +5918,9 @@ mod tests {
 
         assert!(Rc::ptr_eq(&displayed, &preserved.frame));
         assert_eq!(
-            preserved.engine.selected_text().expect("selected text"),
+            preserved
+                .with_engine(|engine| engine.selected_text())
+                .expect("selected text"),
             Some("hello".to_owned())
         );
     }
@@ -5797,7 +5966,7 @@ mod tests {
         assert!(terminal_frame_text(&repaired.frame).contains("one two"));
         assert_eq!(
             repaired
-                .apply_output(3, b" three")
+                .apply_output(3, b" three".to_vec(), no_parser)
                 .expect("next live output"),
             PaneOutputUpdate::Applied
         );
@@ -5842,7 +6011,8 @@ mod tests {
 
         assert!(Rc::ptr_eq(&displayed, &kept.frame));
         assert_eq!(
-            kept.apply_output(2, b"two").expect("output still coming"),
+            kept.apply_output(2, b"two".to_vec(), no_parser)
+                .expect("output still coming"),
             PaneOutputUpdate::Applied
         );
         kept.publish_frame().expect("frame");
@@ -5857,10 +6027,11 @@ mod tests {
         let mut pane = PaneReplica::new(engine, frame);
 
         assert_eq!(
-            pane.apply_output(1, b"once").expect("duplicate output"),
+            pane.apply_output(1, b"once".to_vec(), no_parser)
+                .expect("duplicate output"),
             PaneOutputUpdate::Duplicate
         );
-        assert_eq!(pane.engine.next_output_sequence(), 2);
+        assert_eq!(pane.with_engine(|engine| engine.next_output_sequence()), 2);
     }
 
     #[test]
@@ -5870,18 +6041,20 @@ mod tests {
         let mut pane = PaneReplica::new(engine, frame);
 
         assert_eq!(
-            pane.apply_output(2, b"late").expect("detect gap"),
+            pane.apply_output(2, b"late".to_vec(), no_parser)
+                .expect("detect gap"),
             PaneOutputUpdate::Gap {
                 expected: 1,
                 actual: 2,
             }
         );
-        assert_eq!(pane.engine.next_output_sequence(), 1);
+        assert_eq!(pane.with_engine(|engine| engine.next_output_sequence()), 1);
         assert_eq!(
-            pane.apply_output(1, b"on time").expect("recover in order"),
+            pane.apply_output(1, b"on time".to_vec(), no_parser)
+                .expect("recover in order"),
             PaneOutputUpdate::Applied
         );
-        assert_eq!(pane.engine.next_output_sequence(), 2);
+        assert_eq!(pane.with_engine(|engine| engine.next_output_sequence()), 2);
     }
 
     #[test]
