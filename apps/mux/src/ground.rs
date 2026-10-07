@@ -35,6 +35,15 @@ const TIDE_TROUGH: f32 = 0.3;
 const TIDE_CREST: f32 = 0.1;
 const TIDE_WAVE: (f32, f32) = (260.0, 0.27);
 const TIDE_CROSS: (f32, f32) = (410.0, 0.12);
+/// A wake: one pulse of grain that crosses the whole window, slabs and all,
+/// when the tab changes or the window first shows. How long it takes, how
+/// big its dots are in points, how far it trails behind its front, and how
+/// thick with dots it is just behind the front.
+const WAKE: Duration = Duration::from_millis(560);
+const WAKE_CELL: f32 = 3.0;
+const WAKE_DOT: f32 = 2.0;
+const WAKE_TRAIL: f32 = 190.0;
+const WAKE_PEAK: f32 = 0.7;
 /// How much of the tide reaches the strip, where the words are.
 const TIDE_IN_STRIP: f32 = 0.3;
 /// The share of dots each step that light a little early, out of 256, and by
@@ -225,6 +234,8 @@ pub(super) struct Scene {
     /// and how much brighter it blooms on the way, from 0 to 1.
     pub(super) focus: Option<layout::Rect>,
     pub(super) bloom: f32,
+    /// The active tab, whose change sends a wake across the window.
+    pub(super) tab: Option<TabId>,
     /// The active tab's chip.
     pub(super) chip: Option<layout::Rect>,
     /// Panes busy printing, and how busy, from 0 to 1.
@@ -880,6 +891,70 @@ fn paint_runs(runs: &[Run], cell: f32, bounds: Bounds<Pixels>, window: &mut Wind
 }
 
 /// A dissolve from one ink to the next.
+/// A pulse of grain on its way across the window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Wake {
+    origin: (f32, f32),
+    began: Instant,
+    ink: Ink,
+}
+
+/// One lit dot of a wake, and whether it is at the bright front.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WakeDot {
+    x: f32,
+    y: f32,
+    front: bool,
+}
+
+impl Wake {
+    /// The wake's dots `through` of the way across a `width` by `height`
+    /// window, 0 to 1: a ring spreading from its origin, thick with dots at
+    /// its front and thinning behind, the whole of it fading as it goes.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss
+    )]
+    fn dots(&self, width: f32, height: f32, through: f32) -> Vec<WakeDot> {
+        let (ox, oy) = self.origin;
+        let far = ox.max(width - ox).hypot(oy.max(height - oy));
+        let eased = 1.0 - (1.0 - through).powf(2.2);
+        let front = eased * (far + WAKE_TRAIL);
+        let strength = WAKE_PEAK * (1.0 - through.powi(3));
+        let columns = (width / WAKE_CELL).ceil() as usize;
+        let rows = (height / WAKE_CELL).ceil() as usize;
+        let inset = (WAKE_CELL - WAKE_DOT) / 2.0;
+        let mut dots = Vec::new();
+        for row in 0..rows {
+            let y = (row as f32 + 0.5) * WAKE_CELL;
+            let dy = y - oy;
+            if dy.abs() > front {
+                continue;
+            }
+            let noise = &NOISE[(row & 63) << 6..][..64];
+            for column in 0..columns {
+                let x = (column as f32 + 0.5) * WAKE_CELL;
+                let behind = front - (x - ox).hypot(dy);
+                if !(0.0..WAKE_TRAIL).contains(&behind) {
+                    continue;
+                }
+                let tail = 1.0 - behind / WAKE_TRAIL;
+                let value = strength * tail * tail * smooth(0.0, 10.0, behind);
+                let threshold = (f32::from(noise[column & 63]) + 0.5) / 256.0;
+                if value > threshold {
+                    dots.push(WakeDot {
+                        x: column as f32 * WAKE_CELL + inset,
+                        y: row as f32 * WAKE_CELL + inset,
+                        front: behind < 26.0,
+                    });
+                }
+            }
+        }
+        dots
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Dissolve {
     from: Ink,
@@ -907,6 +982,9 @@ pub(super) struct Ground {
     calls: HashMap<Caller, Instant>,
     ink: Option<Ink>,
     dissolve: Option<Dissolve>,
+    /// The tab the ground was last laid for, and the wake its change sent.
+    tab: Option<TabId>,
+    wake: Option<Wake>,
     /// How cool the ground is, from 0 to 1, and when that was worked out.
     past: (f32, Option<Instant>),
     /// Whether the window is in front and moving things may move.
@@ -932,6 +1010,8 @@ impl Ground {
             calls: HashMap::new(),
             ink: None,
             dissolve: None,
+            tab: None,
+            wake: None,
             past: (0.0, None),
             running: false,
             lively: false,
@@ -957,7 +1037,42 @@ impl Ground {
     /// Whether the ground is in the middle of a change that wants every
     /// frame rather than every step: an ink dissolving.
     pub(super) fn transitioning(&self) -> bool {
-        self.dissolve.is_some()
+        self.dissolve.is_some() || self.wake.is_some()
+    }
+
+    /// The wake crossing the window at `now`, to draw over everything.
+    pub(super) fn wake(&self, viewport: (f32, f32), now: Instant) -> Option<AnyElement> {
+        let wake = self.wake?;
+        let through = now.saturating_duration_since(wake.began).as_secs_f32() / WAKE.as_secs_f32();
+        if through >= 1.0 {
+            return None;
+        }
+        let dots = wake.dots(viewport.0, viewport.1, through);
+        let front = wake.ink.color().opacity(0.95);
+        let trail = wake.ink.color().opacity(0.55);
+        Some(
+            canvas(
+                |_, _, _| (),
+                move |bounds, (), window, _| {
+                    window.paint_layer(bounds, |window| {
+                        for dot in &dots {
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    point(bounds.origin.x + px(dot.x), bounds.origin.y + px(dot.y)),
+                                    size(px(WAKE_DOT), px(WAKE_DOT)),
+                                ),
+                                if dot.front { front } else { trail },
+                            ));
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .into_any_element(),
+        )
     }
 
     /// How long until the ground next needs drawing on its own, or `None`
@@ -971,6 +1086,34 @@ impl Ground {
         Some((self.epoch + Duration::from_millis(next * STEP_MS)).saturating_duration_since(now))
     }
 
+    /// Send a wake out when the tab has changed, and put away one that has
+    /// crossed.
+    fn send_wake(&mut self, scene: &Scene, now: Instant) {
+        if let Some(tab) = scene.tab
+            && self.tab.replace(tab) != Some(tab)
+            && !scene.still
+            && scene.active
+        {
+            // From the chip of the tab arrived at; from the middle of the
+            // strip when the window first shows.
+            let origin = scene.chip.map_or(
+                (scene.viewport.0 / 2.0, layout::TAB_BAR_HEIGHT / 2.0),
+                center,
+            );
+            self.wake = Some(Wake {
+                origin,
+                began: now,
+                ink: scene.ink,
+            });
+        }
+        if self
+            .wake
+            .is_some_and(|wake| scene.still || now.saturating_duration_since(wake.began) >= WAKE)
+        {
+            self.wake = None;
+        }
+    }
+
     /// The ground for `scene` at `now`: the grain laid last, if nothing it
     /// shows has changed since.
     pub(super) fn lay(&mut self, scene: Scene, now: Instant) -> Rc<Grain> {
@@ -981,6 +1124,8 @@ impl Ground {
         for call in &scene.calls {
             self.calls.entry(call.caller).or_insert(now);
         }
+
+        self.send_wake(&scene, now);
 
         if let Some(previous) = self.ink.replace(scene.ink)
             && previous != scene.ink
@@ -1219,6 +1364,7 @@ impl MuxApp {
             slabs,
             focus,
             bloom,
+            tab: self.active_tab_id(),
             chip,
             busy,
             calls,
@@ -1346,6 +1492,7 @@ mod tests {
             ],
             focus: Some(rect(10.0, 40.0, 385.0, 450.0)),
             bloom: 0.0,
+            tab: None,
             chip: None,
             busy: Vec::new(),
             calls: Vec::new(),
@@ -1540,6 +1687,60 @@ mod tests {
     }
 
     #[test]
+    fn a_change_of_tab_sends_a_wake_out_from_its_chip() {
+        let mut ground = Ground::new(Instant::now());
+        let epoch = ground.epoch;
+        let chip = rect(90.0, 5.0, 60.0, 26.0);
+        let on_tab = |tab| Scene {
+            tab: Some(tab),
+            chip: Some(chip),
+            ..scene()
+        };
+        let (first, second) = (TabId::new(), TabId::new());
+        ground.lay(on_tab(first), epoch);
+        // The window's first showing sends one too; let it pass.
+        ground.lay(on_tab(first), epoch + WAKE);
+        assert!(ground.wake.is_none());
+
+        let switched = epoch + Duration::from_secs(5);
+        ground.lay(on_tab(second), switched);
+        let wake = ground.wake.expect("a wake for the new tab");
+        assert_eq!(wake.origin, center(chip));
+
+        // Early on its dots are near the chip; later they have left it.
+        let near = |dots: &[WakeDot]| {
+            dots.iter()
+                .filter(|dot| (dot.x - 120.0).hypot(dot.y - 18.0) < 80.0)
+                .count()
+        };
+        let early = wake.dots(800.0, 500.0, 0.08);
+        let late = wake.dots(800.0, 500.0, 0.6);
+        assert!(
+            near(&early) > 20 && near(&late) == 0,
+            "the wake did not travel"
+        );
+        assert!(late.iter().any(|dot| dot.x > 500.0));
+
+        ground.lay(on_tab(second), switched + WAKE);
+        assert!(ground.wake.is_none(), "the wake outstayed its crossing");
+    }
+
+    #[test]
+    fn a_still_ground_sends_no_wake() {
+        let mut ground = Ground::new(Instant::now());
+        let epoch = ground.epoch;
+        ground.lay(
+            Scene {
+                tab: Some(TabId::new()),
+                still: true,
+                ..scene()
+            },
+            epoch,
+        );
+        assert!(ground.wake.is_none());
+    }
+
+    #[test]
     fn a_still_ground_never_moves_and_its_clock_stays_stopped() {
         let epoch = Instant::now();
         let mut ground = Ground::new(epoch);
@@ -1607,6 +1808,7 @@ mod tests {
             slabs: vec![left, top, bottom],
             focus: Some(left),
             bloom: 0.0,
+            tab: None,
             chip: Some(rect(80.0, 5.0, 70.0, 26.0)),
             busy: vec![(bottom, 1.0)],
             calls: vec![Call {
