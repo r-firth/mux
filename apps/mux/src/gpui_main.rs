@@ -47,7 +47,6 @@ use gpui_component::{
     animation::cubic_bezier,
     h_flex,
     input::{Enter, Input, InputEvent, InputState, Position, Textarea, TextareaState},
-    notification::Notification,
     v_flex,
 };
 use gpui_terminal::{GridMetrics, TerminalRenderCache};
@@ -366,6 +365,14 @@ struct TabRename {
     _subscription: gpui::Subscription,
 }
 
+/// A line said in the strip where the mode's keys usually are: an error in
+/// peach, anything else muted. It goes by itself after a few seconds.
+struct StripMessage {
+    text: String,
+    problem: bool,
+    serial: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MotionPreference {
     Full,
@@ -423,6 +430,8 @@ struct MuxApp {
     /// it, so closing a tab never repaints its neighbours.
     tab_inks: HashMap<TabId, Ink>,
     tab_rename: Option<TabRename>,
+    strip_message: Option<StripMessage>,
+    strip_serial: u64,
     session_sheet: Option<session_sheet::SessionSheet>,
     settings_sheet: Option<settings_sheet::SettingsSheet>,
     selected_pane: Option<PaneId>,
@@ -505,13 +514,9 @@ impl MuxApp {
         info!("GPUI workspace view initialized");
         Self::spawn_backend_event_loop(receiver, window, cx);
 
-        if let Some(message) = settings_error {
-            window.push_notification(Notification::warning(message), cx);
-        }
-
         let profiles = merge_agent_profiles(&settings);
         Self::check_agent_availability(&profiles, window, cx);
-        Self {
+        let mut app = Self {
             focus_handle,
             backend,
             state_dir,
@@ -549,6 +554,8 @@ impl MuxApp {
             agent_unseen: HashSet::new(),
             tab_inks: HashMap::new(),
             tab_rename: None,
+            strip_message: None,
+            strip_serial: 0,
             session_sheet: None,
             settings_sheet: None,
             selected_pane: None,
@@ -565,7 +572,11 @@ impl MuxApp {
             terminal_font,
             ghostty_theme: GhosttyTheme::load_user().unwrap_or_default(),
             clipboard: arboard::Clipboard::new().ok(),
+        };
+        if let Some(message) = settings_error {
+            app.say_in_strip(message, true, cx);
         }
+        app
     }
 
     /// The user's Ghostty font if this machine has it, else the embedded one,
@@ -785,11 +796,11 @@ impl MuxApp {
                                 self.backend.send(CommandMessage::AttachSession(session_id));
                             }
                         }
-                        Err(error) => Self::report_ui_error(&error, window, cx),
+                        Err(error) => self.report_ui_error(&error, cx),
                     }
                 }
                 event @ (UserEvent::Attached(_) | UserEvent::WorkspaceUpdated(_)) => {
-                    self.publish_terminal_frames(&mut dirty_panes, window, cx);
+                    self.publish_terminal_frames(&mut dirty_panes, cx);
                     self.apply_user_event(event, window, cx);
                     needs_render = true;
                 }
@@ -799,28 +810,58 @@ impl MuxApp {
                 }
             }
         }
-        self.publish_terminal_frames(&mut dirty_panes, window, cx);
+        self.publish_terminal_frames(&mut dirty_panes, cx);
         needs_render
     }
 
     fn publish_terminal_frames(
         &mut self,
         dirty_panes: &mut HashSet<PaneId>,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         for pane_id in dirty_panes.drain() {
             if let Some(pane) = self.panes.get_mut(&pane_id)
                 && let Err(error) = pane.publish_frame()
             {
-                Self::report_ui_error(&error, window, cx);
+                self.report_ui_error(&error, cx);
             }
         }
     }
 
-    fn report_ui_error(error: &anyhow::Error, window: &mut Window, cx: &mut Context<Self>) {
+    fn report_ui_error(&mut self, error: &anyhow::Error, cx: &mut Context<Self>) {
         error!(%error, "Mux UI update failed");
-        window.push_notification(Notification::error(error.to_string()), cx);
+        self.say_in_strip(strip_wording(&error.to_string()), true, cx);
+    }
+
+    /// Say something in the strip, where the mode's keys usually are, for
+    /// long enough to read it. Clicking it, or the next thing said, clears it.
+    fn say_in_strip(&mut self, text: impl Into<String>, problem: bool, cx: &mut Context<Self>) {
+        let text = text.into();
+        let seconds = 4 + (text.chars().count() / 20).min(8) as u64;
+        self.strip_serial += 1;
+        let serial = self.strip_serial;
+        self.strip_message = Some(StripMessage {
+            text,
+            problem,
+            serial,
+        });
+        cx.spawn(async move |entity, cx| {
+            cx.background_executor()
+                .timer(Duration::from_secs(seconds))
+                .await;
+            let _ = entity.update(cx, |this, cx| {
+                if this
+                    .strip_message
+                    .as_ref()
+                    .is_some_and(|message| message.serial == serial)
+                {
+                    this.strip_message = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn apply_user_event(&mut self, event: UserEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -909,7 +950,7 @@ impl MuxApp {
             }
         };
         if let Err(error) = result {
-            Self::report_ui_error(&error, window, cx);
+            self.report_ui_error(&error, cx);
         }
     }
 
@@ -1298,7 +1339,7 @@ impl MuxApp {
             if let Some(pane) = self.panes.get_mut(&pane_id)
                 && let Err(error) = pane.publish_frame()
             {
-                Self::report_ui_error(&error, window, cx);
+                self.report_ui_error(&error, cx);
             }
             self.focus_handle.focus(window, cx);
         } else {
@@ -1325,7 +1366,7 @@ impl MuxApp {
             if let Some(pane) = self.panes.get_mut(&pane_id)
                 && let Err(error) = pane.publish_frame()
             {
-                Self::report_ui_error(&error, window, cx);
+                self.report_ui_error(&error, cx);
             }
         }
         self.focus_handle.focus(window, cx);
@@ -1621,10 +1662,9 @@ impl MuxApp {
             Action::DetachSession => cx.quit(),
             Action::OpenAgentSurface => self.toggle_agents(window, cx),
             Action::OpenSettings => self.toggle_settings_sheet(window, cx),
-            Action::OpenCommandPalette => window.push_notification(
-                Notification::info("Command palette is being moved to GPUI"),
-                cx,
-            ),
+            Action::OpenCommandPalette => {
+                self.say_in_strip("there's no command palette yet", false, cx);
+            }
         }
         cx.notify();
     }
@@ -3040,9 +3080,7 @@ impl MuxApp {
             .items_center()
             .rounded(px(6.0))
             .cursor_pointer()
-            .tooltip(move |window, cx| {
-                gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
-            })
+            .tooltip(move |_, cx| strip_tooltip(tooltip.clone(), None, cx))
             .on_click(cx.listener(move |this, _, _, _| {
                 this.send_workspace(WorkspaceCommand::SelectTab(tab_id));
             }));
@@ -3179,9 +3217,7 @@ impl MuxApp {
                     .text_color(color(FAINT_TEXT))
                     .hover(|style| style.text_color(color(TEXT)).bg(wash(0.05)))
                     .active(|style| style.bg(wash(0.10)))
-                    .tooltip(|window, cx| {
-                        gpui_component::tooltip::Tooltip::new("New tab · ⌃t n").build(window, cx)
-                    })
+                    .tooltip(|_, cx| strip_tooltip("new tab", Some("⌃t n"), cx))
                     .on_click(cx.listener(|this, _, _, _| {
                         this.send_workspace(WorkspaceCommand::NewTab);
                     }))
@@ -3202,9 +3238,34 @@ impl MuxApp {
                         window.zoom_window();
                     }),
             )
-            .child(self.render_mode_hints(cx))
+            .child(match &self.strip_message {
+                Some(message) => Self::render_strip_message(message, cx).into_any_element(),
+                None => self.render_mode_hints(cx).into_any_element(),
+            })
             .child(self.render_mode_pill())
             .child(self.render_session_mark(cx))
+    }
+
+    /// What the strip is saying, in place of the mode's keys. A click
+    /// clears it; hovering shows all of it when it doesn't fit.
+    fn render_strip_message(message: &StripMessage, cx: &mut Context<Self>) -> impl IntoElement {
+        let full = SharedString::from(message.text.clone());
+        h_flex()
+            .id("strip-message")
+            .min_w(px(0.0))
+            .h(px(24.0))
+            .px(px(6.0))
+            .items_center()
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .hover(|style| style.bg(wash(0.05)))
+            .text_color(color(if message.problem { SIGNAL } else { MUTED_TEXT }))
+            .tooltip(move |_, cx| strip_tooltip(full.clone(), None, cx))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.strip_message = None;
+                cx.notify();
+            }))
+            .child(div().min_w(px(0.0)).truncate().child(message.text.clone()))
     }
 
     /// The keys that matter in the current mode, in gofer's `[key] label`
@@ -3229,7 +3290,7 @@ impl MuxApp {
                 ("x", "close"),
             ],
             InputMode::Session => &[("w", "switch"), ("d", "detach")],
-            InputMode::Resize => &[("hjkl", "resize"), ("↵", "done")],
+            InputMode::Resize => &[("hjkl", "resize"), ("enter", "done")],
         };
         let key_color = if self.mode == InputMode::Normal {
             color(TEXT)
@@ -3612,7 +3673,7 @@ impl Render for MuxApp {
                 }
             })
             .bg(color(GROUND))
-            .font_family(theme.font_sans.clone())
+            .font_family(EMBEDDED_TERMINAL_FONT)
             .text_color(theme.text)
             .child(self.render_ground())
             .child(self.render_tabs(cx));
@@ -3644,6 +3705,73 @@ impl Render for MuxApp {
         root.children(self.render_session_sheet(cx))
             .children(self.render_settings_sheet(cx))
     }
+}
+
+/// A tooltip in the strip's own face: a small slab with the label and, when
+/// there is one, its keys in brackets.
+struct StripTooltip {
+    label: SharedString,
+    keys: Option<SharedString>,
+}
+
+impl Render for StripTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        // The outer box keeps the slab clear of the pointer.
+        div().child(
+            h_flex()
+                .m(px(10.0))
+                .gap(px(8.0))
+                .px(px(8.0))
+                .py(px(3.0))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(hairline(0.10))
+                .bg(color(SURFACE))
+                .shadow_md()
+                .font_family(EMBEDDED_TERMINAL_FONT)
+                .text_size(px(12.0))
+                .text_color(color(MUTED_TEXT))
+                .child(self.label.clone())
+                .when_some(self.keys.clone(), |tip, keys| {
+                    tip.child(kbd(keys, color(TEXT)))
+                }),
+        )
+    }
+}
+
+fn strip_tooltip(
+    label: impl Into<SharedString>,
+    keys: Option<&'static str>,
+    cx: &mut App,
+) -> gpui::AnyView {
+    let label = label.into();
+    cx.new(|_| StripTooltip {
+        label,
+        keys: keys.map(SharedString::from),
+    })
+    .into()
+}
+
+/// An error as the strip says it: what went wrong, without the transport
+/// it came over or the daemon's error code.
+fn strip_wording(error: &str) -> String {
+    if error == "daemon connection closed" || error.ends_with("unexpected end of file") {
+        return "lost the connection to muxd".to_owned();
+    }
+    let error = error
+        .strip_prefix("daemon rejected the request: ")
+        .unwrap_or(error);
+    [
+        "InvalidRequest: ",
+        "NotFound: ",
+        "Conflict: ",
+        "Internal: ",
+        "ProtocolMismatch: ",
+    ]
+    .into_iter()
+    .find_map(|code| error.strip_prefix(code))
+    .unwrap_or(error)
+    .to_owned()
 }
 
 fn hairline(alpha: f32) -> Hsla {
@@ -4510,7 +4638,7 @@ fn configure_theme(cx: &mut App) {
     ComponentTheme::change(ThemeMode::Dark, None, cx);
     let bezel = BezelTheme::of(cx).clone();
     let theme = ComponentTheme::global_mut(cx);
-    theme.font_family = bezel.font_sans.clone();
+    theme.font_family = EMBEDDED_TERMINAL_FONT.into();
     theme.font_size = px(14.0);
     theme.radius = px(BezelTheme::CONTROL_RADIUS);
     theme.radius_lg = px(BezelTheme::SURFACE_RADIUS);
@@ -4754,7 +4882,7 @@ mod tests {
         agent_session_is_visible, agent_tab_activity, agent_tab_activity_label,
         command_needs_agent, format_agent_context_usage, format_session_pane_count,
         input_position_at, layout, or_list, pane_needs_live_frame, reconcile_pane_replicas,
-        take_terminal_key_release, terminal_frame_text, terminal_input_pane,
+        strip_wording, take_terminal_key_release, terminal_frame_text, terminal_input_pane,
         terminal_key_down_target, terminal_key_event, terminal_sizes_for_geometry,
         terminal_tab_keystroke,
     };
@@ -4774,6 +4902,26 @@ mod tests {
         assert_eq!(
             or_list(&names(&["claude", "codex", "copilot"])),
             "claude, codex or copilot"
+        );
+    }
+
+    #[test]
+    fn the_strip_says_what_went_wrong_not_how_it_travelled() {
+        assert_eq!(
+            strip_wording("daemon rejected the request: Conflict: session already exists: work"),
+            "session already exists: work"
+        );
+        assert_eq!(
+            strip_wording("daemon rejected the request: something new"),
+            "something new"
+        );
+        assert_eq!(
+            strip_wording("protocol codec failed: I/O error: unexpected end of file"),
+            "lost the connection to muxd"
+        );
+        assert_eq!(
+            strip_wording("daemon connection failed: permission denied"),
+            "daemon connection failed: permission denied"
         );
     }
 
