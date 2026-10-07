@@ -432,6 +432,11 @@ struct MuxApp {
     tab_rename: Option<TabRename>,
     strip_message: Option<StripMessage>,
     strip_serial: u64,
+    /// The focused pane's size shows in its head while sizes are changing
+    /// (and in resize mode), then gets out of the way.
+    size_readout: bool,
+    size_readout_pending: bool,
+    size_readout_serial: u64,
     session_sheet: Option<session_sheet::SessionSheet>,
     settings_sheet: Option<settings_sheet::SettingsSheet>,
     selected_pane: Option<PaneId>,
@@ -556,6 +561,9 @@ impl MuxApp {
             tab_rename: None,
             strip_message: None,
             strip_serial: 0,
+            size_readout: false,
+            size_readout_pending: false,
+            size_readout_serial: 0,
             session_sheet: None,
             settings_sheet: None,
             selected_pane: None,
@@ -3018,11 +3026,34 @@ impl MuxApp {
                     error!(%pane_id, %error, "could not render resized terminal replica");
                     continue;
                 }
-                self.sent_sizes.insert(pane_id, size);
+                // A pane's first size is its birth, not a resize.
+                if self.sent_sizes.insert(pane_id, size).is_some() {
+                    self.size_readout_pending = true;
+                }
                 self.backend.send(CommandMessage::Resize { pane_id, size });
             }
         }
         geometry
+    }
+
+    /// Show the focused pane's size for a moment, as a window or split
+    /// settles; each change restarts the moment.
+    fn show_size_readout(&mut self, cx: &mut Context<Self>) {
+        self.size_readout = true;
+        self.size_readout_serial += 1;
+        let serial = self.size_readout_serial;
+        cx.spawn(async move |entity, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1600))
+                .await;
+            let _ = entity.update(cx, |this, cx| {
+                if this.size_readout_serial == serial {
+                    this.size_readout = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// What a tab is called: the name someone gave it, or else what its
@@ -3492,7 +3523,8 @@ impl MuxApp {
         if zoomed {
             head = head.child(div().flex_none().text_color(ink.color()).child("zoom"));
         }
-        if let Some(pane) = pane.filter(|_| focused && !agent_pane) {
+        let sizing = self.size_readout || self.mode == InputMode::Resize;
+        if let Some(pane) = pane.filter(|_| focused && !agent_pane && sizing) {
             head = head.child(
                 div()
                     .flex_none()
@@ -3612,6 +3644,9 @@ impl Render for MuxApp {
         let viewport = window.viewport_size();
         let geometry =
             self.sync_terminal_sizes(f32::from(viewport.width), f32::from(viewport.height));
+        if std::mem::take(&mut self.size_readout_pending) {
+            self.show_size_readout(cx);
+        }
         let pane_count = geometry.panes.len();
         let move_app = cx.weak_entity();
         let release_app = move_app.clone();
