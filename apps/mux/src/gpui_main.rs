@@ -94,6 +94,8 @@ const MUTED_TEXT: u32 = 0x00aa_a397;
 const FAINT_TEXT: u32 = 0x0084_7d71;
 const SAGE: u32 = 0x00a7_b89c;
 const SIGNAL: u32 = 0x00f2_9a6b;
+/// How tall a pane's legend is; half of it sits above the slab's edge.
+const LEGEND_HEIGHT: f32 = 15.0;
 const EMBEDDED_TERMINAL_FONT: &str = "JetBrainsMono Nerd Font Mono";
 /// One character of the strip's 12.5px mono face: 600 of its 1000 units.
 const STRIP_CHAR_WIDTH: f32 = 7.5;
@@ -3183,10 +3185,14 @@ impl MuxApp {
     }
 
     fn sync_terminal_sizes(&mut self, width: f32, height: f32) -> layout::WorkspaceGeometry {
+        // Only what sits in a head row keeps one: an agent, or the find bar.
+        let agent_pane = self.active_agent_pane();
+        let find_pane = self.find.as_ref().map(|find| find.pane_id);
+        let headed = |pane_id| Some(pane_id) == agent_pane || Some(pane_id) == find_pane;
         let Some(session) = &self.session else {
             return layout::WorkspaceGeometry::default();
         };
-        let geometry = layout::calculate(session, width, height);
+        let geometry = layout::calculate(session, width, height, headed);
         let sizes = terminal_sizes_for_geometry(&geometry, self.metrics);
         for (pane_id, size) in sizes {
             if self.sent_sizes.get(&pane_id) != Some(&size) {
@@ -3755,24 +3761,58 @@ impl MuxApp {
         let call = self
             .pane_call(geometry.pane_id)
             .filter(|_| !focused && !agent_pane);
+        // A pane with nothing sitting in its head wears a legend instead: the
+        // same words, small, set into the slab's top edge.
+        let legend = geometry.legended();
         let mut head = h_flex()
-            .h(px(layout::PANE_HEAD_HEIGHT))
             .flex_none()
             .items_center()
-            .gap(px(10.0))
-            .px(px(12.0))
-            .border_b_1()
-            .border_color(hairline(0.07))
-            .text_size(px(12.0))
-            .child(div().flex_none().size(px(6.0)).rounded_full().map(|dot| {
-                if focused {
-                    dot.bg(ink.color())
-                } else if call.is_some() {
-                    dot.bg(color(SIGNAL))
+            .map(|head| {
+                if legend {
+                    head.absolute()
+                        .left(px(frame.x + 12.0))
+                        .top(px(frame.y - LEGEND_HEIGHT / 2.0))
+                        .h(px(LEGEND_HEIGHT))
+                        .max_w(px((frame.width - 24.0).max(0.0)))
+                        .gap(px(6.0))
+                        .px(px(6.0))
+                        .rounded(px(5.0))
+                        .border_1()
+                        .border_color(if ringed {
+                            ink.color().opacity(0.55)
+                        } else {
+                            hairline(0.10)
+                        })
+                        .bg(color(SURFACE))
+                        .overflow_hidden()
+                        .font_family(EMBEDDED_TERMINAL_FONT)
+                        .whitespace_nowrap()
+                        .text_size(px(10.5))
+                        .when(opacity < 1.0, |head| head.opacity(opacity))
                 } else {
-                    dot.border_1().border_color(color(FAINT_TEXT))
+                    head.h(px(layout::PANE_HEAD_HEIGHT))
+                        .gap(px(10.0))
+                        .px(px(12.0))
+                        .border_b_1()
+                        .border_color(hairline(0.07))
+                        .text_size(px(12.0))
                 }
-            }))
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(if legend { 5.0 } else { 6.0 }))
+                    .rounded_full()
+                    .map(|dot| {
+                        if focused {
+                            dot.bg(ink.color())
+                        } else if call.is_some() {
+                            dot.bg(color(SIGNAL))
+                        } else {
+                            dot.border_1().border_color(color(FAINT_TEXT))
+                        }
+                    }),
+            )
             .child(
                 div()
                     .min_w(px(0.0))
@@ -3790,7 +3830,7 @@ impl MuxApp {
                         .child(agent_view::home_relative(&agent.cwd)),
                 )
             })
-            .child(div().flex_1());
+            .when(!legend, |head| head.child(div().flex_1()));
         if let Some(mux_terminal::Attention::Notification(said)) = call {
             head = head.child(
                 div()
@@ -3848,8 +3888,22 @@ impl MuxApp {
             .overflow_hidden()
             .when(opacity < 1.0, |slab| slab.opacity(opacity))
             .font_family(EMBEDDED_TERMINAL_FONT)
-            .whitespace_nowrap()
-            .child(head);
+            .whitespace_nowrap();
+        if legend {
+            // The legend straddles the slab's edge, which clips what it
+            // holds, so it is drawn beside the slab rather than inside it.
+            return div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .child(slab)
+                .child(head)
+                .into_any_element();
+        }
+        if geometry.headed() {
+            slab = slab.child(head);
+        }
         if ringed {
             slab = slab.child(pane_focus_notch(geometry.pane_id, ink, self.motion));
         }
@@ -5461,7 +5515,7 @@ mod tests {
             .expect("tab")
             .split_focused(PaneId::new(), mux_workspace::SplitAxis::Vertical)
             .expect("split pane");
-        let geometry = layout::calculate(&session, 1_120.0, 720.0);
+        let geometry = layout::calculate(&session, 1_120.0, 720.0, |_| false);
         let sizes = terminal_sizes_for_geometry(
             &geometry,
             GridMetrics {
