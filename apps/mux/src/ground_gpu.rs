@@ -34,10 +34,14 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 /// has not reached is, against one it has; and how brightly the light glows
 /// on the ground under the dots.
 const PITCH: f32 = 10.0 / 3.0;
-const DOT_SIZE: f32 = 0.34;
-const DOT_SWELL: f32 = 0.08;
-const UNLIT: f32 = 0.085;
+const DOT_SIZE: f32 = 0.26;
+const DOT_SWELL: f32 = 0.2;
+const UNLIT: f32 = 0.1;
 const WASH: f32 = 0.07;
+/// How much the light is sharpened into dark reaches and bright ones, and
+/// how much stronger the accent inks show than the field has them.
+const CONTRAST: f32 = 1.35;
+const ACCENT: f32 = 2.2;
 
 /// The most busy panes and callers the shader lights; more than this at
 /// once are not shown.
@@ -192,6 +196,8 @@ fn shader() -> String {
         ("dot_swell", number(DOT_SWELL)),
         ("unlit", number(UNLIT)),
         ("wash", number(WASH)),
+        ("contrast", number(CONTRAST)),
+        ("accent", number(ACCENT)),
         ("tide_in_strip", number(TIDE_IN_STRIP)),
         ("wave_apart", number(TIDE_WAVE.0)),
         ("wave_pace", number(TIDE_WAVE.1)),
