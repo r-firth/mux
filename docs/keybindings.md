@@ -59,6 +59,20 @@ Zellij's `Ctrl+o` session prefix intentionally has no Normal-mode binding yet.
 This keeps foreground Control-key input untouched except for `Ctrl+p` and
 `Ctrl+t`.
 
+## Exited panes
+
+A shell that exits cleanly in the pane being typed in closes that pane, or its
+tab when it was the tab's only pane. Any other exit, such as a failure or a
+pane that ended while another had the keys, stays on screen with a rule that
+says how it ended. While it has the focus, these keys act on it:
+
+| Keys | Action |
+| --- | --- |
+| Return | Close the pane (its tab, when it is the tab's only pane) |
+| `n` | Start a new shell in its place, keeping the tab and the region |
+
+The session's last pane is never closed; Return starts a new shell there.
+
 ## Sessions sheet
 
 Click the session's name at the right of the strip, or press `Cmd+Shift+S`, to

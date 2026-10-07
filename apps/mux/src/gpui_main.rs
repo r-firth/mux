@@ -10,6 +10,7 @@ mod backend;
 mod chrome;
 mod gpui_terminal;
 mod layout;
+mod pane_exit;
 mod session_sheet;
 mod settings;
 mod settings_sheet;
@@ -56,7 +57,7 @@ use mux_acp::{
     AgentSessionSnapshot, AgentSessionStatus, AgentTimelineItem, AgentTool, AgentToolKind,
     ToolStatus, built_in_agent_profiles,
 };
-use mux_protocol::{PaneAttachment, ServerEvent, SessionAttachment, SessionSummary};
+use mux_protocol::{PaneAttachment, ProcessExit, ServerEvent, SessionAttachment, SessionSummary};
 use mux_terminal::{
     CellWidth, RenderFrame, Rgb, TerminalEngine, TerminalInteraction, TerminalKey,
     TerminalKeyAction, TerminalKeyEvent, TerminalModifiers, TerminalMouseAction,
@@ -445,6 +446,10 @@ struct MuxApp {
     size_readout_serial: u64,
     session_sheet: Option<session_sheet::SessionSheet>,
     settings_sheet: Option<settings_sheet::SettingsSheet>,
+    /// Panes whose program has exited, and how. The daemon keeps them until
+    /// they are closed.
+    pane_exits: HashMap<PaneId, ProcessExit>,
+    pane_restart: Option<pane_exit::PaneRestart>,
     selected_pane: Option<PaneId>,
     pending_focused_pane: Option<PaneId>,
     selection_drag: Option<TerminalPointerCapture>,
@@ -575,6 +580,8 @@ impl MuxApp {
             size_readout_serial: 0,
             session_sheet: None,
             settings_sheet: None,
+            pane_exits: HashMap::new(),
+            pane_restart: None,
             selected_pane: None,
             pending_focused_pane: None,
             selection_drag: None,
@@ -989,6 +996,11 @@ impl MuxApp {
         // stable tab IDs or user-authored text titles.
         attachment.session.normalize_numeric_tab_titles();
         let session_id = attachment.session.id;
+        let exits = attachment
+            .panes
+            .iter()
+            .filter_map(|pane| pane.exit_status.map(|status| (pane.pane_id, status)))
+            .collect();
         if rebuild {
             self.attach(attachment)?;
             if self.terminal_resync_pending == Some(session_id) {
@@ -997,6 +1009,7 @@ impl MuxApp {
         } else {
             self.update_workspace(attachment)?;
         }
+        self.note_pane_exits(exits);
         self.sync_agent_draft_for_active_tab(window, cx);
         let agent_pane = self.active_agent_pane();
         if let Some(pane_id) = agent_pane
@@ -1143,9 +1156,12 @@ impl MuxApp {
                     }
                 }
             }
-            ServerEvent::PaneExited { .. }
-            | ServerEvent::ResyncRequired { .. }
-            | ServerEvent::WorkspaceChanged { .. } => {}
+            ServerEvent::PaneExited {
+                session_id,
+                pane_id,
+                status,
+            } => self.note_pane_exit(session_id, pane_id, status),
+            ServerEvent::ResyncRequired { .. } | ServerEvent::WorkspaceChanged { .. } => {}
             ServerEvent::Agent(event) => {
                 if let Some(agent) = self
                     .agents
@@ -1577,6 +1593,9 @@ impl MuxApp {
                     self.say_in_strip(copied, false, cx);
                 }
             }
+            return;
+        }
+        if self.exited_pane_key(keystroke, held) {
             return;
         }
         if keystroke.modifiers.platform && keystroke.key == "v" {
@@ -3625,7 +3644,8 @@ impl MuxApp {
         let pane = self.panes.get(&geometry.pane_id)?;
         let pane_id = geometry.pane_id;
         let rect = geometry.rect;
-        let focused = geometry.focused;
+        // A dead shell has no cursor to show.
+        let focused = geometry.focused && !self.pane_has_exited(pane_id);
         let pointer_app = cx.weak_entity();
         let hover_app = pointer_app.clone();
         let scroll_app = pointer_app.clone();
@@ -3782,11 +3802,11 @@ impl Render for MuxApp {
             let pane_id = geometry.pane_id;
             root = root.child(self.render_pane_slab(geometry, index + 1, zoomed));
             if self.active_agent_pane() == Some(pane_id) {
-                let frame = geometry.frame;
-                let focused = geometry.focused;
+                let (frame, focused) = (geometry.frame, geometry.focused);
                 root = root.child(self.render_agent_pane(pane_id, frame, focused, window, cx));
-            } else if let Some(surface) = self.render_terminal_pane(geometry, cx) {
-                root = root.child(surface);
+            } else {
+                root = root.children(self.render_terminal_pane(geometry, cx));
+                root = root.children(self.render_pane_exit(geometry));
             }
             if let Some(letter) = hints.get(&pane_id) {
                 root = root.child(pane_focus_hint(geometry.rect, *letter, self.active_ink()));
