@@ -11,7 +11,7 @@ use mux_protocol::{ProcessExit, ServerEvent, SpawnCommand};
 use mux_terminal::ReplayEngine;
 use mux_terminal::{
     KITTY_KEYBOARD_REPORT_EVENTS, KITTY_KEYBOARD_RESET_SEQUENCE, TerminalEngine, TerminalError,
-    TerminalSize,
+    TerminalSize, TitleScanner,
 };
 #[cfg(feature = "ghostty")]
 use mux_terminal_ghostty::{GhosttyEngine, GhosttyTheme};
@@ -65,6 +65,7 @@ struct PaneOutputWorker {
     response_writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     shell_process_id: Option<u32>,
+    title: Arc<Mutex<TitleScanner>>,
     events: broadcast::Sender<ServerEvent>,
 }
 
@@ -86,6 +87,7 @@ impl PaneOutputWorker {
             if !responses.is_empty() && !self.write_responses(&responses) {
                 break;
             }
+            self.title.lock().scan(&bytes);
             if reset_keyboard {
                 warn!(
                     session_id = %self.session_id,
@@ -158,6 +160,9 @@ pub struct PaneRuntime {
     terminal: Arc<Mutex<Box<dyn TerminalEngine>>>,
     exit_status: Arc<Mutex<Option<ProcessExit>>>,
     process_id: Option<u32>,
+    /// The window title from the pane's output, for clients that attach
+    /// after the program set it.
+    title: Arc<Mutex<TitleScanner>>,
 }
 
 impl PaneRuntime {
@@ -193,6 +198,7 @@ impl PaneRuntime {
             Arc::new(Mutex::new(create_terminal_engine(size, replay_bytes)?));
         let exit_status = Arc::new(Mutex::new(None));
         let master = Arc::new(Mutex::new(pair.master));
+        let title = Arc::new(Mutex::new(TitleScanner::default()));
         spawn_reader(
             reader,
             PaneOutputWorker {
@@ -202,6 +208,7 @@ impl PaneRuntime {
                 response_writer: Arc::clone(&writer),
                 master: Arc::clone(&master),
                 shell_process_id: process_id,
+                title: Arc::clone(&title),
                 events: events.clone(),
             },
         )?;
@@ -236,6 +243,7 @@ impl PaneRuntime {
             terminal,
             exit_status,
             process_id,
+            title,
         }))
     }
 
@@ -260,6 +268,7 @@ impl PaneRuntime {
             pane_id: self.id,
             terminal,
             exit_status: *self.exit_status.lock(),
+            title: self.title.lock().title().map(str::to_owned),
         })
     }
 

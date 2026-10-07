@@ -8,6 +8,10 @@ use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod title;
+
+pub use title::TitleScanner;
+
 /// Kitty progressive-keyboard flag requesting press/repeat/release event types.
 pub const KITTY_KEYBOARD_REPORT_EVENTS: u8 = 1 << 1;
 /// Pop one orphaned enhancement frame, then force legacy keyboard encoding.

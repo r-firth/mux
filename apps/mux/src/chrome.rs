@@ -63,10 +63,15 @@ impl Ink {
     }
 }
 
+/// gofer's warm glow behind a question, baked with dithering so its faint
+/// ramp never bands.
+pub const GLOW: &str = "mux/glow.png";
+
 /// Embedded grain grounds, served through the application's asset source.
 #[must_use]
 pub fn ground_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path {
+        GLOW => include_bytes!("../assets/glow.png").as_slice(),
         "mux/grounds/peach.png" => include_bytes!("../assets/grounds/peach.png").as_slice(),
         "mux/grounds/rose.png" => include_bytes!("../assets/grounds/rose.png").as_slice(),
         "mux/grounds/teal.png" => include_bytes!("../assets/grounds/teal.png").as_slice(),
@@ -80,6 +85,7 @@ pub fn ground_assets() -> Vec<gpui::SharedString> {
     Ink::ALL
         .iter()
         .map(|ink| gpui::SharedString::from(ink.ground()))
+        .chain([gpui::SharedString::from(GLOW)])
         .collect()
 }
 
@@ -129,10 +135,21 @@ fn glyph(character: char) -> Option<[u8; GLYPH_ROWS]> {
         '9' => [0x0e, 0x11, 0x11, 0x0f, 0x01, 0x02, 0x0c],
         '-' => [0x00, 0x00, 0x00, 0x1f, 0x00, 0x00, 0x00],
         '_' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f],
-        '.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04],
+        '.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01],
+        ':' => [0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00],
         ' ' => [0x00; GLYPH_ROWS],
         _ => return None,
     })
+}
+
+/// How many columns a glyph takes: punctuation is set narrow, as in gofer's
+/// face, so a clock reads `12:04` and not `12 : 04`.
+fn glyph_width(character: char) -> usize {
+    match character {
+        ':' | '.' => 1,
+        ' ' => 2,
+        _ => GLYPH_COLUMNS,
+    }
 }
 
 /// Lit/unlit dots for `text`, column by column, or `None` when a character
@@ -144,8 +161,9 @@ fn dot_columns(text: &str, max_characters: usize) -> Option<Vec<[bool; GLYPH_ROW
         if index > 0 {
             columns.push([false; GLYPH_ROWS]);
         }
-        for column in 0..GLYPH_COLUMNS {
-            let bit = 1 << (GLYPH_COLUMNS - 1 - column);
+        let width = glyph_width(character);
+        for column in 0..width {
+            let bit = 1 << (width - 1 - column);
             columns.push(rows.map(|row| row & bit != 0));
         }
     }
@@ -161,8 +179,9 @@ pub fn dot_matrix(text: &str, pitch: f32, lit: Hsla) -> Option<gpui::AnyElement>
     let height = pitch * PANEL_ROWS as f32;
     let radius = pitch * 0.4;
     // gofer keeps unlit cells at 5%: present enough to read as a panel, quiet
-    // enough that the lit glyph is all the eye takes in.
-    let unlit = lit.opacity(0.05);
+    // enough that the lit glyph is all the eye takes in. Small panels drop
+    // them: at a couple of pixels a dot, the panel reads as noise.
+    let unlit = lit.opacity(if pitch < 4.0 { 0.0 } else { 0.05 });
     Some(
         canvas(
             |_, _, _| (),
@@ -247,111 +266,17 @@ pub fn truncate_chars(text: &str, limit: usize) -> String {
     cut
 }
 
-/// Follows OSC 0/2 window-title sequences in a pane's output so the pane head
-/// can name what is running. Sequences may be split across output chunks.
-#[derive(Debug, Default)]
-pub struct TitleScanner {
-    state: TitleScan,
-    buffer: Vec<u8>,
-    title: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum TitleScan {
-    #[default]
-    Ground,
-    Escape,
-    Number(u16),
-    Title,
-    TitleEscape,
-    Other,
-    OtherEscape,
-}
-
-const ESC: u8 = 0x1b;
-const BEL: u8 = 0x07;
-const MAX_TITLE_BYTES: usize = 256;
-
-impl TitleScanner {
-    #[must_use]
-    pub fn title(&self) -> Option<&str> {
-        self.title.as_deref()
-    }
-
-    pub fn scan(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            self.state = match (self.state, byte) {
-                (TitleScan::Title, BEL) | (TitleScan::TitleEscape, b'\\') => {
-                    self.commit();
-                    TitleScan::Ground
-                }
-                (TitleScan::Title, ESC) => TitleScan::TitleEscape,
-                (TitleScan::Title, _) => {
-                    if self.buffer.len() < MAX_TITLE_BYTES {
-                        self.buffer.push(byte);
-                    }
-                    TitleScan::Title
-                }
-                (TitleScan::Number(number), b'0'..=b'9') => TitleScan::Number(
-                    number
-                        .saturating_mul(10)
-                        .saturating_add(u16::from(byte - b'0')),
-                ),
-                (TitleScan::Number(0 | 2), b';') => {
-                    self.buffer.clear();
-                    TitleScan::Title
-                }
-                (TitleScan::Number(_) | TitleScan::Other, ESC) => TitleScan::OtherEscape,
-                (TitleScan::Number(_) | TitleScan::Other, byte) if byte != BEL => TitleScan::Other,
-                (TitleScan::Escape, b']') => TitleScan::Number(0),
-                // Any other escape starts a new sequence; everything else,
-                // including a BEL ending a sequence we ignore, returns to text.
-                (_, ESC) => TitleScan::Escape,
-                _ => TitleScan::Ground,
-            };
-        }
-    }
-
-    fn commit(&mut self) {
-        let title = String::from_utf8_lossy(&self.buffer).trim().to_owned();
-        self.title = (!title.is_empty()).then_some(title);
-        self.buffer.clear();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn title_scanner_reads_bel_and_st_terminated_titles() {
-        let mut scanner = TitleScanner::default();
-        scanner.scan(b"hello\x1b]0;~/projects/mux\x07world");
-        assert_eq!(scanner.title(), Some("~/projects/mux"));
-        scanner.scan(b"\x1b]2;nvim layout.rs\x1b\\");
-        assert_eq!(scanner.title(), Some("nvim layout.rs"));
-    }
-
-    #[test]
-    fn title_scanner_survives_sequences_split_across_chunks() {
-        let mut scanner = TitleScanner::default();
-        scanner.scan(b"\x1b]2;car");
-        assert_eq!(scanner.title(), None);
-        scanner.scan(b"go test\x07");
-        assert_eq!(scanner.title(), Some("cargo test"));
-    }
-
-    #[test]
-    fn title_scanner_ignores_other_osc_sequences() {
-        let mut scanner = TitleScanner::default();
-        scanner.scan(b"\x1b]7;file://host/tmp\x07\x1b]8;;https://example.com\x1b\\link");
-        assert_eq!(scanner.title(), None);
-    }
-
-    #[test]
     fn dot_matrix_draws_session_names_and_refuses_unknown_glyphs() {
         let columns = dot_columns("main", 16).expect("glyphs");
         assert_eq!(columns.len(), 4 * GLYPH_COLUMNS + 3);
+        // Punctuation is narrow: four digits, a colon and four gaps.
+        let clock = dot_columns("12:04", 16).expect("glyphs");
+        assert_eq!(clock.len(), 4 * GLYPH_COLUMNS + 1 + 4);
         assert!(dot_columns("✨", 16).is_none());
     }
 

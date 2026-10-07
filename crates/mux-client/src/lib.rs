@@ -581,6 +581,7 @@ mod tests {
                     next_sequence,
                 },
                 exit_status: None,
+                title: None,
             }],
         }
     }
