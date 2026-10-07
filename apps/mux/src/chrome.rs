@@ -44,49 +44,22 @@ impl Ink {
     pub fn color(self) -> Hsla {
         rgb(self.rgb()).into()
     }
-
-    /// The soft ring drawn around whatever this ink marks as focused.
-    #[must_use]
-    pub fn wash(self) -> Hsla {
-        self.color().opacity(0.13)
-    }
-
-    /// The dithered grain ground painted behind the slabs for this ink.
-    #[must_use]
-    pub const fn ground(self) -> &'static str {
-        match self {
-            Self::Peach => "mux/grounds/peach.png",
-            Self::Rose => "mux/grounds/rose.png",
-            Self::Teal => "mux/grounds/teal.png",
-            Self::Gold => "mux/grounds/gold.png",
-        }
-    }
 }
 
 /// gofer's warm glow behind a question, baked with dithering so its faint
 /// ramp never bands.
 pub const GLOW: &str = "mux/glow.png";
 
-/// Embedded grain grounds, served through the application's asset source.
+/// Images embedded in the binary, served through the application's asset
+/// source.
 #[must_use]
-pub fn ground_asset(path: &str) -> Option<&'static [u8]> {
-    Some(match path {
-        GLOW => include_bytes!("../assets/glow.png").as_slice(),
-        "mux/grounds/peach.png" => include_bytes!("../assets/grounds/peach.png").as_slice(),
-        "mux/grounds/rose.png" => include_bytes!("../assets/grounds/rose.png").as_slice(),
-        "mux/grounds/teal.png" => include_bytes!("../assets/grounds/teal.png").as_slice(),
-        "mux/grounds/gold.png" => include_bytes!("../assets/grounds/gold.png").as_slice(),
-        _ => return None,
-    })
+pub fn embedded_asset(path: &str) -> Option<&'static [u8]> {
+    (path == GLOW).then_some(include_bytes!("../assets/glow.png").as_slice())
 }
 
 #[must_use]
-pub fn ground_assets() -> Vec<gpui::SharedString> {
-    Ink::ALL
-        .iter()
-        .map(|ink| gpui::SharedString::from(ink.ground()))
-        .chain([gpui::SharedString::from(GLOW)])
-        .collect()
+pub fn embedded_assets() -> Vec<gpui::SharedString> {
+    vec![gpui::SharedString::from(GLOW)]
 }
 
 const GLYPH_ROWS: usize = 7;

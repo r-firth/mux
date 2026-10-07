@@ -10,6 +10,7 @@ mod backend;
 mod chrome;
 mod find;
 mod gpui_terminal;
+mod ground;
 mod layout;
 mod links;
 mod motion;
@@ -44,12 +45,12 @@ use bezel::{
 use chrome::Ink;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Animation, AnimationExt as _, App, AppContext as _, AssetSource, Bounds, BoxShadow, Context,
-    Entity, FocusHandle, FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyBinding,
-    KeyDownEvent, KeyUpEvent, Menu, MenuItem, ObjectFit, ParentElement as _, Render, ScrollHandle,
-    SharedString, StatefulInteractiveElement as _, Styled, StyledImage as _, SystemMenuType,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, div, img, linear_color_stop,
-    linear_gradient, point, px, rgb, size,
+    Animation, AnimationExt as _, App, AppContext as _, AssetSource, Bounds, Context, Entity,
+    FocusHandle, FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
+    KeyUpEvent, Menu, MenuItem, ObjectFit, ParentElement as _, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled, StyledImage as _, SystemMenuType, TitlebarOptions,
+    Window, WindowBounds, WindowOptions, div, img, linear_color_stop, linear_gradient, point, px,
+    rgb, size,
 };
 use gpui_component::{
     InteractiveElementExt as _, Sizable as _, Theme as ComponentTheme, ThemeMode, TitleBar,
@@ -105,8 +106,8 @@ struct MuxAssets;
 
 impl AssetSource for MuxAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
-        if let Some(ground) = chrome::ground_asset(path) {
-            return Ok(Some(Cow::Borrowed(ground)));
+        if let Some(asset) = chrome::embedded_asset(path) {
+            return Ok(Some(Cow::Borrowed(asset)));
         }
         let bezel_assets = bezel_icons::Assets;
         if let Some(asset) = bezel_assets.load(path)? {
@@ -119,7 +120,7 @@ impl AssetSource for MuxAssets {
         let mut assets = bezel_icons::Assets.list(path)?;
         assets.extend(gpui_component_assets::Assets.list(path)?);
         assets.extend(
-            chrome::ground_assets()
+            chrome::embedded_assets()
                 .into_iter()
                 .filter(|asset| asset.starts_with(path)),
         );
@@ -497,6 +498,13 @@ struct MuxApp {
     seam_pointer: Option<seams::SeamPointer>,
     seam_settle: Option<seams::SeamSettle>,
     layout_motion: motion::LayoutMotion,
+    /// The grain the slabs sit on, and the grain laid for this frame.
+    ground: ground::Ground,
+    grain: Option<Rc<ground::Grain>>,
+    /// Each pane's recent output, to tell a pane at work from one echoing
+    /// what is typed, and the pane a key last went to, and when.
+    pane_activity: HashMap<PaneId, ground::Activity>,
+    last_key: Cell<Option<(PaneId, Instant)>>,
     quick_select: Option<quick_select::QuickSelect>,
     chosen_target: Option<quick_select::ChosenTarget>,
     /// The tab that was active before the one on screen.
@@ -565,6 +573,7 @@ fn create_agent_input(
 }
 
 impl MuxApp {
+    #[allow(clippy::too_many_lines)]
     fn new(
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -646,6 +655,10 @@ impl MuxApp {
             seam_pointer: None,
             seam_settle: None,
             layout_motion: motion::LayoutMotion::default(),
+            ground: ground::Ground::default(),
+            grain: None,
+            pane_activity: HashMap::new(),
+            last_key: Cell::new(None),
             quick_select: None,
             chosen_target: None,
             previous_tab: None,
@@ -873,6 +886,9 @@ impl MuxApp {
                         .map_or(Ok(PaneOutputUpdate::Duplicate), |pane| {
                             pane.apply_output(sequence, &bytes)
                         });
+                    if matches!(result, Ok(PaneOutputUpdate::Applied)) {
+                        self.note_pane_output(pane_id);
+                    }
                     match result {
                         Ok(PaneOutputUpdate::Applied) if visible => {
                             dirty_panes.insert(pane_id);
@@ -1592,6 +1608,9 @@ impl MuxApp {
 
     fn write_focused(&self, bytes: Vec<u8>) {
         if !bytes.is_empty() {
+            if let Some(pane_id) = self.terminal_input_pane_id() {
+                self.note_pane_key(pane_id);
+            }
             self.backend.send(CommandMessage::WriteFocused { bytes });
         }
     }
@@ -1735,6 +1754,7 @@ impl MuxApp {
         match pane.engine.encode_key(&terminal_event) {
             Ok(bytes) => {
                 if !bytes.is_empty() {
+                    self.note_pane_key(pane_id);
                     self.backend.send(CommandMessage::Write { pane_id, bytes });
                 }
                 true
@@ -3704,27 +3724,6 @@ impl MuxApp {
         ))
     }
 
-    fn render_ground(&self) -> gpui::AnyElement {
-        let ink = self.active_ink();
-        let ground = img(ink.ground())
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .object_fit(ObjectFit::Cover);
-        if self.motion == MotionPreference::Reduced {
-            ground.into_any_element()
-        } else {
-            ground
-                .with_animation(
-                    SharedString::from(format!("ground-{ink:?}")),
-                    interface_animation(700),
-                    |ground, delta| ground.opacity(0.25 + delta * 0.75),
-                )
-                .into_any_element()
-        }
-    }
-
     /// The slab behind a pane: a rounded card with a slim head. The focused
     /// slab takes the tab's ink as its border, ring and glow.
     #[allow(clippy::too_many_lines)]
@@ -3852,11 +3851,7 @@ impl MuxApp {
             .whitespace_nowrap()
             .child(head);
         if ringed {
-            slab = slab.shadow(focus_glow(ink, 1.0)).child(pane_focus_notch(
-                geometry.pane_id,
-                ink,
-                self.motion,
-            ));
+            slab = slab.child(pane_focus_notch(geometry.pane_id, ink, self.motion));
         }
         slab.into_any_element()
     }
@@ -4005,11 +4000,14 @@ impl Render for MuxApp {
                     cx.notify();
                 }
             }));
+        let drawn = self.draw_layout(&geometry, viewport, window);
+        let grain = self.lay_ground(&drawn, viewport, window, cx);
+        self.grain = Some(Rc::clone(&grain));
         let mut root = Self::with_pointer_capture(root, cx)
             .bg(color(GROUND))
             .font_family(EMBEDDED_TERMINAL_FONT)
             .text_color(theme.text)
-            .child(self.render_ground())
+            .child(ground::paint(&grain))
             .child(self.render_tabs(cx));
 
         let zoomed = self
@@ -4022,12 +4020,8 @@ impl Render for MuxApp {
         } else {
             HashMap::new()
         };
-        let drawn = self.draw_layout(&geometry, viewport, window);
         for leaving in drawn.leaving {
             root = root.children(self.render_leaving_pane(leaving));
-        }
-        if let Some((frame, bloom)) = drawn.ring {
-            root = root.child(self.render_crossing_glow(frame, bloom));
         }
         for pane in drawn.panes {
             let (geometry, opacity) = (pane.geometry, pane.opacity);
@@ -4146,20 +4140,6 @@ fn kbd(key: impl Into<SharedString>, key_color: Hsla) -> impl IntoElement {
         .child("[")
         .child(div().text_color(key_color).child(key.into()))
         .child("]")
-}
-
-/// The light a focused slab casts on the ground: a tight wash at its edge and
-/// a soft glow below, `strength` times as bright as at rest.
-fn focus_glow(ink: Ink, strength: f32) -> Vec<BoxShadow> {
-    let brighter = |tone: Hsla| Hsla {
-        a: (tone.a * strength).min(1.0),
-        ..tone
-    };
-    vec![
-        BoxShadow::new(px(0.0), px(0.0), brighter(ink.wash())).spread_radius(px(3.0)),
-        BoxShadow::new(px(0.0), px(16.0), brighter(ink.color().opacity(0.14)))
-            .blur_radius(px(50.0)),
-    ]
 }
 
 /// A short ink notch on the focused slab's top edge, visible at a glance.

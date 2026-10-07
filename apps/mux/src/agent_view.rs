@@ -82,6 +82,8 @@ struct PaneView<'a> {
     choice: Option<usize>,
     /// The pulse's step, for marks that blink rather than breathe.
     tick: u8,
+    /// The window's ground, for the gaps around the needs-you card.
+    grain: Option<Rc<ground::Grain>>,
 }
 
 impl MuxApp {
@@ -143,6 +145,7 @@ impl MuxApp {
             expanded: &self.expanded_agent_items,
             choice,
             tick: self.agent_pulse,
+            grain: self.grain.clone(),
         };
 
         let mut body = v_flex()
@@ -325,20 +328,6 @@ impl MuxApp {
         }
         body = body.child(self.agent_composer_view(&view, &draft, composer_focused));
 
-        // The ground, aligned with the window's, under everything: only the
-        // needs-you card leaves gaps for it to show through.
-        let viewport = window.viewport_size();
-        let ground = div()
-            .absolute()
-            .left(px(-rect.x))
-            .top(px(-rect.y))
-            .w(viewport.width)
-            .h(viewport.height)
-            .child(
-                img(self.active_ink().ground())
-                    .size_full()
-                    .object_fit(ObjectFit::Cover),
-            );
         div()
             .id(SharedString::from(format!("agent-pane-{pane_id}")))
             .absolute()
@@ -348,7 +337,6 @@ impl MuxApp {
             .h(px(rect.height))
             .rounded_b(px(11.0))
             .overflow_hidden()
-            .child(ground)
             .child(body)
             .into_any_element()
     }
@@ -2044,10 +2032,24 @@ fn needs_you_card(
             )
             .child(key_hint("esc", "interrupt")),
     );
+    // The window's ground shows in the gaps above and below the card.
+    let gap = 10.0;
     div()
+        .relative()
         .w_full()
         .flex_none()
-        .py(px(10.0))
+        .py(px(gap))
+        .children(view.grain.as_ref().map(|grain| {
+            ground::window_onto(
+                grain,
+                gpui::Edges {
+                    top: gap,
+                    bottom: gap,
+                    left: 0.0,
+                    right: 0.0,
+                },
+            )
+        }))
         .child(
             div()
                 .relative()
