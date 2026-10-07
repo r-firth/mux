@@ -12,6 +12,7 @@ mod find;
 mod gpui_terminal;
 mod layout;
 mod links;
+mod motion;
 mod palette;
 mod pane_calls;
 mod pane_exit;
@@ -495,6 +496,7 @@ struct MuxApp {
     seam_drag: Option<seams::SeamDrag>,
     seam_pointer: Option<seams::SeamPointer>,
     seam_settle: Option<seams::SeamSettle>,
+    layout_motion: motion::LayoutMotion,
     quick_select: Option<quick_select::QuickSelect>,
     chosen_target: Option<quick_select::ChosenTarget>,
     /// The tab that was active before the one on screen.
@@ -643,6 +645,7 @@ impl MuxApp {
             seam_drag: None,
             seam_pointer: None,
             seam_settle: None,
+            layout_motion: motion::LayoutMotion::default(),
             quick_select: None,
             chosen_target: None,
             previous_tab: None,
@@ -1134,6 +1137,7 @@ impl MuxApp {
         attachment: SessionAttachment,
         output_continues: bool,
     ) -> Result<()> {
+        self.remember_departing_panes(&attachment.panes);
         let panes = reconcile_pane_replicas(
             std::mem::take(&mut self.panes),
             &attachment.panes,
@@ -3724,12 +3728,14 @@ impl MuxApp {
     /// The slab behind a pane: a rounded card with a slim head. The focused
     /// slab takes the tab's ink as its border, ring and glow.
     #[allow(clippy::too_many_lines)]
-    fn render_pane_slab(
-        &self,
-        geometry: layout::PaneGeometry,
-        number: usize,
-        zoomed: bool,
-    ) -> gpui::AnyElement {
+    fn render_pane_slab(&self, pane: motion::DrawnPane, zoomed: bool) -> gpui::AnyElement {
+        let motion::DrawnPane {
+            index,
+            geometry,
+            opacity,
+            ringed,
+        } = pane;
+        let number = index + 1;
         let ink = self.active_ink();
         let frame = geometry.frame;
         let focused = geometry.focused;
@@ -3834,22 +3840,23 @@ impl MuxApp {
             .rounded(px(12.0))
             .bg(color(SURFACE))
             .border_1()
-            .border_color(if focused {
+            .border_color(if ringed {
                 ink.color().opacity(0.55)
             } else {
                 hairline(0.07)
             })
+            // A slab gliding in starts narrower than its head.
+            .overflow_hidden()
+            .when(opacity < 1.0, |slab| slab.opacity(opacity))
             .font_family(EMBEDDED_TERMINAL_FONT)
             .whitespace_nowrap()
             .child(head);
-        if focused {
-            slab = slab
-                .shadow(vec![
-                    BoxShadow::new(px(0.0), px(0.0), ink.wash()).spread_radius(px(3.0)),
-                    BoxShadow::new(px(0.0), px(16.0), ink.color().opacity(0.14))
-                        .blur_radius(px(50.0)),
-                ])
-                .child(pane_focus_notch(geometry.pane_id, ink, self.motion));
+        if ringed {
+            slab = slab.shadow(focus_glow(ink, 1.0)).child(pane_focus_notch(
+                geometry.pane_id,
+                ink,
+                self.motion,
+            ));
         }
         slab.into_any_element()
     }
@@ -3857,11 +3864,16 @@ impl MuxApp {
     fn render_terminal_pane(
         &self,
         geometry: layout::PaneGeometry,
+        opacity: f32,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let pane = self.panes.get(&geometry.pane_id)?;
         let pane_id = geometry.pane_id;
+        // The grid, which pointer maths use, and the slab's body it shows
+        // through: the same settled, but while the slab glides the grid
+        // keeps the size it settles at.
         let rect = geometry.rect;
+        let body = geometry.surface();
         // A dead shell has no cursor to show.
         let focused = geometry.focused && !self.pane_has_exited(pane_id);
         let pointer_app = cx.weak_entity();
@@ -3869,12 +3881,13 @@ impl MuxApp {
         let scroll_app = pointer_app.clone();
         let surface = div()
             .absolute()
-            .left(px(rect.x))
-            .top(px(rect.y))
-            .w(px(rect.width))
-            .h(px(rect.height))
+            .left(px(body.x))
+            .top(px(body.y))
+            .w(px(body.width))
+            .h(px(body.height))
             .overflow_hidden()
             .bg(rgb(SURFACE))
+            .when(opacity < 1.0, |surface| surface.opacity(opacity))
             .when(self.pane_link_hovered(pane_id), |surface| {
                 surface.cursor_pointer()
             })
@@ -3909,19 +3922,27 @@ impl MuxApp {
                 });
                 cx.stop_propagation();
             })
-            .child(gpui_terminal::terminal_canvas(
-                Rc::clone(&pane.frame),
-                Rc::clone(&pane.render_cache),
-                self.terminal_font.clone(),
-                self.metrics,
-                focused,
-                gpui_terminal::TerminalChrome {
-                    surface: color(SURFACE),
-                    cursor: self.active_ink().color(),
-                },
-                self.quick_select_marks(pane_id)
-                    .unwrap_or_else(|| self.find_marks(pane_id)),
-            ))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w(px(rect.width))
+                    .h(px(rect.height))
+                    .child(gpui_terminal::terminal_canvas(
+                        Rc::clone(&pane.frame),
+                        Rc::clone(&pane.render_cache),
+                        self.terminal_font.clone(),
+                        self.metrics,
+                        focused,
+                        gpui_terminal::TerminalChrome {
+                            surface: color(SURFACE),
+                            cursor: self.active_ink().color(),
+                        },
+                        self.quick_select_marks(pane_id)
+                            .unwrap_or_else(|| self.find_marks(pane_id)),
+                    )),
+            )
             .children(self.render_quick_select_labels(pane_id, rect));
         Some(surface.into_any_element())
     }
@@ -4001,14 +4022,22 @@ impl Render for MuxApp {
         } else {
             HashMap::new()
         };
-        for (index, geometry) in geometry.panes.into_iter().enumerate() {
+        let drawn = self.draw_layout(&geometry, viewport, window);
+        for leaving in drawn.leaving {
+            root = root.children(self.render_leaving_pane(leaving));
+        }
+        if let Some((frame, bloom)) = drawn.ring {
+            root = root.child(self.render_crossing_glow(frame, bloom));
+        }
+        for pane in drawn.panes {
+            let (geometry, opacity) = (pane.geometry, pane.opacity);
             let pane_id = geometry.pane_id;
-            root = root.child(self.render_pane_slab(geometry, index + 1, zoomed));
+            root = root.child(self.render_pane_slab(pane, zoomed));
             if self.active_agent_pane() == Some(pane_id) {
                 let (frame, focused) = (geometry.frame, geometry.focused);
                 root = root.child(self.render_agent_pane(pane_id, frame, focused, window, cx));
             } else {
-                root = root.children(self.render_terminal_pane(geometry, cx));
+                root = root.children(self.render_terminal_pane(geometry, opacity, cx));
                 root = root.children(self.render_pane_exit(geometry));
                 root = root.children(self.render_scroll_thumb(geometry));
                 root = root.children(self.render_find_ticks(geometry));
@@ -4016,7 +4045,11 @@ impl Render for MuxApp {
                 root = root.children(self.render_link_underline(geometry));
             }
             if let Some(letter) = hints.get(&pane_id) {
-                root = root.child(pane_focus_hint(geometry.rect, *letter, self.active_ink()));
+                root = root.child(pane_focus_hint(
+                    geometry.surface(),
+                    *letter,
+                    self.active_ink(),
+                ));
             }
         }
         for (index, seam) in geometry.seams.into_iter().enumerate() {
@@ -4113,6 +4146,20 @@ fn kbd(key: impl Into<SharedString>, key_color: Hsla) -> impl IntoElement {
         .child("[")
         .child(div().text_color(key_color).child(key.into()))
         .child("]")
+}
+
+/// The light a focused slab casts on the ground: a tight wash at its edge and
+/// a soft glow below, `strength` times as bright as at rest.
+fn focus_glow(ink: Ink, strength: f32) -> Vec<BoxShadow> {
+    let brighter = |tone: Hsla| Hsla {
+        a: (tone.a * strength).min(1.0),
+        ..tone
+    };
+    vec![
+        BoxShadow::new(px(0.0), px(0.0), brighter(ink.wash())).spread_radius(px(3.0)),
+        BoxShadow::new(px(0.0), px(16.0), brighter(ink.color().opacity(0.14)))
+            .blur_radius(px(50.0)),
+    ]
 }
 
 /// A short ink notch on the focused slab's top edge, visible at a glance.
