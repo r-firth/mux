@@ -52,14 +52,6 @@ static float outside(float2 point, float4 rect) {
     return length(away);
 }
 
-// gofer's 4x4 ordered dither.
-static float bayer(uint2 at) {
-    const float order[16] = {
-        0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0
-    };
-    return (order[(at.x & 3) + (at.y & 3) * 4] + 0.5) / 16.0;
-}
-
 // How far a light of this strength brings up a dot whose turn comes at
 // `threshold`: softly, as gofer's signal does, so a dot fades up rather than
 // snapping on.
@@ -147,22 +139,31 @@ fragment float4 ground_fragment(
     }
     own += cast(point, frame, signal);
 
+    // No two dots are alike: each has its own turn to come up, its own size
+    // and its own brightness, read from a tile of noise, so the panel is
+    // never even. The light then decides how much of it shows at all.
+    float turn_own = (noise.read(at % 64).r * 255.0 + 0.5) / 256.0;
+    float turn_first = (noise.read((at + uint2(23, 41)) % 64).r * 255.0 + 0.5) / 256.0;
+    float turn_second = (noise.read((at + uint2(47, 13)) % 64).r * 255.0 + 0.5) / 256.0;
+    float turn_signal = (noise.read((at + uint2(31, 29)) % 64).r * 255.0 + 0.5) / 256.0;
+    float quirk = noise.read((at + uint2(11, 53)) % 64).r;
+
     // Each step a different few dots come up a little early.
-    float chance = noise.read(at % 64).r * 255.0;
-    if (moving && ((uint(chance + 0.5) + uint(frame.clock.z)) & 255) < $shimmer_share$) {
+    if (moving && ((uint(turn_signal * 256.0) + uint(frame.clock.z)) & 255) < $shimmer_share$) {
         own += $shimmer$;
     }
 
-    // Each ink takes its turn from its own corner of the dither.
-    float threshold = bayer(at);
+    // Sharpen the light so there are dark reaches and bright ones, not an
+    // even glow.
+    float strong = own * own * (3.0 - 2.0 * min(own, 1.0)) * $contrast$;
     float up[4] = {
-        lit(own, threshold),
-        lit(first, bayer(at + uint2(1, 2))),
-        lit(second, bayer(at + uint2(2, 1))),
-        lit(signal, bayer(at + uint2(3, 3))),
+        lit(strong, turn_own),
+        lit(first * $accent$, turn_first),
+        lit(second * $accent$, turn_second),
+        lit(signal, turn_signal),
     };
     // Light past a dot's turn makes it burn brighter.
-    float burn = lit(own - 1.0, threshold);
+    float burn = lit(strong - 1.0, turn_own);
 
     // An ink dissolving away keeps the dots the new one has not reached,
     // its edge frayed by each dot's turn.
@@ -170,19 +171,25 @@ fragment float4 ground_fragment(
     if (frame.leaving.w > 0.5) {
         float reached = frame.leaving.z;
         float away = distance(point, frame.leaving.xy);
-        old = away + (threshold - 0.5) * $fray$ * 2.0 > reached;
+        old = away + (turn_own - 0.5) * $fray$ * 2.0 > reached;
     }
 
-    // The dot: always faintly there, and brought up by each ink's light.
+    // The dot. One the light has not reached is only there where there is
+    // some light about: in the dark reaches the panel falls away to nothing.
+    float about = smoothstep(0.02, 0.35, strong);
     float3 own_ink = old ? frame.old_tones[3].rgb : frame.tones[3].rgb;
-    float3 glow = $unlit$ * own_ink;
-    glow += up[0] * (0.82 + 0.38 * burn) * own_ink;
+    float3 glow = $unlit$ * about * (0.5 + quirk) * own_ink;
+    glow += up[0] * (0.45 + 0.5 * quirk + 0.45 * burn) * own_ink;
     glow += up[1] * (old ? frame.old_tones[7].rgb : frame.tones[7].rgb);
     glow += up[2] * (old ? frame.old_tones[11].rgb : frame.tones[11].rgb);
     glow += up[3] * frame.tones[15].rgb;
 
-    // Round, with a soft edge a pixel wide.
-    float radius = pitch * ($dot_size$ + $dot_swell$ * up[0] * burn);
+    // Round, with a soft edge a pixel wide, and as big as it is bright: a
+    // dim dot is a speck and a burning one nearly touches its neighbours.
+    float most = max(max(up[0], up[1]), max(up[2], up[3]));
+    float size = $dot_size$ * (0.55 + 0.45 * quirk)
+        + $dot_swell$ * most * (0.4 + 0.6 * min(strong, 1.5) / 1.5);
+    float radius = pitch * size;
     float cover = clamp((radius - distance(here, point)) * scale + 0.5, 0.0, 1.0);
 
     // Under the dots, the light a focused slab casts glows on the ground
