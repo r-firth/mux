@@ -224,6 +224,26 @@ impl MuxApp {
             })
             .on_action({
                 let app = app.clone();
+                move |_: &PreviousAgentChoice, _, cx| {
+                    let _ = app.update(cx, |this, cx| {
+                        if this.move_agent_choice(-1) {
+                            cx.notify();
+                        }
+                    });
+                }
+            })
+            .on_action({
+                let app = app.clone();
+                move |_: &NextAgentChoice, _, cx| {
+                    let _ = app.update(cx, |this, cx| {
+                        if this.move_agent_choice(1) {
+                            cx.notify();
+                        }
+                    });
+                }
+            })
+            .on_action({
+                let app = app.clone();
                 move |_: &AcceptAgentCompletion, window, cx| {
                     let handled = app
                         .update(cx, |this, cx| {
@@ -265,14 +285,18 @@ impl MuxApp {
             .line_height(px(LINE))
             .text_color(color(TEXT))
             .whitespace_normal()
-            .when(!focused, |body| {
+            // A click anywhere in the pane, opening a step included, leaves
+            // the keyboard in the composer so typing and ⌃a carry on.
+            .on_any_mouse_down({
                 let app = app.clone();
-                body.on_any_mouse_down(move |_, window, cx| {
+                move |_, window, cx| {
                     let _ = app.update(cx, |this, _cx| {
-                        this.request_pane_focus(pane_id);
+                        if !focused {
+                            this.request_pane_focus(pane_id);
+                        }
                         this.focus_agent_composer(window);
                     });
-                })
+                }
             });
 
         body = body.child(self.agent_transcript(
@@ -507,7 +531,8 @@ impl MuxApp {
             h_flex()
                 .ml(px(grid.column))
                 .mt(px(16.0))
-                .gap(px(16.0))
+                .gap_x(px(16.0))
+                .gap_y(px(2.0))
                 .flex_wrap()
                 .text_color(color(FAINT_TEXT))
                 .child(key_hint("↑↓", "choose"))
@@ -590,20 +615,33 @@ impl MuxApp {
                 )
             })
             .when(sessions > 1, |to| {
-                let index = agent
-                    .and_then(|agent| {
-                        self.agents_for_active_tab()
-                            .position(|candidate| candidate.id == agent.id)
-                    })
-                    .unwrap_or_default();
-                to.child(
-                    div()
-                        .flex_none()
-                        .text_color(color(FAINT_TEXT))
-                        .child(format!("{} of {sessions}", index + 1)),
-                )
+                // One dot per session in this tab: yours in ink, the others
+                // in whatever they're doing, so a session working behind this
+                // one stays in sight.
+                let current = agent.map(|agent| agent.id);
+                let dots = self.agents_for_active_tab().map(|candidate| {
+                    let tone = if Some(candidate.id) == current {
+                        color(TEXT)
+                    } else if candidate.pending_permission().is_some() {
+                        color(SIGNAL)
+                    } else if matches!(
+                        candidate.status,
+                        AgentSessionStatus::Starting | AgentSessionStatus::Working
+                    ) {
+                        color(SIGNAL).opacity(view.pulse)
+                    } else if self.agent_unseen.contains(&candidate.id) {
+                        color(SAGE)
+                    } else {
+                        hairline(0.28)
+                    };
+                    div().flex_none().size(px(5.0)).rounded_full().bg(tone)
+                });
+                to.child(h_flex().flex_none().ml(px(2.0)).gap(px(4.0)).children(dots))
             });
 
+        // An empty composer lends its arrows to the choice above it.
+        let choosing =
+            draft.is_empty() && agent.is_none_or(|agent| agent.pending_permission().is_some());
         let send_label = if busy { "queue" } else { "send" };
         let ready = !draft.trim().is_empty();
         let send_app = view.app.clone();
@@ -652,6 +690,8 @@ impl MuxApp {
             .bg(color(SURFACE))
             .key_context(if self.agent_completion_menu.is_some() {
                 "MuxAgentCompletion"
+            } else if choosing {
+                "MuxAgentChoice"
             } else {
                 ""
             })
@@ -806,35 +846,63 @@ fn thread_blocks(view: &PaneView<'_>, agent: &AgentSessionSnapshot) -> Vec<AnyEl
                 let waiting = agent
                     .pending_permission()
                     .is_some_and(|permission| permission.tool_call_id == tool.id);
-                let end = if waiting {
-                    StepEnd::NeedsYou
-                } else {
-                    match tool.status {
-                        ToolStatus::Running => StepEnd::Running,
-                        ToolStatus::Pending if working => StepEnd::Running,
-                        ToolStatus::Pending => StepEnd::Blank,
-                        ToolStatus::Failed => StepEnd::Failed(tool_duration(tool)),
-                        ToolStatus::Completed => {
-                            tool_duration(tool).map_or(StepEnd::Blank, StepEnd::Took)
-                        }
-                    }
-                };
                 // An answered question about this step reads as a word on it.
-                let decision = agent.timeline.iter().find_map(|item| match item {
+                let answered = agent.timeline.iter().find_map(|item| match item {
                     AgentTimelineItem::Permission(permission)
                         if permission.tool_call_id == tool.id
                             && permission.answered_at.is_some() =>
                     {
-                        Some(decision_badge(permission))
+                        Some(permission)
                     }
                     _ => None,
                 });
+                // A step that waited on you is timed from your answer, and one
+                // you turned down never ran.
+                let ran_for = match answered {
+                    Some(permission) if was_declined(permission) => None,
+                    Some(permission) => permission
+                        .answered_at
+                        .zip(tool.finished_at)
+                        .map(|(start, end)| end.saturating_sub(start)),
+                    None => tool_duration(tool),
+                };
+                let end = if waiting {
+                    StepEnd::NeedsYou
+                } else {
+                    match (tool.status, turn_end(agent, index)) {
+                        // Agents don't always close a step when a turn ends
+                        // under it; it stops with the turn either way.
+                        (ToolStatus::Running | ToolStatus::Pending, Some(stop)) => {
+                            if stop == AgentStopReason::Cancelled {
+                                StepEnd::Stopped(None)
+                            } else {
+                                StepEnd::Blank
+                            }
+                        }
+                        (ToolStatus::Running, None) => StepEnd::Running,
+                        (ToolStatus::Pending, None) if working => StepEnd::Running,
+                        (ToolStatus::Pending, None) => StepEnd::Blank,
+                        // A step you turned down didn't fail; the badge says
+                        // what happened.
+                        (ToolStatus::Failed, _) if answered.is_some_and(was_declined) => {
+                            StepEnd::Blank
+                        }
+                        (ToolStatus::Failed, _) if cut_short(agent, index, tool) => {
+                            StepEnd::Stopped(ran_for)
+                        }
+                        (ToolStatus::Failed, _) => StepEnd::Failed(ran_for),
+                        (ToolStatus::Completed, _) => ran_for.map_or(StepEnd::Blank, StepEnd::Took),
+                    }
+                };
                 lines.push(step_row(
                     view,
                     &key,
                     tool_label(tool),
                     tool_preview(tool, &agent.cwd).into(),
-                    diff_badge(tool).into_iter().chain(decision).collect(),
+                    diff_badge(tool)
+                        .into_iter()
+                        .chain(answered.map(decision_badge))
+                        .collect(),
                     end,
                     open,
                 ));
@@ -911,7 +979,8 @@ fn session_intro(view: &PaneView<'_>, agent: &AgentSessionSnapshot) -> Vec<AnyEl
         h_flex()
             .ml(px(grid.column))
             .mt(px(8.0))
-            .gap(px(16.0))
+            .gap_x(px(16.0))
+            .gap_y(px(2.0))
             .flex_wrap()
             .text_color(color(FAINT_TEXT))
             .child(key_hint("@", "adds a file"))
@@ -1091,6 +1160,9 @@ fn help_block(grid: Grid, agent: Option<&AgentSessionSnapshot>) -> AnyElement {
             "interrupt the turn, or end the session".into(),
         ),
     ];
+    // The agent's own commands follow under its name, so it's clear which of
+    // them mux answers and which go through to the agent.
+    let own = rows.len();
     if let Some(agent) = agent {
         rows.extend(agent.available_commands.iter().take(8).map(|command| {
             (
@@ -1100,7 +1172,17 @@ fn help_block(grid: Grid, agent: Option<&AgentSessionSnapshot>) -> AnyElement {
         }));
     }
     let mut list = v_flex().ml(px(grid.column)).mt(px(2.0)).min_w_0();
-    for (command, what) in rows {
+    for (index, (command, what)) in rows.into_iter().enumerate() {
+        if index == own
+            && let Some(agent) = agent
+        {
+            list = list.child(
+                div()
+                    .mt(px(8.0))
+                    .text_color(color(FAINT_TEXT))
+                    .child(format!("from {}", agent_short_name(agent))),
+            );
+        }
         list = list.child(
             h_flex()
                 .min_w_0()
@@ -1131,7 +1213,8 @@ fn help_block(grid: Grid, agent: Option<&AgentSessionSnapshot>) -> AnyElement {
             h_flex()
                 .ml(px(grid.column))
                 .mt(px(8.0))
-                .gap(px(16.0))
+                .gap_x(px(16.0))
+                .gap_y(px(2.0))
                 .flex_wrap()
                 .text_color(color(FAINT_TEXT))
                 .child(key_hint("⌃a", "back to the shell"))
@@ -1307,12 +1390,11 @@ fn answered_row(grid: Grid, permission: &AgentPermission) -> AnyElement {
                 .flex_1()
                 .min_w_0()
                 .gap(px(10.0))
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .child(permission_subject(permission)),
-                )
+                .child(div().min_w_0().truncate().child(ledger_text(
+                    grid,
+                    "asked",
+                    permission_subject(permission),
+                )))
                 .child(decision_badge(permission)),
         )
         .into_any_element()
@@ -1376,18 +1458,14 @@ fn turn_end_line(
             h_flex()
                 .min_w_0()
                 .gap(px(6.0))
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(color(tone))
-                        .child(text),
-                )
+                .child(div().flex_none().text_color(color(tone)).child(text))
                 .when_some(changes, |line, (files, added, removed)| {
-                    line.child(div().flex_none().child(format!(
-                        "· {files} {} changed",
-                        if files == 1 { "file" } else { "files" }
-                    )))
+                    let files = format!("· {files} {}", if files == 1 { "file" } else { "files" });
+                    line.child(div().min_w_0().truncate().child(if grid.compact {
+                        files
+                    } else {
+                        format!("{files} changed")
+                    }))
                     .child(
                         div()
                             .flex_none()
@@ -1416,11 +1494,7 @@ fn plan_block(
         .count();
     let key = format!("{}:plan:{index}", agent.id);
     let open = !ended || view.expanded.contains(&key);
-    let count = if ended {
-        format!("{done} of {} done", entries.len())
-    } else {
-        format!("{done} of {}", entries.len())
-    };
+    let count = format!("{done} of {} done", entries.len());
     let app = view.app.clone();
     let head = ledger_row(grid, Some("plan"))
         .id(SharedString::from(format!("agent-plan-{key}")))
@@ -1442,7 +1516,7 @@ fn plan_block(
                 .min_w_0()
                 .truncate()
                 .text_color(color(MUTED_TEXT))
-                .child(count),
+                .child(ledger_text(grid, "plan", count)),
         );
     if !open {
         return head.into_any_element();
@@ -1515,6 +1589,8 @@ enum StepEnd {
     Running,
     NeedsYou,
     Took(u64),
+    /// Cut short when you interrupted the turn.
+    Stopped(Option<u64>),
     Failed(Option<u64>),
 }
 
@@ -1545,6 +1621,14 @@ fn step_row(
                 .into_any_element(),
         ),
         StepEnd::Took(ms) => Some(div().child(duration_label(ms)).into_any_element()),
+        StepEnd::Stopped(ms) => Some(
+            div()
+                .child(ms.map_or_else(
+                    || "stopped".to_owned(),
+                    |ms| format!("stopped {}", duration_label(ms)),
+                ))
+                .into_any_element(),
+        ),
         StepEnd::Failed(ms) => Some(
             div()
                 .text_color(color(SIGNAL))
@@ -1555,7 +1639,7 @@ fn step_row(
                 .into_any_element(),
         ),
     };
-    ledger_row(grid, (!grid.compact).then_some(verb))
+    ledger_row(grid, Some(verb))
         .id(SharedString::from(format!("agent-step-{key}")))
         .cursor_pointer()
         .when(open, |row| row.bg(wash(0.1)))
@@ -1583,11 +1667,7 @@ fn step_row(
                         } else {
                             TEXT
                         }))
-                        .child(if grid.compact {
-                            SharedString::from(format!("{verb} {text}"))
-                        } else {
-                            text
-                        }),
+                        .child(ledger_text(grid, verb, text)),
                 )
                 .children(badges)
                 .when(running, |row| row.child(pulse_dot(view.pulse, 6.0))),
@@ -1609,6 +1689,8 @@ fn step_row(
 /// the text column, and whatever the caller adds after it. Rows reach 8px
 /// past the column on either side so a hover wash has room to breathe.
 fn ledger_row(grid: Grid, verb: Option<&str>) -> gpui::Div {
+    // A narrow pane has no room for the word; ledger_text leads with it.
+    let verb = verb.filter(|_| !grid.compact);
     h_flex()
         .w_full()
         .min_w_0()
@@ -1628,16 +1710,77 @@ fn ledger_row(grid: Grid, verb: Option<&str>) -> gpui::Div {
         )
 }
 
-/// How a permission was answered, as a word after the step it was about.
-fn decision_badge(permission: &AgentPermission) -> AnyElement {
-    let kind = permission.selected_option.as_ref().and_then(|selected| {
+/// A ledger row's text, led by its verb when the pane is too narrow for the
+/// gutter to carry it.
+fn ledger_text(grid: Grid, verb: &str, text: impl Into<SharedString>) -> SharedString {
+    let text = text.into();
+    if grid.compact {
+        format!("{verb} {text}").into()
+    } else {
+        text
+    }
+}
+
+/// Which kind of answer a permission got, if it got one.
+fn selected_kind(permission: &AgentPermission) -> Option<PermissionKind> {
+    permission.selected_option.as_ref().and_then(|selected| {
         permission
             .options
             .iter()
             .find(|option| option.id == *selected)
             .map(|option| option.kind)
-    });
-    let (word, tone) = match kind {
+    })
+}
+
+/// Whether you turned the step down, or let the question lapse.
+fn was_declined(permission: &AgentPermission) -> bool {
+    !matches!(
+        selected_kind(permission),
+        Some(PermissionKind::AllowOnce | PermissionKind::AllowAlways)
+    )
+}
+
+/// How the turn holding the item at `index` ended, once it has.
+fn turn_end(agent: &AgentSessionSnapshot, index: usize) -> Option<AgentStopReason> {
+    agent.timeline[index + 1..]
+        .iter()
+        .map_while(|item| match item {
+            AgentTimelineItem::Message {
+                role: AgentMessageRole::User,
+                ..
+            } => None,
+            AgentTimelineItem::TurnEnded { stop, .. } => Some(Some(*stop)),
+            _ => Some(None),
+        })
+        .find_map(|stop| stop)
+}
+
+/// Whether a failed step was still running when you stopped the turn, rather
+/// than failing on its own and the agent carrying on past it.
+fn cut_short(agent: &AgentSessionSnapshot, index: usize, tool: &AgentTool) -> bool {
+    for item in &agent.timeline[index + 1..] {
+        match item {
+            AgentTimelineItem::TurnEnded { stop, .. } => {
+                return *stop == AgentStopReason::Cancelled;
+            }
+            AgentTimelineItem::Message { .. } => return false,
+            AgentTimelineItem::Tool(later)
+                if later
+                    .started_at
+                    .zip(tool.finished_at)
+                    .is_some_and(|(start, end)| start > end) =>
+            {
+                return false;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// How a permission was answered, as a word after the step it was about.
+fn decision_badge(permission: &AgentPermission) -> AnyElement {
+    let (word, tone) = match selected_kind(permission) {
         Some(PermissionKind::AllowOnce) => ("allowed", FAINT_TEXT),
         Some(PermissionKind::AllowAlways) => ("always allowed", FAINT_TEXT),
         Some(PermissionKind::RejectOnce) => ("rejected", SIGNAL),
@@ -1672,6 +1815,8 @@ pub(super) fn pulse_level(tick: u8) -> f32 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tint {
     Plain,
+    /// What a step printed.
+    Output,
     Command,
     Added,
     Removed,
@@ -1679,44 +1824,11 @@ enum Tint {
     Error,
 }
 
+/// A step opened up: its command, diff and output in a dark well. Each run of
+/// added or removed lines sits on its own faint wash, edge to edge, so a diff
+/// reads at a glance; output that follows a diff steps down from it.
 fn detail_well(grid: Grid, lines: &[(Tint, String)]) -> AnyElement {
-    let mut text = String::new();
-    let mut runs = Vec::new();
-    let face = font(EMBEDDED_TERMINAL_FONT);
-    for (index, (tint, line)) in lines.iter().enumerate() {
-        let mut piece = line.clone();
-        if index + 1 < lines.len() {
-            piece.push('\n');
-        }
-        let tone = match tint {
-            Tint::Plain => color(MUTED_TEXT),
-            Tint::Command => color(TEXT),
-            Tint::Added => color(SAGE),
-            Tint::Removed | Tint::Note => color(FAINT_TEXT),
-            Tint::Error => color(SIGNAL),
-        };
-        runs.push(TextRun {
-            len: piece.len(),
-            font: face.clone(),
-            color: tone,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        });
-        text.push_str(&piece);
-    }
-    if text.is_empty() {
-        text.push_str("nothing to show");
-        runs.push(TextRun {
-            len: text.len(),
-            font: face,
-            color: color(FAINT_TEXT),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        });
-    }
-    div()
+    let mut well = v_flex()
         .mt(px(4.0))
         .mb(px(8.0))
         .ml(px((grid.column - 12.0).max(0.0)))
@@ -1726,9 +1838,48 @@ fn detail_well(grid: Grid, lines: &[(Tint, String)]) -> AnyElement {
         .bg(gpui::black().opacity(0.26))
         .min_w_0()
         .text_size(px(12.5))
-        .line_height(px(19.0))
-        .child(StyledText::new(text).with_runs(runs))
-        .into_any_element()
+        .line_height(px(19.0));
+    if lines.is_empty() {
+        return well
+            .text_color(color(FAINT_TEXT))
+            .child("nothing to show")
+            .into_any_element();
+    }
+    let mut previous = None;
+    for run in lines.chunk_by(|a, b| a.0 == b.0) {
+        let tint = run[0].0;
+        let text = run
+            .iter()
+            .map(|(_, line)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tone = match tint {
+            Tint::Plain | Tint::Output => color(MUTED_TEXT),
+            Tint::Command => color(TEXT),
+            Tint::Added => color(SAGE),
+            Tint::Removed | Tint::Note => color(FAINT_TEXT),
+            Tint::Error => color(SIGNAL),
+        };
+        let wash = match tint {
+            Tint::Added => Some(color(SAGE).opacity(0.08)),
+            Tint::Removed => Some(color(SIGNAL).opacity(0.06)),
+            _ => None,
+        };
+        let steps_down =
+            tint == Tint::Output && previous.is_some_and(|before| before != Tint::Output);
+        well = well.child(
+            div()
+                .mx(px(-12.0))
+                .px(px(12.0))
+                .min_w_0()
+                .when(steps_down, |run| run.mt(px(8.0)))
+                .when_some(wash, gpui::Styled::bg)
+                .text_color(tone)
+                .child(text),
+        );
+        previous = Some(tint);
+    }
+    well.into_any_element()
 }
 
 /// The pinned card for a permission the agent is waiting on. The slab opens
@@ -1835,7 +1986,8 @@ fn needs_you_card(
         h_flex()
             .ml(px(grid.column))
             .mt(px(12.0))
-            .gap(px(16.0))
+            .gap_x(px(16.0))
+            .gap_y(px(2.0))
             .flex_wrap()
             .text_color(color(FAINT_TEXT))
             .child(key_hint("↑↓", "choose"))
@@ -2062,7 +2214,11 @@ fn working_line(view: &PaneView<'_>, agent: &AgentSessionSnapshot) -> Option<Any
             .iter()
             .filter(|entry| entry.status == PlanStatus::Completed)
             .count();
-        format!("{} of {}", (done + 1).min(entries.len()), entries.len())
+        format!(
+            "step {} of {}",
+            (done + 1).min(entries.len()),
+            entries.len()
+        )
     });
     let stopwatch = chrome::dot_matrix(&elapsed, 2.0, color(TEXT))
         .unwrap_or_else(|| div().child(elapsed.clone()).into_any_element());
@@ -2823,7 +2979,7 @@ fn tool_detail(tool: &AgentTool, cwd: &Path) -> Vec<(Tint, String)> {
                 if tool.status == ToolStatus::Failed {
                     Tint::Error
                 } else {
-                    Tint::Plain
+                    Tint::Output
                 },
                 (*line).to_owned(),
             ));
@@ -3225,8 +3381,10 @@ fn plain_line(text: &str) -> String {
     chrome::truncate_chars(line.trim_matches('`'), 240)
 }
 
+/// A line of prose for a one-line row, without markdown's code ticks and
+/// emphasis marks.
 fn first_line(text: &str) -> String {
-    let line = plain_line(text);
+    let line = plain_line(text).replace('`', "").replace("**", "");
     line.trim_start_matches(['*', '#', ' '])
         .trim_end_matches('*')
         .to_owned()
@@ -3407,5 +3565,116 @@ mod tests {
         assert_eq!(sentence_lower("Allow once"), "allow once");
         assert_eq!(sentence_lower("API key"), "API key");
         assert_eq!(size_label(1_234), "1.2k chars");
+    }
+
+    #[test]
+    fn one_line_rows_drop_markdown_marks() {
+        assert_eq!(
+            first_line("`expand_home` takes a **&Path**\nand more"),
+            "expand_home takes a &Path"
+        );
+        assert_eq!(first_line("## Planning the change"), "Planning the change");
+    }
+
+    fn step(
+        id: &str,
+        status: ToolStatus,
+        started_at: u64,
+        finished_at: Option<u64>,
+    ) -> AgentTimelineItem {
+        AgentTimelineItem::Tool(AgentTool {
+            id: id.to_owned(),
+            status,
+            started_at: Some(started_at),
+            finished_at,
+            ..tool(AgentToolKind::Execute, serde_json::json!({}))
+        })
+    }
+
+    fn session(timeline: Vec<AgentTimelineItem>) -> AgentSessionSnapshot {
+        let mut agent = AgentSessionSnapshot::new(
+            AgentSessionId::new(),
+            None,
+            "codex".to_owned(),
+            PathBuf::from("/src/mux"),
+        );
+        agent.timeline = timeline;
+        agent
+    }
+
+    #[test]
+    fn steps_only_read_as_stopped_when_your_interrupt_cut_them_off() {
+        let said = |text: &str| AgentTimelineItem::Message {
+            role: AgentMessageRole::Agent,
+            message_id: None,
+            text: text.to_owned(),
+            at: Some(5_000),
+        };
+        let ended = |stop| AgentTimelineItem::TurnEnded { at: 9_000, stop };
+        // Failed under the interrupt: stopped.
+        let agent = session(vec![
+            step("a", ToolStatus::Failed, 1_000, Some(8_900)),
+            ended(AgentStopReason::Cancelled),
+        ]);
+        let AgentTimelineItem::Tool(failed) = &agent.timeline[0] else {
+            unreachable!()
+        };
+        assert!(cut_short(&agent, 0, failed));
+        // Failed, then the agent carried on before you stopped it: a failure.
+        let agent = session(vec![
+            step("a", ToolStatus::Failed, 1_000, Some(2_000)),
+            said("that didn't work, trying another way"),
+            step("b", ToolStatus::Failed, 6_000, Some(8_900)),
+            ended(AgentStopReason::Cancelled),
+        ]);
+        let AgentTimelineItem::Tool(failed) = &agent.timeline[0] else {
+            unreachable!()
+        };
+        assert!(!cut_short(&agent, 0, failed));
+        // A step left running when a turn ends stops with it.
+        let agent = session(vec![
+            step("a", ToolStatus::Running, 1_000, None),
+            ended(AgentStopReason::Cancelled),
+        ]);
+        assert_eq!(turn_end(&agent, 0), Some(AgentStopReason::Cancelled));
+        // A turn still going has no end yet, and the next turn's end isn't it.
+        let agent = session(vec![
+            step("a", ToolStatus::Running, 1_000, None),
+            AgentTimelineItem::Message {
+                role: AgentMessageRole::User,
+                message_id: None,
+                text: "next".to_owned(),
+                at: Some(9_500),
+            },
+            ended(AgentStopReason::EndTurn),
+        ]);
+        assert_eq!(turn_end(&agent, 0), None);
+    }
+
+    #[test]
+    fn only_an_allow_counts_as_letting_a_step_run() {
+        let option = |id: &str, kind| mux_acp::PermissionOption {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            kind,
+        };
+        let mut permission = AgentPermission {
+            request_id: "request".to_owned(),
+            tool_call_id: "tool".to_owned(),
+            title: "Run tests".to_owned(),
+            options: vec![
+                option("allow", PermissionKind::AllowOnce),
+                option("always", PermissionKind::AllowAlways),
+                option("reject", PermissionKind::RejectOnce),
+            ],
+            selected_option: None,
+            asked_at: Some(1_000),
+            answered_at: Some(2_000),
+        };
+        assert!(was_declined(&permission), "a lapsed question ran nothing");
+        for (selected, declined) in [("allow", false), ("always", false), ("reject", true)] {
+            permission.selected_option = Some(selected.to_owned());
+            assert_eq!(was_declined(&permission), declined, "{selected}");
+        }
     }
 }
