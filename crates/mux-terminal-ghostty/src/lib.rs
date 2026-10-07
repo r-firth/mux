@@ -107,6 +107,25 @@ impl GhosttyTheme {
     }
 }
 
+/// Ghostty's own default for `scrollback-limit`, in bytes.
+pub const DEFAULT_HISTORY_BYTES: usize = 10_000_000;
+
+/// How much history a pane keeps above its screen, in bytes: the
+/// `scrollback-limit` from the user's Ghostty config when it sets one, so a
+/// pane remembers as much as their Ghostty does, else Ghostty's default.
+#[must_use]
+pub fn user_history_limit() -> usize {
+    let mut limit = DEFAULT_HISTORY_BYTES;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_history_limit(&contents, &mut limit);
+            }
+        }
+    }
+    limit
+}
+
 fn user_config_paths() -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
     let base = BaseDirs::new()?;
     let home = base.home_dir();
@@ -203,6 +222,18 @@ fn parse_font_config(contents: &str, families: &mut Vec<String>, size: &mut Opti
                     .filter(|value| value.is_finite() && *value > 0.0);
             }
             _ => {}
+        }
+    }
+}
+
+fn parse_history_limit(contents: &str, limit: &mut usize) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "scrollback-limit" {
+            if value.is_empty() {
+                *limit = DEFAULT_HISTORY_BYTES;
+            } else if let Ok(bytes) = value.replace('_', "").parse() {
+                *limit = bytes;
+            }
         }
     }
 }
@@ -488,6 +519,7 @@ mod linked {
             out_len: *mut usize,
             out_has_selection: *mut bool,
         ) -> i32;
+        fn mux_ghostty_terminal_set_history_limit(terminal: *mut c_void, max_bytes: usize) -> i32;
         fn mux_ghostty_terminal_screen_text(
             terminal: *mut c_void,
             out_bytes: *mut *mut u8,
@@ -800,6 +832,16 @@ mod linked {
                 selection_gesture,
                 descriptor: descriptor(),
                 next_sequence: checkpoint.next_sequence,
+            })
+        }
+
+        /// Keep up to `max_bytes` of history above the screen. libghostty
+        /// prunes a page at a time, so what is kept lands within a page
+        /// (about 400 KB) of the limit.
+        pub fn set_history_limit(&mut self, max_bytes: usize) -> Result<(), GhosttyError> {
+            // SAFETY: the terminal is owned and the limit is passed by value.
+            check(unsafe {
+                mux_ghostty_terminal_set_history_limit(self.terminal.as_ptr(), max_bytes)
             })
         }
 
@@ -1881,6 +1923,40 @@ mod linked {
         }
 
         #[test]
+        fn a_raised_history_limit_keeps_rows_the_default_lets_go() {
+            let size = TerminalSize {
+                cols: 80,
+                rows: 24,
+                ..TerminalSize::default()
+            };
+            let output = (0..12_000)
+                .flat_map(|line| format!("line {line}\r\n").into_bytes())
+                .collect::<Vec<_>>();
+
+            let mut default = GhosttyEngine::new(size).expect("default terminal");
+            default.apply_output(1, &output).expect("output");
+            let kept_by_default = default.render_frame().expect("frame").scroll.total;
+
+            // The window's copy of a pane is restored from a checkpoint, so
+            // the limit has to hold on a restored terminal.
+            let checkpoint = GhosttyEngine::new(size)
+                .expect("terminal")
+                .checkpoint()
+                .expect("checkpoint");
+            let mut raised = GhosttyEngine::restore(&checkpoint).expect("restored terminal");
+            raised.set_history_limit(10_000_000).expect("history limit");
+            raised.apply_output(1, &output).expect("output");
+            let text = raised.screen_text().expect("screen text");
+
+            assert!(
+                kept_by_default < 2_000,
+                "the default kept {kept_by_default} rows"
+            );
+            assert_eq!(text.lines().next(), Some("line 0"));
+            assert!(text.lines().any(|line| line == "line 11999"));
+        }
+
+        #[test]
         fn ghostty_owns_selection_rendering_and_copy_text() {
             let mut engine = GhosttyEngine::new(TerminalSize {
                 cols: 20,
@@ -2356,6 +2432,24 @@ mod theme_tests {
         assert_eq!(theme.background, parse_rgb("101020"));
         assert_eq!(theme.foreground, parse_rgb("ffffff"));
         assert_eq!(theme.palette[4], parse_rgb("abcdef"));
+    }
+
+    #[test]
+    fn history_limit_follows_the_last_scrollback_limit() {
+        let mut limit = DEFAULT_HISTORY_BYTES;
+        parse_history_limit("font-size = 13\n", &mut limit);
+        assert_eq!(limit, DEFAULT_HISTORY_BYTES);
+        parse_history_limit(
+            "scrollback-limit = 50_000_000\n# scrollback-limit = 1\n",
+            &mut limit,
+        );
+        assert_eq!(limit, 50_000_000);
+        parse_history_limit("scrollback-limit = lots\n", &mut limit);
+        assert_eq!(limit, 50_000_000);
+        parse_history_limit("scrollback-limit = 0\n", &mut limit);
+        assert_eq!(limit, 0);
+        parse_history_limit("scrollback-limit =\n", &mut limit);
+        assert_eq!(limit, DEFAULT_HISTORY_BYTES);
     }
 
     #[test]

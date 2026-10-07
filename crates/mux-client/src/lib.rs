@@ -176,16 +176,43 @@ impl Client {
             .await?
         {
             Response::Attached(attachment) => {
-                let session_id = attachment.session.id;
-                let next_output_sequence = attachment_output_sequences(&attachment)?;
-                self.pending_events
-                    .retain(|event| !attachment_supersedes_event(event, session_id));
-                self.next_output_sequence = next_output_sequence;
-                self.desynced_session = None;
+                let attached = attachment_output_sequences(&attachment)?;
+                self.follow_workspace_update(attachment.session.id, attached);
                 Ok(attachment)
             }
             response => Err(ClientError::UnexpectedResponse(Box::new(response))),
         }
+    }
+
+    /// A workspace update snapshots every pane, but a pane this client was
+    /// already following keeps its output stream: what was queued before the
+    /// response and what the daemon sends after it still arrive, in order and
+    /// without a gap, so a caller can bring its own copy of the pane up to
+    /// date instead of starting again from the snapshot (and losing whatever
+    /// history it held beyond it). A pane new to the update starts at its
+    /// snapshot, and a session whose stream had already broken starts over.
+    fn follow_workspace_update(&mut self, session_id: SessionId, attached: HashMap<PaneId, u64>) {
+        let continuing = self.desynced_session != Some(session_id);
+        let followed = &self.next_output_sequence;
+        let cursors = attached
+            .into_iter()
+            .map(|(pane_id, next)| match followed.get(&pane_id) {
+                Some(&cursor) if continuing => (pane_id, cursor),
+                _ => (pane_id, next),
+            })
+            .collect::<HashMap<_, _>>();
+        self.pending_events.retain(|event| match event {
+            ServerEvent::PaneOutput {
+                session_id: event_session,
+                pane_id,
+                ..
+            } if *event_session == session_id => {
+                continuing && followed.contains_key(pane_id) && cursors.contains_key(pane_id)
+            }
+            event => !attachment_supersedes_event(event, session_id),
+        });
+        self.next_output_sequence = cursors;
+        self.desynced_session = None;
     }
 
     pub async fn list_agent_sessions(&mut self) -> Result<Vec<AgentSessionSnapshot>, ClientError> {
@@ -681,6 +708,81 @@ mod tests {
         .expect("write live output");
     }
 
+    /// A daemon that answers a split: output for the new pane queued ahead
+    /// of the response (and held in its snapshot), then live output after.
+    async fn serve_split_with_new_pane(
+        listener: UnixListener,
+        session_id: SessionId,
+        new_pane: PaneId,
+        initial_attachment: SessionAttachment,
+        updated_attachment: SessionAttachment,
+    ) {
+        let (mut stream, _) = listener.accept().await.expect("accept client");
+        let _: ClientMessage = read_frame(&mut stream).await.expect("read client hello");
+        write_frame(
+            &mut stream,
+            &ServerMessage::Hello(ServerHello {
+                protocol_version: PROTOCOL_VERSION,
+                daemon_pid: 42,
+            }),
+        )
+        .await
+        .expect("write server hello");
+        let ClientMessage::Request { request_id, .. } =
+            read_frame(&mut stream).await.expect("read attach")
+        else {
+            panic!("expected attach request");
+        };
+        write_frame(
+            &mut stream,
+            &ServerMessage::Response {
+                request_id,
+                response: Ok(Response::Attached(initial_attachment)),
+            },
+        )
+        .await
+        .expect("write initial attachment");
+        let ClientMessage::Request { request_id, .. } = read_frame(&mut stream)
+            .await
+            .expect("read workspace command")
+        else {
+            panic!("expected workspace command");
+        };
+        for (sequence, bytes) in [(1, b"prompt".as_slice()), (2, b" again".as_slice())] {
+            write_frame(
+                &mut stream,
+                &ServerMessage::Event(ServerEvent::PaneOutput {
+                    session_id,
+                    pane_id: new_pane,
+                    sequence,
+                    bytes: bytes.to_vec(),
+                }),
+            )
+            .await
+            .expect("write output the snapshot holds");
+        }
+        write_frame(
+            &mut stream,
+            &ServerMessage::Response {
+                request_id,
+                response: Ok(Response::Attached(updated_attachment)),
+            },
+        )
+        .await
+        .expect("write workspace attachment");
+        write_frame(
+            &mut stream,
+            &ServerMessage::Event(ServerEvent::PaneOutput {
+                session_id,
+                pane_id: new_pane,
+                sequence: 3,
+                bytes: b"$ ".to_vec(),
+            }),
+        )
+        .await
+        .expect("write live output");
+    }
+
     #[test]
     fn named_application_profiles_have_isolated_state_directories() {
         let product = default_state_dir().expect("product state directory");
@@ -819,7 +921,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_snapshot_discards_queued_output_it_already_contains() {
+    async fn workspace_update_keeps_the_output_stream_of_a_followed_pane() {
         let directory = tempfile::tempdir().expect("temporary state directory");
         let socket = directory.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
@@ -850,6 +952,17 @@ mod tests {
             .await
             .expect("workspace update");
 
+        // The output queued behind the snapshot still arrives, so a copy of
+        // the pane that never saw it can apply it rather than start over.
+        assert_eq!(
+            client.next_event().await.expect("queued output"),
+            ServerEvent::PaneOutput {
+                session_id,
+                pane_id,
+                sequence: 1,
+                bytes: b"covered by snapshot".to_vec(),
+            }
+        );
         assert_eq!(
             client.next_event().await.expect("workspace event"),
             ServerEvent::WorkspaceChanged { session_id }
@@ -864,6 +977,57 @@ mod tests {
             }
         );
         assert_eq!(client.next_output_sequence.get(&pane_id), Some(&3));
+        server.await.expect("fake daemon task");
+    }
+
+    #[tokio::test]
+    async fn workspace_update_starts_a_new_pane_at_its_snapshot() {
+        let directory = tempfile::tempdir().expect("temporary state directory");
+        let socket = directory.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        let followed = PaneId::new();
+        let new_pane = PaneId::new();
+        let session = Session::with_panes("split", &[followed]).expect("session");
+        let session_id = session.id;
+        let initial_attachment = test_attachment(session.clone(), followed, 1);
+        let mut updated_attachment = test_attachment(session, followed, 1);
+        updated_attachment.panes.push(
+            test_attachment(updated_attachment.session.clone(), new_pane, 3).panes[0].clone(),
+        );
+        let server = tokio::spawn(serve_split_with_new_pane(
+            listener,
+            session_id,
+            new_pane,
+            initial_attachment,
+            updated_attachment,
+        ));
+
+        let mut client = Client::connect(&socket, "new-pane-test")
+            .await
+            .expect("connect client");
+        client
+            .attach(SessionSelector::Id(session_id))
+            .await
+            .expect("initial attachment");
+        client
+            .workspace_command(
+                session_id,
+                WorkspaceCommand::SplitPane(mux_workspace::SplitAxis::Horizontal),
+            )
+            .await
+            .expect("workspace update");
+
+        assert_eq!(
+            client.next_event().await.expect("live output"),
+            ServerEvent::PaneOutput {
+                session_id,
+                pane_id: new_pane,
+                sequence: 3,
+                bytes: b"$ ".to_vec(),
+            }
+        );
+        assert_eq!(client.next_output_sequence.get(&new_pane), Some(&4));
+        assert_eq!(client.next_output_sequence.get(&followed), Some(&1));
         server.await.expect("fake daemon task");
     }
 }

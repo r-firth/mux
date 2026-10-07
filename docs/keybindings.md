@@ -65,6 +65,12 @@ The wheel or trackpad moves through a pane's history; a thin thumb on the
 pane's right edge shows where while it is scrolled back. Typing returns the
 pane to its latest output.
 
+A pane keeps as much history as your Ghostty does: the `scrollback-limit` in
+its config, or Ghostty's own 10 MB, which is several thousand rows (more in a
+narrow pane). Tab switches, splits and closes leave it alone, even while the
+pane is printing. The daemon keeps only the last thousand rows or so, so that
+is what a pane starts with when Mux opens or moves to another session.
+
 | Keys | Action |
 | --- | --- |
 | `Cmd+Home` / `Cmd+End` | Go to the top or bottom of the history |
