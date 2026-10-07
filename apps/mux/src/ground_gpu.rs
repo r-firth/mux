@@ -2,16 +2,16 @@
 //!
 //! GPUI has no way to run a shader of ours, so on macOS the ground is a
 //! Metal layer of its own, in a view set under GPUI's. GPUI's window is made
-//! transparent, and wherever it draws nothing the layer shows. The layer has
-//! one texel for each cell of grain and is magnified without smoothing, so a
-//! frame is a few hundred thousand texels of simple arithmetic: it can run at
-//! the display's full rate for next to nothing, and no part of the window is
-//! drawn again to move it.
+//! transparent, and wherever it draws nothing the layer shows. The layer
+//! follows the display's own frames and nothing of the window is drawn again
+//! to move it, so the ground runs at the display's full rate.
 //!
-//! The shader works out the same light as `Field` does, cell for cell, from
-//! the same numbers. `Field` stays: it lights the gaps an agent's launcher
-//! shows the ground through, it is what the tests ask, and it is the ground
-//! everywhere this layer cannot be had.
+//! Here the ground is a panel of round dots, the same dots the session's
+//! name is set in: every one always faintly there, and brought up by the
+//! light through an ordered dither. The light itself is what `Field` works
+//! out, from the same numbers. `Field` stays, with its plainer grain: it
+//! lights the gaps an agent's launcher shows the ground through, it is what
+//! the tests ask, and it is the ground everywhere this layer cannot be had.
 //!
 //! This is the one place the app talks to `AppKit` and Metal directly, and so
 //! the one place it needs `unsafe`.
@@ -29,6 +29,16 @@ use objc::runtime::{Object, YES};
 use objc::{class, msg_send, sel, sel_impl};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
+/// How far apart the ground's dots are, in points; how big a dot is, as a
+/// share of that, and how much bigger it burns; how bright a dot the light
+/// has not reached is, against one it has; and how brightly the light glows
+/// on the ground under the dots.
+const PITCH: f32 = 10.0 / 3.0;
+const DOT_SIZE: f32 = 0.34;
+const DOT_SWELL: f32 = 0.08;
+const UNLIT: f32 = 0.085;
+const WASH: f32 = 0.07;
+
 /// The most busy panes and callers the shader lights; more than this at
 /// once are not shown.
 const MOST: usize = 8;
@@ -41,8 +51,8 @@ pub(super) struct GpuFrame {
     /// The window's width and height in points, a cell's side, and how tall
     /// the strip is.
     view: [f32; 4],
-    /// The tide's clock in seconds, whether it runs, and what this step adds
-    /// to each dot's shimmer number.
+    /// The tide's clock in seconds, whether it runs, what this step adds to
+    /// each dot's shimmer number, and how many pixels there are to a point.
     clock: [f32; 4],
     /// How strongly the slow fields show in each ink, and the floor.
     gain: [f32; 4],
@@ -99,6 +109,7 @@ impl Ground {
         &mut self,
         scene: Scene,
         now: Instant,
+        scale: f32,
         field: bool,
     ) -> (GpuFrame, Option<Rc<Grain>>) {
         let laid = self.frame(scene, now);
@@ -115,7 +126,7 @@ impl Ground {
                 Self::seconds(laid.step),
                 if scene.still { 0.0 } else { 1.0 },
                 ((laid.step / SHIMMER_STEPS * 29) & 255) as f32,
-                0.0,
+                scale,
             ],
             gain: [gain[0], gain[1], gain[2], FLOOR],
             counts: [0.0; 4],
@@ -173,15 +184,14 @@ impl Ground {
 
 /// The shader, with the ground's numbers written into it.
 fn shader() -> String {
-    let corners = CORNERS
-        .iter()
-        .map(|(x, y)| format!("uint2({x}, {y})"))
-        .collect::<Vec<_>>()
-        .join(", ");
     let number = |value: f32| format!("{value:?}");
     [
         ("most", MOST.to_string()),
-        ("corners", corners),
+        ("pitch", number(PITCH)),
+        ("dot_size", number(DOT_SIZE)),
+        ("dot_swell", number(DOT_SWELL)),
+        ("unlit", number(UNLIT)),
+        ("wash", number(WASH)),
         ("tide_in_strip", number(TIDE_IN_STRIP)),
         ("wave_apart", number(TIDE_WAVE.0)),
         ("wave_pace", number(TIDE_WAVE.1)),
@@ -231,7 +241,7 @@ pub(super) struct Gpu {
     pipeline: RenderPipelineState,
     noise: Texture,
     buffer: metal::Buffer,
-    /// The layer's size in cells.
+    /// The layer's size in pixels.
     size: (u64, u64),
 }
 
@@ -306,10 +316,6 @@ impl Gpu {
             let layer_object: *mut Object = std::ptr::from_ref::<metal::MetalLayerRef>(&layer)
                 .cast_mut()
                 .cast();
-            // One texel is one cell of grain: magnify it without smoothing.
-            let nearest: *mut Object =
-                msg_send![class!(NSString), stringWithUTF8String: c"nearest".as_ptr()];
-            let _: () = msg_send![layer_object, setMagnificationFilter: nearest];
             // A layer set before `wantsLayer` makes the view host it.
             let _: () = msg_send![view, setLayer: layer_object];
             let _: () = msg_send![view, setWantsLayer: YES];
@@ -335,10 +341,10 @@ impl Gpu {
     /// Draw one frame of the ground.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub(super) fn draw(&mut self, frame: &GpuFrame) {
-        let cell = frame.view[2].max(1.0);
+        let scale = frame.clock[3].max(1.0);
         let size = (
-            (frame.view[0] / cell).ceil().max(1.0) as u64,
-            (frame.view[1] / cell).ceil().max(1.0) as u64,
+            (frame.view[0] * scale).ceil().max(1.0) as u64,
+            (frame.view[1] * scale).ceil().max(1.0) as u64,
         );
         if size != self.size {
             self.size = size;
@@ -437,7 +443,7 @@ mod tests {
             still: false,
         };
         let mut ground = Ground::new(Instant::now());
-        let (frame, field) = ground.gpu_frame(scene, Instant::now(), false);
+        let (frame, field) = ground.gpu_frame(scene, Instant::now(), 2.0, false);
         assert!(field.is_none());
         assert!((frame.view[0] - 800.0).abs() < f32::EPSILON);
         assert!(frame.focus_light[1] > 0.5 && frame.chip_light[0] < 0.5);
