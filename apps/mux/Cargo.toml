@@ -25,6 +25,7 @@ gpui-component.workspace = true
 gpui-component-assets.workspace = true
 gpui_platform.workspace = true
 ignore.workspace = true
+parking_lot.workspace = true
 mux-acp = { path = "../../crates/mux-acp" }
 mux-client = { path = "../../crates/mux-client" }
 mux-daemon = { path = "../../crates/mux-daemon", default-features = false }
