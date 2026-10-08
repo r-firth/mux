@@ -10,8 +10,9 @@
 #   DEMO_SESSION    session to drive (default: main)
 #   DEMO_EDITOR     editor for the first pane (default: nvim)
 #   DEMO_TESTS      test command for the busy pane; a bell follows it
-#   DEMO_RESIZED   keys that make the editor take up its pane's new size after
-#                   a zoom (default: nvim's `:silent mode`)
+#   DEMO_RESIZED    keys that make the editor take up its pane's new size after
+#                   a zoom, for Mux 0.9.1 and earlier (default: nvim's
+#                   `:silent mode`)
 #   DEMO_TOP        what the second tab runs when there is no agent (default: htop)
 #   DEMO_AGENT      an idle agent already started for the second tab's pane
 #   DEMO_KEYS       a command that presses keys in the window: `chord ctrl+p a`
@@ -104,8 +105,9 @@ fi
 sleep 1.0
 
 # Zoom the editor to fill the window, and back.
-# Mux does not yet tell a program that asked for in-band size reports, as
-# nvim does, that a zoom resized its pane, so the editor is told to look.
+# Mux 0.9.1 and earlier do not tell a program that asked for in-band size
+# reports, as nvim does, that a zoom resized its pane, so the editor is told
+# to look.
 chord '⌃P F' zoom
 sleep 0.3
 ctl type "$session" "$resized"
