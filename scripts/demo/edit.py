@@ -9,7 +9,8 @@ so the loop has no seam.
 
 Usage: scripts/demo/edit.py DEMO_DIR [--out assets/demo.webp]
 
-Needs ffmpeg built with libwebp, Pillow and NumPy.
+Needs ffmpeg, Pillow and NumPy, and libwebp's img2webp when ffmpeg was built
+without libwebp.
 """
 
 import argparse
@@ -150,6 +151,17 @@ def probe_size(path: Path) -> tuple[int, int]:
     return width, height
 
 
+def has_webp_encoder() -> bool:
+    out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], check=True, capture_output=True, text=True)
+    return "libwebp_anim" in out.stdout
+
+
+def frame_durations(count: int) -> list[int]:
+    """Whole milliseconds for each of COUNT frames that keep FPS on average."""
+    edges = [round(i * 1000 / FPS) for i in range(count + 1)]
+    return [b - a for a, b in zip(edges, edges[1:])]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("demo_dir", type=Path)
@@ -249,29 +261,34 @@ def main() -> None:
         graph.append("[looped][mask]alphamerge[window]")
         graph.append(f"[2:v][window]overlay={margin}:{margin}:shortest=1,format=yuva420p[out]")
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        command = [
-            "ffmpeg",
-            "-loglevel",
-            "error",
-            "-y",
-            *inputs,
-            "-filter_complex",
-            ";".join(graph),
-            "-map",
-            "[out]",
-            "-c:v",
-            "libwebp_anim",
-            "-lossless",
-            "0",
-            "-q:v",
-            str(args.quality),
-            "-compression_level",
-            "6",
-            "-loop",
-            "0",
-            str(args.out),
-        ]
-        subprocess.run(command, check=True)
+        filtered = ["ffmpeg", "-loglevel", "error", "-y", *inputs, "-filter_complex", ";".join(graph), "-map", "[out]"]
+        if has_webp_encoder():
+            command = [
+                *filtered,
+                "-c:v",
+                "libwebp_anim",
+                "-lossless",
+                "0",
+                "-q:v",
+                str(args.quality),
+                "-compression_level",
+                "6",
+                "-loop",
+                "0",
+                str(args.out),
+            ]
+            subprocess.run(command, check=True)
+        else:
+            # Homebrew's ffmpeg has no libwebp: it composes the frames and
+            # libwebp's own img2webp encodes them.
+            frames = tmp / "frames"
+            frames.mkdir()
+            subprocess.run([*filtered, "-pix_fmt", "rgba", str(frames / "%05d.png")], check=True)
+            command = ["img2webp", "-loop", "0", "-lossy", "-q", str(args.quality), "-m", "6"]
+            paths = sorted(frames.glob("*.png"))
+            for path, duration in zip(paths, frame_durations(len(paths))):
+                command += ["-d", str(duration), str(path)]
+            subprocess.run([*command, "-o", str(args.out)], check=True, stdout=subprocess.DEVNULL)
     print(f"{args.out}: {args.out.stat().st_size / 1e6:.1f} MB")
 
 
