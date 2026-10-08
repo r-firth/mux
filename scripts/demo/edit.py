@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Cut the filmed demo into the README's animated WebP.
+"""Cut the filmed demo into the README's animated WebP, or its showreel.
 
 Takes what scripts/demo/film-macos.sh leaves (footage.mov, cues.tsv and
 timing.tsv), trims it to the storyboard, shows each key chord as key caps
-for a moment before its change lands, rounds the window's corners onto a
-transparent ground with a soft shadow, and crossfades the end into the start
-so the loop has no seam.
+for a moment before its change lands, and rounds the window's corners with a
+soft shadow. A .webp loops on a transparent ground, its end crossfaded into
+its start so the loop has no seam; an .mp4 plays once on a dark ground.
 
-Usage: scripts/demo/edit.py DEMO_DIR [--out assets/demo.webp]
+Usage: scripts/demo/edit.py DEMO_DIR [--out target/demo/demo.webp] [--width N]
+
+The README shows demo.webp from the repository's `media` pre-release and
+links it to mux-showreel.mp4 there, so neither is committed. Cut both, then
+replace them on the release: gh release upload media demo.webp
+mux-showreel.mp4 --clobber.
 
 Needs ffmpeg, Pillow and NumPy, and libwebp's img2webp when ffmpeg was built
 without libwebp.
@@ -15,6 +20,7 @@ without libwebp.
 
 import argparse
 import csv
+import itertools
 import subprocess
 import tempfile
 from pathlib import Path
@@ -151,21 +157,21 @@ def probe_size(path: Path) -> tuple[int, int]:
     return width, height
 
 
-def has_webp_encoder() -> bool:
+def has_encoder(name: str) -> bool:
     out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], check=True, capture_output=True, text=True)
-    return "libwebp_anim" in out.stdout
+    return f" {name} " in out.stdout
 
 
 def frame_durations(count: int) -> list[int]:
     """Whole milliseconds for each of COUNT frames that keep FPS on average."""
     edges = [round(i * 1000 / FPS) for i in range(count + 1)]
-    return [b - a for a, b in zip(edges, edges[1:])]
+    return [b - a for a, b in itertools.pairwise(edges)]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("demo_dir", type=Path)
-    parser.add_argument("--out", type=Path, default=REPO / "assets/demo.webp")
+    parser.add_argument("--out", type=Path, default=REPO / "target/demo/demo.webp", help="a .webp or an .mp4")
     parser.add_argument("--width", type=int, default=1600, help="width of the window in the output")
     parser.add_argument("--radius", type=float, default=12, help="window corner radius, in points")
     parser.add_argument("--points", type=float, default=1120, help="window width in points (Mux opens at 1120)")
@@ -250,19 +256,36 @@ def main() -> None:
                 f"enable='between(t,{show:.3f},{hide + CAP_FADE:.3f})'[v{index + 1}]"
             )
             last = f"v{index + 1}"
-        # Crossfade the end into the opening, which is a still pane on a
-        # moving ground, so the loop comes round without a cut.
-        graph.append(f"[{last}]split[body][head]")
-        graph.append(f"[head]trim=0:{LOOP_FADE},setpts=PTS-STARTPTS[headclip]")
-        graph.append(
-            f"[body][headclip]xfade=transition=fade:duration={LOOP_FADE}:offset={length - LOOP_FADE:.3f}[looped]"
-        )
+        video = args.out.suffix == ".mp4"
+        if video:
+            graph.append(f"[{last}]null[looped]")
+        else:
+            # Crossfade the end into the opening, which is a still pane on a
+            # moving ground, so the loop comes round without a cut.
+            graph.append(f"[{last}]split[body][head]")
+            graph.append(f"[head]trim=0:{LOOP_FADE},setpts=PTS-STARTPTS[headclip]")
+            graph.append(
+                f"[body][headclip]xfade=transition=fade:duration={LOOP_FADE}:offset={length - LOOP_FADE:.3f}[looped]"
+            )
         graph.append("[1:v]format=gray[mask]")
         graph.append("[looped][mask]alphamerge[window]")
-        graph.append(f"[2:v][window]overlay={margin}:{margin}:shortest=1,format=yuva420p[out]")
+        if video:
+            # A video has no transparency: the window sits on GitHub's dark.
+            canvas = f"{width + 2 * margin}x{height + 2 * margin}"
+            graph.append(f"color=c=0x0d1117:s={canvas}:r={FPS}:d={length:.3f}[ground]")
+            graph.append("[ground][2:v]overlay=0:0:shortest=1[shadowed]")
+            graph.append(f"[shadowed][window]overlay={margin}:{margin}:shortest=1,format=yuv420p[out]")
+        else:
+            graph.append(f"[2:v][window]overlay={margin}:{margin}:shortest=1,format=yuva420p[out]")
         args.out.parent.mkdir(parents=True, exist_ok=True)
         filtered = ["ffmpeg", "-loglevel", "error", "-y", *inputs, "-filter_complex", ";".join(graph), "-map", "[out]"]
-        if has_webp_encoder():
+        if video:
+            if has_encoder("libx264"):
+                codec = ["-c:v", "libx264", "-preset", "slow", "-crf", "18"]
+            else:
+                codec = ["-c:v", "h264_videotoolbox", "-b:v", "16M"]
+            subprocess.run([*filtered, *codec, "-movflags", "+faststart", str(args.out)], check=True)
+        elif has_encoder("libwebp_anim"):
             command = [
                 *filtered,
                 "-c:v",
@@ -286,7 +309,7 @@ def main() -> None:
             subprocess.run([*filtered, "-pix_fmt", "rgba", str(frames / "%05d.png")], check=True)
             command = ["img2webp", "-loop", "0", "-lossy", "-q", str(args.quality), "-m", "6"]
             paths = sorted(frames.glob("*.png"))
-            for path, duration in zip(paths, frame_durations(len(paths))):
+            for path, duration in zip(paths, frame_durations(len(paths)), strict=True):
                 command += ["-d", str(duration), str(path)]
             subprocess.run([*command, "-o", str(args.out)], check=True, stdout=subprocess.DEVNULL)
     print(f"{args.out}: {args.out.stat().st_size / 1e6:.1f} MB")
