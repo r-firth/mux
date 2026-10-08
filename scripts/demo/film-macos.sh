@@ -9,6 +9,8 @@
 # pointer), OUT_DIR/cues.tsv (when each key chord was pressed) and
 # OUT_DIR/timing.tsv (when filming and the storyboard started).
 #
+# Films DEMO_FILM_SECS seconds (default 60), which must outlast the storyboard.
+#
 # Needs Screen Recording permission for the terminal that runs it, a built
 # Mux.app (MUX_APP, default /Applications/Mux.app) whose protocol matches this
 # checkout, Xcode's command line tools, and nvim, git and cargo on the shell's
@@ -24,6 +26,7 @@ repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 out=${1:-$repo/target/demo}
 app=${MUX_APP:-/Applications/Mux.app}
 tests=${DEMO_TESTS:-cargo test --lib -p mux-workspace -p mux-acp -p mux-terminal}
+film_secs=${DEMO_FILM_SECS:-60}
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 rm -f "$out/footage.mov" "$out/cues.tsv" "$out/timing.tsv"
@@ -59,11 +62,14 @@ if [[ -z ${DEMO_NO_AGENT:-} ]]; then
     fi
 fi
 
-MUX_STATE_DIR=$state "$app/Contents/MacOS/mux" --state-dir "$state" >"$out/app.log" 2>&1 &
+# Without window restoration: after a launch that was killed, AppKit would
+# otherwise stop at an alert asking whether to reopen windows.
+MUX_STATE_DIR=$state "$app/Contents/MacOS/mux" --state-dir "$state" \
+    -ApplePersistenceIgnoreState YES >"$out/app.log" 2>&1 &
 gui=$!
 capture=
 cleanup() {
-    if [[ -n $capture ]]; then kill -INT "$capture" 2>/dev/null || true; fi
+    if [[ -n $capture ]]; then kill "$capture" 2>/dev/null || true; fi
     kill "$gui" 2>/dev/null || true
     # The filmed Mux's daemon, found by its own state dir; nothing else.
     pkill -f -- "--state-dir $state" 2>/dev/null || true
@@ -120,7 +126,10 @@ sleep 1.5
 read -r x y w h < <(swift "$state/window.swift" "$gui")
 echo "filming the window at $x,$y ${w}x$h"
 record=$(now)
-screencapture -v -x -V 90 -R "$x,$y,$w,$h" "$out/footage.mov" &
+# screencapture has no way to end a recording early from a script (its
+# Control-C saves only at a terminal), so it films a fixed length that
+# outlasts the storyboard and the edit trims the tail.
+screencapture -v -x -V "$film_secs" -R "$x,$y,$w,$h" "$out/footage.mov" </dev/null >"$out/capture.log" 2>&1 &
 capture=$!
 sleep 2
 story=$(now)
@@ -128,9 +137,11 @@ DEMO_CUES=$out/cues.tsv MUXCTL=$muxctl MUX_STATE_DIR=$state DEMO_TESTS=$tests \
     DEMO_AGENT=$agent DEMO_KEYS=$keys "$repo/scripts/demo/storyboard.sh"
 finish=$(now)
 printf 'record\t%s\nstory\t%s\nfinish\t%s\n' "$record" "$story" "$finish" >"$out/timing.tsv"
-sleep 1
-# Control-C ends a screen recording and saves it.
-kill -INT "$capture"
+echo "storyboard: $(perl -e 'printf "%.1f", $ARGV[0] - $ARGV[1]' "$finish" "$story")s"
+if ! kill -0 "$capture" 2>/dev/null; then
+    echo "filming ended before the storyboard did; raise DEMO_FILM_SECS (now $film_secs)" >&2
+    exit 1
+fi
 wait "$capture" || true
 capture=
 [[ -s $out/footage.mov ]] || { echo "screencapture saved no footage" >&2; exit 1; }
