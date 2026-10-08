@@ -168,6 +168,67 @@ async fn shell_reentry_clears_a_childs_orphaned_kitty_keyboard_mode() {
     );
 }
 
+#[cfg(all(feature = "ghostty", unix))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resize_reaches_a_program_waiting_for_in_band_size_reports() {
+    let state_dir = TempDir::new().expect("temporary state directory");
+    let socket_path = state_dir.path().join("daemon.sock");
+    let daemon = Command::new(env!("CARGO_BIN_EXE_muxd"))
+        .arg("--state-dir")
+        .arg(state_dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn daemon");
+    let _daemon = ChildGuard(daemon);
+
+    let mut client = connect_with_retry(&socket_path).await;
+    let summary = client
+        .create_session(CreateSession {
+            name: "in-band-resize".to_owned(),
+            cwd: std::env::current_dir().expect("current directory"),
+            command: SpawnCommand {
+                program: "/bin/sh".into(),
+                args: vec!["-i".to_owned()],
+                environment: vec![("PS1".to_owned(), "MUX> ".to_owned())],
+            },
+            initial_panes: 1,
+            initial_size: TerminalSize::default(),
+        })
+        .await
+        .expect("create session");
+    let attachment = client
+        .attach(SessionSelector::Id(summary.id))
+        .await
+        .expect("attach");
+    let pane_id = attachment.panes[0].pane_id;
+
+    // A stand-in for Neovim: it asks for in-band size reports, then waits
+    // for one without drawing anything that would carry it out with output.
+    client
+        .write_input(
+            pane_id,
+            b"sh -c 'printf \"\\033[?2048h\"; stty raw -echo; printf \"waiting-%s\\r\\n\" for-size; head -c 7 | cat -v'\n"
+                .to_vec(),
+        )
+        .await
+        .expect("start size-report reader");
+    await_output(&mut client, pane_id, b"waiting-for-size").await;
+
+    client
+        .resize_pane(
+            pane_id,
+            TerminalSize {
+                cols: 100,
+                rows: 30,
+                ..TerminalSize::default()
+            },
+        )
+        .await
+        .expect("resize pane");
+    await_output(&mut client, pane_id, b"^[[48;30").await;
+}
+
 #[cfg(feature = "ghostty")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sustained_terminal_output_is_not_backpressured() {
