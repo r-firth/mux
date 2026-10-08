@@ -12,9 +12,9 @@
 # Needs Screen Recording permission for the terminal that runs it, a built
 # Mux.app (MUX_APP, default /Applications/Mux.app) whose protocol matches this
 # checkout, Xcode's command line tools, and nvim, git and cargo on the shell's
-# PATH. With Accessibility permission too, the second tab becomes a Claude
-# Code agent pane and answers a question (set DEMO_NO_AGENT=1 to skip it);
-# without it, the second tab runs htop. Your own Mux and its daemon are never
+# PATH. With Accessibility permission too (macOS offers it on the first run),
+# the second tab becomes a Claude Code agent pane and answers a question (set
+# DEMO_NO_AGENT=1 to skip it); without it, the second tab runs htop. Your own Mux and its daemon are never
 # touched: the filmed Mux runs its own daemon in the throwaway state dir, and
 # both stop when filming ends. Keep other windows off the middle of the main
 # display while it films.
@@ -47,10 +47,15 @@ ctl() { "$muxctl" --state-dir "$state" "$@"; }
 
 keys=
 if [[ -z ${DEMO_NO_AGENT:-} ]]; then
-    if swiftc -O "$repo/scripts/demo/keys.swift" -o "$state/keys" 2>/dev/null && "$state/keys" trusted; then
+    if ! swiftc -O "$repo/scripts/demo/keys.swift" -o "$state/keys" 2>/dev/null; then
+        echo "swiftc could not build the key presser, so no agent pane in this take"
+    elif "$state/keys" trusted --prompt || {
+        echo "waiting up to three minutes for Accessibility permission (System Settings, Privacy & Security)"
+        wait_for 180 "$state/keys" trusted
+    }; then
         keys=$state/keys
     else
-        echo "no Accessibility permission for this terminal (or no swiftc), so no agent pane in this take"
+        echo "no Accessibility permission for this terminal, so no agent pane in this take"
     fi
 fi
 
