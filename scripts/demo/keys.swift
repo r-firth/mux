@@ -2,7 +2,8 @@
 // DEMO_KEYS on macOS. Needs Accessibility permission for the terminal it runs
 // from; scripts/demo/film-macos.sh builds it and checks that first.
 //
-//   keys trusted              exit 0 when key presses are allowed
+//   keys trusted [--prompt]   exit 0 when key presses are allowed; with
+//                             --prompt, macOS offers to allow them if not
 //   keys activate PID         bring that process's app to the front
 //   keys chord ctrl+p a ...   press each chord in turn
 //   keys type TEXT [MS]       type TEXT, MS milliseconds between characters
@@ -41,7 +42,9 @@ func post(_ code: CGKeyCode, flags: CGEventFlags = [], text: String? = nil) {
 let arguments = Array(CommandLine.arguments.dropFirst())
 switch arguments.first {
 case "trusted":
-    exit(AXIsProcessTrusted() ? 0 : 1)
+    let prompt = arguments.dropFirst().contains("--prompt")
+    let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: prompt] as CFDictionary
+    exit(AXIsProcessTrustedWithOptions(options) ? 0 : 1)
 case "activate":
     guard arguments.count == 2, let pid = Int32(arguments[1]),
           let app = NSRunningApplication(processIdentifier: pid) else { exit(2) }
@@ -67,6 +70,6 @@ case "type":
         usleep(pause)
     }
 default:
-    FileHandle.standardError.write("usage: keys trusted | activate PID | chord CHORD... | type TEXT [MS]\n".data(using: .utf8)!)
+    FileHandle.standardError.write("usage: keys trusted [--prompt] | activate PID | chord CHORD... | type TEXT [MS]\n".data(using: .utf8)!)
     exit(2)
 }
