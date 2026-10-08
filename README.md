@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/demo.webp" alt="Mux opening on its ground of lit dots: Neovim beside a shell that runs git log, cargo test and htop, the ground stirring while the tests run, and the shell's pane ringing after a bell" width="1200">
+  <a href="https://github.com/r-firth/mux/releases/download/media/mux-showreel.mp4"><img src="https://github.com/r-firth/mux/releases/download/media/demo.webp" alt="Mux driven from the keyboard: Neovim splits into a git log and a test run whose pane rings when it finishes, a second tab turns its pane into a Claude Code agent that answers a question about the code, and the editor zooms to fill the window and back" width="1200"></a>
 </p>
 
 ## What is Mux?
