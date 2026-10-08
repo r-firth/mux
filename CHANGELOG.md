@@ -8,9 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.9.1](https://github.com/r-firth/mux/compare/v0.9.0...v0.9.1) (2026-10-07)
 
 
+### Bug Fixes
+
+* a screen drawn in one go is shown whole ([11b76d9](https://github.com/r-firth/mux/commit/11b76d986e656e13fc4e2eadd12e28619c60e8db))
+
+
 ### Performance Improvements
 
-* a pane's parser lets the window in between parts of a long output ([df4774b](https://github.com/r-firth/mux/commit/df4774bda4763102684fc529fe5df969010c2f66))
+* pane output is parsed on a thread of its own ([51a0a23](https://github.com/r-firth/mux/commit/51a0a238e9a67c695cc78a4ebc3cd92d0ea7432c))
 
 ## [0.9.0](https://github.com/r-firth/mux/compare/v0.8.2...v0.9.0) (2026-10-07)
 
@@ -70,7 +75,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * a typed key's echo is sent without waiting ([0b561a5](https://github.com/r-firth/mux/commit/0b561a57e75a5daec1cb5a01c3799bbac74ef6e3))
 * backgrounds are painted as runs, not cell by cell ([7e2226d](https://github.com/r-firth/mux/commit/7e2226da4e8944e0f9d76e9fcfb2895938c91a37))
 * heavy output no longer freezes the window ([35a04ef](https://github.com/r-firth/mux/commit/35a04ef80e77cf02f05b6ed76f85901f2b8a03b7))
-* pane output is parsed on a thread of its own ([9a30bb1](https://github.com/r-firth/mux/commit/9a30bb17033c8c62a3894e9398488d8a860a5660))
 * read pane output as byte runs ([85238cf](https://github.com/r-firth/mux/commit/85238cf248d8ceb15bfc28bf450d1488ece0f505))
 * skip the dots under panes ([1a3dd5f](https://github.com/r-firth/mux/commit/1a3dd5f09e8cda290e98a3b39c7549bc4de69744))
 * the ground no longer stalls the app while a pane prints ([baf0c47](https://github.com/r-firth/mux/commit/baf0c47ecedcd6dde7633a5115d211d8bc93fa98))
