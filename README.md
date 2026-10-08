@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/r-firth/mux/releases/download/media/mux-showreel.mp4"><img src="https://github.com/r-firth/mux/releases/download/media/demo.webp" alt="Mux driven from the keyboard: Neovim splits into a git log and a test run whose pane rings when it finishes, a second tab turns its pane into a Claude Code agent that answers a question about the code, and the editor zooms to fill the window and back" width="1200"></a>
+  <a href="https://github.com/r-firth/mux/releases/download/media/mux-showreel.mp4"><img src="https://github.com/r-firth/mux/releases/download/media/demo.webp" alt="Mux driven from the keyboard: Neovim splits into a git log and a test run whose pane rings when it finishes, a second tab turns its pane into a Claude Code agent that answers a question about the code, the editor zooms to fill the window and back, and the window quits and reopens with the test build still running" width="1200"></a>
 </p>
 
 ## What is Mux?
