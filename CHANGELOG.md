@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0](https://github.com/r-firth/mux/compare/v0.9.1...v0.10.0) (2026-10-09)
+
+
+### Features
+
+* muxctl can type into a pane, change the workspace and wait on an agent ([d1804ff](https://github.com/r-firth/mux/commit/d1804ff1045377dc4f36af35f7f6475934b573ee))
+
+
+### Bug Fixes
+
+* a program waiting for in-band size reports hears about every resize ([4196228](https://github.com/r-firth/mux/commit/4196228cd6ce471adf0190a7dc65f982f53d5801))
+
 ## [0.9.1](https://github.com/r-firth/mux/compare/v0.9.0...v0.9.1) (2026-10-07)
 
 
