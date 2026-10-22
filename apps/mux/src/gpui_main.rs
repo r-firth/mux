@@ -4844,13 +4844,16 @@ impl MuxApp {
             .child(self.render_session_mark(cx))
     }
 
-    /// What the strip is saying, in place of the mode's keys. A click
-    /// clears it; hovering shows all of it when it doesn't fit.
+    /// What the strip is saying, in place of the mode's keys. It has room
+    /// before a long row of tabs, which scrolls for the moment it shows. A
+    /// click clears it; hovering shows all of it when it still doesn't fit.
     fn render_strip_message(message: &StripMessage, cx: &mut Context<Self>) -> impl IntoElement {
         let full = SharedString::from(message.text.clone());
         h_flex()
             .id("strip-message")
             .min_w(px(0.0))
+            .flex_none()
+            .max_w(gpui::relative(0.72))
             .h(px(24.0))
             .px(px(6.0))
             .items_center()
