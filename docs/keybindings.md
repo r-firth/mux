@@ -435,7 +435,8 @@ long counts as long (`30s`, `1m30s`), and `notify-on-command-finish` turns
 it off (`never`) or on for the pane you are looking at too (`always`).
 While Mux is in the background, the first call also bounces its Dock icon.
 A bell in the pane you are looking at flashes it for a moment in the tab's
-ink instead.
+ink instead. Ghostty's `desktop-notifications = false` leaves programs'
+notifications unheeded; bells and finished commands still call.
 While a pane is zoomed, what a pane hidden behind it says shows in the
 zoomed pane's head (`zoom · behind: tests passed`), since the hidden pane
 has no head on screen.

@@ -65,6 +65,7 @@ impl MuxApp {
         let mut rung = None;
         let mut called = Vec::new();
         let watched_too = command_finish_notice().watched_too;
+        let heed_notifications = desktop_notifications();
         for (pane_id, words) in std::mem::take(&mut self.finished_commands) {
             if (Some(pane_id) == watched && !watched_too) || !self.panes.contains_key(&pane_id) {
                 continue;
@@ -76,7 +77,11 @@ impl MuxApp {
             self.note_call_order(pane_id);
         }
         for (pane_id, pane) in &mut self.panes {
-            let Some(call) = pane.title.take_attention() else {
+            let Some(call) = pane
+                .title
+                .take_attention()
+                .filter(|call| heed_notifications || *call == Attention::Bell)
+            else {
                 continue;
             };
             if Some(*pane_id) == watched {

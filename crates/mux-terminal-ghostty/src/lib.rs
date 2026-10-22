@@ -425,6 +425,34 @@ fn parse_focus_follows_mouse(contents: &str, follows: &mut bool) {
     }
 }
 
+/// Whether programs' desktop notifications (OSC 9, OSC 777) are heeded:
+/// `desktop-notifications` from the user's Ghostty config, on by default
+/// as in Ghostty.
+#[must_use]
+pub fn user_desktop_notifications() -> bool {
+    let mut heeded = true;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_desktop_notifications(&contents, &mut heeded);
+            }
+        }
+    }
+    heeded
+}
+
+fn parse_desktop_notifications(contents: &str, heeded: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "desktop-notifications" {
+            match value.as_str() {
+                "" | "true" => *heeded = true,
+                "false" => *heeded = false,
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Whether the shell's prompt shows a blinking bar cursor, as Ghostty's
 /// shell integration does unless `shell-integration-features` says
 /// `no-cursor` (or `shell-integration = none` turns it all off).
@@ -3819,6 +3847,15 @@ mod theme_tests {
         assert!(!allowed);
         parse_clipboard_write("clipboard-write = ask\n", &mut allowed);
         assert!(allowed);
+    }
+
+    #[test]
+    fn desktop_notifications_until_turned_off() {
+        let mut heeded = true;
+        parse_desktop_notifications("desktop-notifications = false\n", &mut heeded);
+        assert!(!heeded);
+        parse_desktop_notifications("desktop-notifications =\n", &mut heeded);
+        assert!(heeded);
     }
 
     #[test]

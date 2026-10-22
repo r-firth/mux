@@ -474,6 +474,13 @@ fn clipboard_write_allowed() -> bool {
     ALLOWED.get()
 }
 
+/// Whether programs' desktop notifications call, as in the user's Ghostty.
+fn desktop_notifications() -> bool {
+    static HEEDED: ghostty_config::Reloadable<bool> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_desktop_notifications);
+    HEEDED.get()
+}
+
 /// Whether the pane under the pointer takes the keys, as in the user's
 /// Ghostty.
 fn focus_follows_mouse() -> bool {
