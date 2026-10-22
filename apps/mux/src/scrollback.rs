@@ -76,6 +76,9 @@ fn prompt_jump(
     }
 }
 
+/// Each pane's prompt rows, with the frame they were read for.
+pub(super) type PromptRows = std::cell::RefCell<HashMap<PaneId, (u64, Rc<Vec<usize>>)>>;
+
 /// How far in from the pane's right edge the thumb can be grabbed: wider
 /// than the thumb, which is slim to stay out of the way.
 const THUMB_GRIP: f32 = 14.0;
@@ -381,6 +384,87 @@ impl MuxApp {
                 .bg(color(MUTED_TEXT).opacity(if held { 0.7 } else { 0.38 }))
                 .into_any_element(),
         )
+    }
+
+    /// What a scrolled-back pane shows over its right edge: prompt ticks,
+    /// the thumb, and the pill saying how much is below.
+    pub(super) fn render_scrollback_marks(
+        &self,
+        geometry: layout::PaneGeometry,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        [
+            self.render_prompt_ticks(geometry),
+            self.render_scroll_thumb(geometry),
+            self.render_latest_pill(geometry, cx),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// While a pane is scrolled back, a faint tick beside the thumb for
+    /// each prompt in its history, so ⌘↑ and ⌘↓ have marks to go by. Find
+    /// draws its own ticks there instead.
+    pub(super) fn render_prompt_ticks(
+        &self,
+        geometry: layout::PaneGeometry,
+    ) -> Option<gpui::AnyElement> {
+        let pane_id = geometry.pane_id;
+        let finding = self
+            .find
+            .as_ref()
+            .is_some_and(|find| find.pane_id == pane_id);
+        if finding || !self.scroll_thumb_shown(pane_id) {
+            return None;
+        }
+        let pane = self.panes.get(&pane_id)?;
+        let prompts = {
+            let mut cache = self.prompt_rows.borrow_mut();
+            match cache.get(&pane_id) {
+                Some((serial, rows)) if *serial == pane.frame_serial => Rc::clone(rows),
+                _ => {
+                    let rows = Rc::new(
+                        pane.with_engine(|engine| engine.prompt_rows())
+                            .unwrap_or_default(),
+                    );
+                    cache.insert(pane_id, (pane.frame_serial, Rc::clone(&rows)));
+                    rows
+                }
+            }
+        };
+        if prompts.is_empty() {
+            return None;
+        }
+        let total = pane.frame.scroll.total.max(1) as f32;
+        let rect = geometry.surface();
+        let track = rect.height - THUMB_INSET * 2.0;
+        let mut ticks = div()
+            .absolute()
+            .left(px(rect.x + rect.width - 13.0))
+            .top(px(rect.y + THUMB_INSET))
+            .w(px(4.0))
+            .h(px(track));
+        // One tick to a pixel row or two is all the edge can show.
+        let mut last = f32::NEG_INFINITY;
+        for &row in prompts.iter() {
+            let y = (row as f32 + 0.5) / total * track;
+            if y - last < 2.0 {
+                continue;
+            }
+            last = y;
+            ticks = ticks.child(
+                div()
+                    .absolute()
+                    .top(px((y - 0.75).clamp(0.0, track - 1.5)))
+                    .left_0()
+                    .w(px(4.0))
+                    .h(px(1.5))
+                    .rounded_full()
+                    .bg(color(MUTED_TEXT).opacity(0.45)),
+            );
+        }
+        Some(ticks.into_any_element())
     }
 }
 

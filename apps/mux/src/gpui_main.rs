@@ -681,6 +681,8 @@ enum MotionPreference {
 
 struct MuxApp {
     focus_handle: FocusHandle,
+    /// Where each pane's prompts are, as of the frame it last drew.
+    prompt_rows: scrollback::PromptRows,
     /// What a dead key or an input method has composed so far.
     ime_marked: Option<String>,
     /// When the cursor's blink last started over, and since when a timer
@@ -906,6 +908,7 @@ impl MuxApp {
         Self::check_agent_availability(&profiles, window, cx);
         let mut app = Self {
             focus_handle,
+            prompt_rows: RefCell::default(),
             ime_marked: None,
             blink_since: Instant::now(),
             blink_timer: None,
@@ -5497,8 +5500,7 @@ impl Render for MuxApp {
                 }
                 root = root.children(self.render_pane_exit(geometry));
                 root = root.children(self.render_pane_progress(geometry));
-                root = root.children(self.render_scroll_thumb(geometry));
-                root = root.children(self.render_latest_pill(geometry, cx));
+                root = root.children(self.render_scrollback_marks(geometry, cx));
                 root = root.children(self.render_find_ticks(geometry));
                 root = root.children(self.render_pane_find(geometry, cx));
                 root = root.children(self.render_link_underline(geometry));
