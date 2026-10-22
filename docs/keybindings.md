@@ -189,6 +189,13 @@ pastes it. A shell that brackets its pastes, as bash, zsh and fish do,
 gets the paste at once, since it holds it as text until Return. Setting
 `clipboard-paste-protection = false` in your Ghostty config turns this off.
 
+## Selecting
+
+Drag to select, double-click for a word and triple-click for a line;
+Option-drag selects a rectangle. Typing into the pane lets go of the
+selection, as in Ghostty, so a highlight never sits over text that has
+since changed.
+
 ## Shift-click
 
 Shift-click extends the selection to where you click, from its far end, as

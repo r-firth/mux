@@ -2050,10 +2050,24 @@ impl MuxApp {
         };
         if !keystroke.modifiers.platform {
             self.return_to_latest(pane_id, cx);
+            self.clear_selection_on_typing(pane_id);
         }
         if self.send_terminal_key_to(pane_id, keystroke, false, held, caps_lock) && !held {
             self.terminal_key_presses
                 .insert(keystroke.key.clone(), pane_id);
+        }
+    }
+
+    /// Typing into a pane lets go of what was selected in it, as Ghostty
+    /// does, so a highlight never sits over text that has since changed.
+    fn clear_selection_on_typing(&mut self, pane_id: PaneId) {
+        if self.selected_pane != Some(pane_id) {
+            return;
+        }
+        self.selected_pane = None;
+        if let Some(pane) = self.panes.get_mut(&pane_id) {
+            let _ = pane.with_engine(|engine| engine.set_selection(None));
+            let _ = pane.publish_frame();
         }
     }
 
