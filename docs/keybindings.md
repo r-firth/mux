@@ -77,6 +77,9 @@ pane's name. The name stays with the pane when it moves to another tab and
 after a restart. Clearing it hands the head back to the shell. Double-click
 a pane's head to name it with the mouse.
 
+A pane's head can also be dragged onto another pane of the tab; the two
+trade places and the dragged pane keeps the keys.
+
 ## Resize mode
 
 Enter with `Ctrl+p`, then `Ctrl+n`. Use `h/j/k/l` or the arrow keys to move

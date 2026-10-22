@@ -18,6 +18,7 @@ mod links;
 mod motion;
 mod palette;
 mod pane_calls;
+mod pane_drag;
 mod pane_exit;
 mod pane_menu;
 mod pane_names;
@@ -4960,14 +4961,14 @@ impl MuxApp {
             .items_center()
             // A double click on a terminal pane's head names the pane.
             .when(!agent_pane, |head| {
-                head.on_click(
-                    cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                Self::with_pane_drag(head, pane_id, title.clone(), ink).on_click(cx.listener(
+                    move |this, event: &gpui::ClickEvent, window, cx| {
                         if event.click_count() == 2 {
                             this.request_pane_focus(pane_id);
                             this.open_rename_pane(window, cx);
                         }
-                    }),
-                )
+                    },
+                ))
             })
             .map(|head| {
                 if legend {
@@ -5177,7 +5178,7 @@ impl MuxApp {
         let pointer_app = cx.weak_entity();
         let hover_app = pointer_app.clone();
         let scroll_app = pointer_app.clone();
-        let surface = div()
+        let surface = Self::with_pane_drop(div(), pane_id, cx)
             .absolute()
             .left(px(body.x))
             .top(px(body.y))

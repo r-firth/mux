@@ -894,6 +894,12 @@ pub enum WorkspaceCommand {
     /// Trade places with a neighbouring pane. See
     /// [`Tab::swap_with_neighbor`].
     SwapPane(Direction),
+    /// Put the pane `moved` where `with` is, and `with` where it was, as a
+    /// dragged pane head does. `moved` takes the keys.
+    SwapPanes {
+        moved: PaneId,
+        with: PaneId,
+    },
 }
 
 /// How many tab inks there are to choose from.
