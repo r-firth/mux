@@ -392,13 +392,16 @@ drop the sessions sheet from it.
 
 ## Settings sheet
 
-`Cmd+,` opens settings: the agents `Ctrl+a` offers, each on or off.
+`Cmd+,` opens settings: the agents `Ctrl+a` offers, each on or off. Below
+them it says which Ghostty config the terminal's look and feel come from,
+and the font and theme Mux took from it.
 
 | Keys | Action |
 | --- | --- |
 | `j` / `k` or Up / Down | Choose an agent |
 | Space or Return | Turn it on or off; the change is saved at once |
 | `o` | Show `settings.json` in Finder |
+| `g` | Show the Ghostty config Mux reads in Finder |
 | Escape or `Cmd+,` | Close the sheet |
 
 The sheet reads `settings.json` each time it opens, so agents added by hand

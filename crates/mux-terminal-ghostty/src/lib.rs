@@ -680,6 +680,31 @@ fn parse_option_as_alt(contents: &str, enabled: &mut bool) {
     }
 }
 
+/// The Ghostty config files Mux reads, in the order it reads them.
+#[must_use]
+pub fn user_config_files() -> Vec<PathBuf> {
+    user_config_paths()
+        .map(|(_, configs)| configs)
+        .unwrap_or_default()
+}
+
+/// The theme the user's Ghostty config names, its dark one when it names a
+/// light and a dark.
+#[must_use]
+pub fn user_theme_name() -> Option<String> {
+    let mut name = None;
+    for config in user_config_files() {
+        if let Ok(contents) = read_config(&config) {
+            for (key, value) in contents.lines().filter_map(parse_config_entry) {
+                if key == "theme" {
+                    name = dark_theme_name(&value);
+                }
+            }
+        }
+    }
+    name
+}
+
 fn user_config_paths() -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
     let base = BaseDirs::new()?;
     let home = base.home_dir();
