@@ -546,6 +546,7 @@ impl MuxApp {
         [
             self.render_command_header(geometry, cx),
             self.render_prompt_ticks(geometry),
+            self.render_failure_marks(geometry),
             self.render_scroll_thumb(geometry),
             self.render_latest_pill(geometry, cx),
         ]
@@ -820,6 +821,51 @@ impl MuxApp {
     /// While a pane is scrolled back, a faint tick beside the thumb for
     /// each prompt in its history, so ⌘↑ and ⌘↓ have marks to go by. Find
     /// draws its own ticks there instead.
+    /// A slim peach bar in the left margin beside the prompt of each
+    /// command on screen that failed, as iTerm marks them, so a failure
+    /// among many commands is seen at a glance.
+    fn render_failure_marks(&self, geometry: layout::PaneGeometry) -> Option<gpui::AnyElement> {
+        let pane_id = geometry.pane_id;
+        let pane = self.panes.get(&pane_id)?;
+        let prompts = self.cached_prompt_rows(pane_id)?;
+        let endings = pane.title.command_endings();
+        let frame = &pane.frame;
+        let top = usize::try_from(frame.scroll.offset).ok()?;
+        let rect = geometry.rect;
+        let padding =
+            self.metrics
+                .balanced_padding(rect.width, rect.height, frame.cols, frame.rows);
+        let height = self.metrics.cell_height;
+        let marks = prompts
+            .iter()
+            .enumerate()
+            .filter(|&(index, _)| ending_at(endings, prompts.len(), index).failed().is_some())
+            .filter_map(|(_, &row)| {
+                let row = row.checked_sub(top)?;
+                (row < usize::from(frame.rows)).then_some(row)
+            })
+            .map(|row| {
+                div()
+                    .absolute()
+                    .left(px(rect.x + (padding.left - 4.0).max(0.0)))
+                    .top(px(rect.y + padding.top + height * row as f32 + 2.0))
+                    .w(px(2.0))
+                    .h(px((height - 4.0).max(2.0)))
+                    .rounded_full()
+                    .bg(color(SIGNAL).opacity(0.85))
+            })
+            .collect::<Vec<_>>();
+        (!marks.is_empty()).then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .children(marks)
+                .into_any_element()
+        })
+    }
+
     pub(super) fn render_prompt_ticks(
         &self,
         geometry: layout::PaneGeometry,

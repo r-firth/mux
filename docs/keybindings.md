@@ -254,6 +254,11 @@ command's output, that command's prompt line stays pinned to the top of the
 pane, with `exit 2` beside it if it failed and how long it ran if that was
 a second or more; click it to go to the prompt.
 
+A command that failed also gets a slim peach bar in the left margin beside
+its prompt, as iTerm marks them, so a failure among many commands stands
+out at a glance. (Mux learns how a command ended as it ends, so commands
+from before Mux last opened aren't marked.)
+
 ## Find
 
 `Cmd+F` opens find in the focused pane's head, so it takes no rows from the
