@@ -148,6 +148,8 @@ pub(super) struct CommandRan {
     pub(super) row: usize,
     pub(super) command: String,
     pub(super) ending: CommandEnding,
+    /// Where it ran, when not in the pane the palette opened over.
+    pub(super) place: Option<String>,
 }
 
 /// How many of a pane's latest commands the palette offers.
@@ -576,12 +578,39 @@ impl MuxApp {
         .collect()
     }
 
-    /// The commands run in the focused pane, newest first, each once,
-    /// leaving out the prompt still waiting and empty lines.
+    /// The commands run in the session: the focused pane's first, newest
+    /// first, then the other panes'.
     pub(super) fn commands_ran(&self) -> Vec<CommandRan> {
-        let Some(pane_id) = self.focused_pane_id() else {
-            return Vec::new();
+        let focused = self.focused_pane_id();
+        let mut ran: Vec<CommandRan> = focused
+            .map(|pane_id| self.commands_ran_in(pane_id, None))
+            .unwrap_or_default();
+        // Then the session's other panes, tab by tab, each saying where.
+        let Some(session) = self.session.as_ref() else {
+            return ran;
         };
+        let active = session.active_tab;
+        for (index, tab) in session.tabs.iter().enumerate() {
+            let mut pane_ids = Vec::new();
+            tab.layout.pane_ids(&mut pane_ids);
+            for pane_id in pane_ids
+                .into_iter()
+                .filter(|&pane_id| Some(pane_id) != focused)
+            {
+                let place = if tab.id == active {
+                    "another pane".to_owned()
+                } else {
+                    format!("tab {}", index + 1)
+                };
+                ran.extend(self.commands_ran_in(pane_id, Some(&place)));
+            }
+        }
+        ran
+    }
+
+    /// The commands run in one pane, newest first, each once, leaving out
+    /// the prompt still waiting and empty lines.
+    fn commands_ran_in(&self, pane_id: PaneId, place: Option<&str>) -> Vec<CommandRan> {
         let (Some(pane), Some(prompts)) =
             (self.panes.get(&pane_id), self.cached_prompt_rows(pane_id))
         else {
@@ -606,6 +635,7 @@ impl MuxApp {
                         row,
                         command: command.to_owned(),
                         ending: ending_at(endings, count, index),
+                        place: place.map(str::to_owned),
                     })
                 })
                 .collect()
@@ -762,6 +792,12 @@ impl MuxApp {
         else {
             return;
         };
+        if let Some(session) = self.session.as_ref()
+            && let Some(tab) = session.tabs.iter().find(|tab| tab.layout.contains(pane_id))
+            && tab.id != session.active_tab
+        {
+            self.send_workspace(WorkspaceCommand::SelectTab(tab.id));
+        }
         self.request_pane_focus(pane_id);
         let delta =
             i64::try_from(row).unwrap_or(i64::MAX) - i64::try_from(offset).unwrap_or(i64::MAX);

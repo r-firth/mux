@@ -523,8 +523,9 @@ impl MuxApp {
         rows
     }
 
-    /// A row for each command run in the pane the palette opened over,
-    /// found by typing: enter brings its prompt to the top.
+    /// A row for each command run in the session, the pane the palette
+    /// opened over first, found by typing: enter brings its prompt to the
+    /// top, in whatever tab it is.
     fn push_command_rows(&self, rows: &mut Vec<Row>) {
         let Some(palette) = &self.palette else {
             return;
@@ -543,7 +544,13 @@ impl MuxApp {
             } else {
                 FAINT_TEXT
             };
-            row.hint = scrollback::ending_words(ran.ending).map(|words| (words, tone));
+            let words = scrollback::ending_words(ran.ending);
+            row.hint = match (words, &ran.place) {
+                (Some(words), Some(place)) => Some((format!("{words} · {place}"), tone)),
+                (words, place) => words
+                    .map(|words| (words, tone))
+                    .or_else(|| place.clone().map(|place| (place, FAINT_TEXT))),
+            };
             rows.push(row);
         }
     }

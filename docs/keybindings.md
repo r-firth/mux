@@ -464,11 +464,12 @@ right and `cw` finds the pane running `cargo watch`. A word also finds a pane
 by its tab's name, and a tab by what its panes are running. A number goes to
 that tab. Agents are listed once you type one's name: `codex` opens Codex in
 the pane with the keys, or shows the Codex session already in the tab.
-The commands run in the focused pane are found the same way, newest first
-and each once, with `exit 2` beside one that failed and how long each ran
-(`exit 2 · 3m`): `cargo t` then Return
-scrolls back to where `cargo test` was run, and Shift+Return types it at
-the prompt instead, to run again or change first.
+The commands run in the session's panes are found the same way, the focused
+pane's first, newest first and each once, with `exit 2` beside one that
+failed, how long each ran and, for another pane's, where (`exit 2 · 3m ·
+tab 3`): `cargo t` then Return goes to where `cargo test` was run, in
+whatever tab, and Shift+Return types it at the prompt instead, to run
+again or change first.
 When nothing matches, the one row left finds what you typed in the pane
 with the keys, as `Cmd+F` would.
 
