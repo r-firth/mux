@@ -4342,14 +4342,12 @@ impl MuxApp {
             );
         let chip = Self::with_chip_pane_drop(chip, tab_id, active, cx);
         let mut chip = Self::with_tab_drag(chip, tab_id, position, label.clone(), ink, cx);
-        let number = if tab_mode {
-            (position < 9).then_some(position + 1)
-        } else if self.tab_numbers.showing {
-            tab_numbers::command_number(position, count)
-        } else {
-            None
-        };
-        if let Some(number) = number {
+        // Tab mode names each tab's key beside it; Cmd held puts the
+        // number in place of the dot, so the strip doesn't shift.
+        let held_number = (!tab_mode && self.tab_numbers.showing)
+            .then(|| tab_numbers::command_number(position, count))
+            .flatten();
+        if let Some(number) = (position < 9 && tab_mode).then_some(position + 1) {
             chip = chip.child(kbd(
                 number.to_string(),
                 if active { ink.color() } else { color(TEXT) },
@@ -4366,7 +4364,7 @@ impl MuxApp {
             _ if active => ink.color(),
             _ => ink.color().opacity(0.72),
         };
-        chip = Self::with_tab_close(chip, tab_id, dot, &group, cx);
+        chip = Self::with_tab_close(chip, tab_id, (dot, held_number), &group, cx);
         chip = chip.child(self.render_tab_label(tab_id, label, active, group, cx));
         // Said in words as well, since a peach-inked tab's dot is peach
         // anyway: what its agent or a pane of it wants.
@@ -4427,10 +4425,19 @@ impl MuxApp {
     fn with_tab_close(
         chip: gpui::Stateful<gpui::Div>,
         tab_id: TabId,
-        dot: Hsla,
+        (dot, number): (Hsla, Option<usize>),
         group: &SharedString,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
+        let mark = match number {
+            Some(number) => div()
+                .text_size(px(12.0))
+                .line_height(px(12.0))
+                .font_weight(FontWeight::BOLD)
+                .text_color(dot.opacity(1.0))
+                .child(number.to_string()),
+            None => div().size(px(6.0)).rounded_full().bg(dot),
+        };
         let close = div()
             .id(SharedString::from(format!("tab-close-{tab_id}")))
             .relative()
@@ -4447,13 +4454,7 @@ impl MuxApp {
                 this.request_close(CloseTarget::Tab(tab_id));
                 cx.notify();
             }))
-            .child(
-                div()
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(dot)
-                    .group_hover(group.clone(), |style| style.opacity(0.0)),
-            )
+            .child(mark.group_hover(group.clone(), |style| style.opacity(0.0)))
             .child(
                 div()
                     .absolute()
