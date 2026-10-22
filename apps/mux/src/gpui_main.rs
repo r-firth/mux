@@ -2084,7 +2084,10 @@ impl MuxApp {
         let Some(pane) = self.panes.get(&pane_id) else {
             return false;
         };
-        let terminal_event = terminal_key_event(keystroke, release, held, caps_lock);
+        let mut terminal_event = terminal_key_event(keystroke, release, held, caps_lock);
+        if option_as_alt() {
+            option_as_meta(&mut terminal_event, keystroke);
+        }
         match pane.with_engine(|engine| engine.encode_key(&terminal_event)) {
             Ok(bytes) => {
                 if !bytes.is_empty() {
@@ -5737,6 +5740,34 @@ fn terminal_key_event(
     }
 }
 
+/// Whether Option is Meta for the shell, as the user's Ghostty has it.
+fn option_as_alt() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(mux_terminal_ghostty::user_option_as_alt)
+}
+
+/// Make an Option key type its plain character with Alt, so `Option+b`
+/// reaches the shell as Meta-b (back a word) instead of as `∫`. A shifted
+/// letter keeps its case; other shifted keys still compose, since the plain
+/// key says nothing of what Shift would make of it.
+fn option_as_meta(event: &mut TerminalKeyEvent, keystroke: &gpui::Keystroke) {
+    let modifiers = keystroke.modifiers;
+    if !modifiers.alt || modifiers.control || modifiers.platform || event.text.is_none() {
+        return;
+    }
+    let mut chars = keystroke.key.chars();
+    let (Some(plain), None) = (chars.next(), chars.next()) else {
+        return;
+    };
+    let plain = match (modifiers.shift, plain.is_ascii_alphabetic()) {
+        (false, _) => plain,
+        (true, true) => plain.to_ascii_uppercase(),
+        (true, false) => return,
+    };
+    event.text = Some(plain.to_string());
+    event.consumed_modifiers.alt = false;
+}
+
 fn terminal_tab_keystroke(shift: bool) -> gpui::Keystroke {
     gpui::Keystroke {
         modifiers: gpui::Modifiers {
@@ -6343,7 +6374,7 @@ mod tests {
         AgentTabActivity, GridMetrics, PaneOutputUpdate, PaneReplica, PaneScrollState,
         agent_session_is_visible, agent_tab_activity, agent_tab_activity_label,
         command_needs_agent, format_agent_context_usage, format_session_pane_count,
-        input_position_at, layout, or_list, pane_needs_live_frame, pane_parser,
+        input_position_at, layout, option_as_meta, or_list, pane_needs_live_frame, pane_parser,
         reconcile_pane_replicas, strip_wording, take_terminal_key_release, terminal_frame_text,
         terminal_input_pane, terminal_key_down_target, terminal_key_event,
         terminal_sizes_for_geometry, terminal_tab_keystroke,
@@ -6558,6 +6589,34 @@ mod tests {
             Some(clicked)
         );
         assert_eq!(terminal_input_pane(None, Some(focused)), Some(focused));
+    }
+
+    #[test]
+    fn option_as_meta_sends_escape_and_the_plain_key() {
+        let engine = GhosttyEngine::new(TerminalSize::default()).expect("new terminal");
+        let option = |key: &str, composed: &str, shift: bool| gpui::Keystroke {
+            modifiers: gpui::Modifiers {
+                alt: true,
+                shift,
+                ..gpui::Modifiers::default()
+            },
+            key: key.to_owned(),
+            key_char: Some(composed.to_owned()),
+        };
+        let meta = |keystroke: &gpui::Keystroke| {
+            let mut event = terminal_key_event(keystroke, false, false, false);
+            option_as_meta(&mut event, keystroke);
+            engine.encode_key(&event).expect("encode Option key")
+        };
+
+        assert_eq!(meta(&option("b", "∫", false)), b"\x1bb");
+        assert_eq!(meta(&option("f", "ƒ", false)), b"\x1bf");
+        assert_eq!(meta(&option("b", "ı", true)), b"\x1bB");
+        assert_eq!(meta(&option(".", "≥", false)), b"\x1b.");
+        assert_eq!(meta(&option(".", "˘", true)), "˘".as_bytes());
+        let composed = option("b", "∫", false);
+        let plain = terminal_key_event(&composed, false, false, false);
+        assert_eq!(engine.encode_key(&plain).expect("encode"), "∫".as_bytes());
     }
 
     #[cfg(target_os = "macos")]

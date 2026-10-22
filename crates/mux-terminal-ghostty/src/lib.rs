@@ -126,6 +126,35 @@ pub fn user_history_limit() -> usize {
     limit
 }
 
+/// Whether Option types as Alt (Meta) rather than composing characters:
+/// `macos-option-as-alt` from the user's Ghostty config, off by default as
+/// in Ghostty. `left` and `right` turn it on for both keys, since the window
+/// is not told which Option key is down.
+#[must_use]
+pub fn user_option_as_alt() -> bool {
+    let mut enabled = false;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_option_as_alt(&contents, &mut enabled);
+            }
+        }
+    }
+    enabled
+}
+
+fn parse_option_as_alt(contents: &str, enabled: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "macos-option-as-alt" {
+            match value.as_str() {
+                "true" | "left" | "right" => *enabled = true,
+                "" | "false" => *enabled = false,
+                _ => {}
+            }
+        }
+    }
+}
+
 fn user_config_paths() -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
     let base = BaseDirs::new()?;
     let home = base.home_dir();
@@ -2644,6 +2673,21 @@ mod theme_tests {
         assert_eq!(theme.background, parse_rgb("101020"));
         assert_eq!(theme.foreground, parse_rgb("ffffff"));
         assert_eq!(theme.palette[4], parse_rgb("abcdef"));
+    }
+
+    #[test]
+    fn option_as_alt_follows_the_last_setting() {
+        let mut enabled = false;
+        parse_option_as_alt("macos-option-as-alt = true\n", &mut enabled);
+        assert!(enabled);
+        parse_option_as_alt("macos-option-as-alt = false\n", &mut enabled);
+        assert!(!enabled);
+        parse_option_as_alt("macos-option-as-alt = left\n# x = 1\n", &mut enabled);
+        assert!(enabled);
+        parse_option_as_alt("macos-option-as-alt = maybe\n", &mut enabled);
+        assert!(enabled);
+        parse_option_as_alt("macos-option-as-alt =\n", &mut enabled);
+        assert!(!enabled);
     }
 
     #[test]

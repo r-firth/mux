@@ -21,6 +21,12 @@ inside the supported modes, matching Zellij. Enter or Escape returns from a
 mode to normal terminal input. All other Normal-mode keys, including
 `Ctrl+n`, `Ctrl+o`, and `:`, pass through to the foreground program.
 
+Option composes characters, `Option+e` an accent and `Option+b` a `∫`, unless
+your Ghostty config sets `macos-option-as-alt`: then Option is Meta, so
+`Option+b` and `Option+f` move a shell back and forward a word, as in
+Ghostty. Mux can't tell the two Option keys apart, so `left` and `right` both
+turn it on for either key.
+
 ## Mac shortcuts
 
 The keys a Mac terminal answers to work beside Zellij's, from any mode and
