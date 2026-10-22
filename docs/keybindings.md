@@ -82,6 +82,9 @@ from an agent pane too. They are in the menu bar's Shell and Window menus.
 | `Cmd+Control+F` | Enter or leave full screen |
 | `Cmd+H` / `Cmd+Option+H` | Hide Mux, or every other app |
 
+Hold Cmd on its own a moment and each tab shows the number Cmd picks it by,
+the last tab 9, as in Safari. A shortcut pressed before then shows nothing.
+
 ## Pane mode
 
 | Keys | Action |

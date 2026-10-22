@@ -39,6 +39,7 @@ mod session_sheet;
 mod settings;
 mod settings_sheet;
 mod sync_input;
+mod tab_numbers;
 mod window_frame;
 
 use std::borrow::Cow;
@@ -827,6 +828,8 @@ struct MuxApp {
     selection_scrolling: Option<Instant>,
     /// What was typed into a field before it had the keys, by the field.
     early_typed: Option<(gpui::EntityId, String)>,
+    /// Whether the tabs show the numbers Cmd picks them by.
+    tab_numbers: tab_numbers::TabNumbers,
     /// An Option-click that will move the cursor if it comes up in place.
     cursor_click: Option<cursor_click::CursorClick>,
     /// The title last given to the window.
@@ -913,8 +916,19 @@ impl MuxApp {
         Self::spawn_backend_event_loop(receiver, window, cx);
         // This view is kept from frame to frame until told otherwise, and
         // what it shows depends on whether the window is in front.
-        cx.observe_window_activation(window, |_, _, cx| cx.notify())
-            .detach();
+        cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.hide_tab_numbers();
+            }
+            cx.notify();
+        })
+        .detach();
+        // Before the keys are handled, which may stop them going further.
+        let entity = cx.entity().downgrade();
+        cx.intercept_keystrokes(move |_, _, cx| {
+            let _ = entity.update(cx, |this, _| this.tab_numbers_key_pressed());
+        })
+        .detach();
         Self::keep_window_frame(window, cx);
         let ground = ground::SharedGround::default();
         let ground_view = cx.new(|cx| ground::GroundView::new(Rc::clone(&ground), window, cx));
@@ -1012,6 +1026,7 @@ impl MuxApp {
             selection_edge: None,
             selection_scrolling: None,
             early_typed: None,
+            tab_numbers: tab_numbers::TabNumbers::default(),
             cursor_click: None,
             window_title: String::new(),
             mouse_reporting: None,
@@ -4230,7 +4245,7 @@ impl MuxApp {
     /// hovered. Jump numbers only appear while tab mode is listening for them.
     fn render_tab_chip(
         &self,
-        position: usize,
+        (position, count): (usize, usize),
         tab: &mux_workspace::Tab,
         active: bool,
         cx: &mut Context<Self>,
@@ -4286,9 +4301,16 @@ impl MuxApp {
             );
         let chip = Self::with_chip_pane_drop(chip, tab_id, active, cx);
         let mut chip = Self::with_tab_drag(chip, tab_id, position, label.clone(), ink, cx);
-        if tab_mode && position < 9 {
+        let number = if tab_mode {
+            (position < 9).then_some(position + 1)
+        } else if self.tab_numbers.showing {
+            tab_numbers::command_number(position, count)
+        } else {
+            None
+        };
+        if let Some(number) = number {
             chip = chip.child(kbd(
-                (position + 1).to_string(),
+                number.to_string(),
                 if active { ink.color() } else { color(TEXT) },
             ));
         }
@@ -4511,7 +4533,8 @@ impl MuxApp {
         if let Some(session) = &self.session {
             for (position, tab) in session.tabs.iter().enumerate() {
                 let active = tab.id == session.active_tab;
-                tabs = tabs.child(self.render_tab_chip(position, tab, active, cx));
+                let place = (position, session.tabs.len());
+                tabs = tabs.child(self.render_tab_chip(place, tab, active, cx));
             }
             let shown = Some((session.active_tab, self.mode));
             if self.tab_strip_active.replace(shown) != shown {
@@ -5030,6 +5053,7 @@ impl MuxApp {
         .on_modifiers_changed(cx.listener(
             |this, event: &gpui::ModifiersChangedEvent, _, cx| {
                 this.link_modifiers_changed(event.modifiers.platform, cx);
+                this.tab_numbers_modifiers_changed(event.modifiers, cx);
             },
         ))
     }
