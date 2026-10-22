@@ -178,6 +178,7 @@ gpui::actions!(
         NavigateAgentRight,
         NavigateAgentUp,
         NewMuxTab,
+        ReopenMuxTab,
         NextAgentChoice,
         NextMuxTab,
         NextPaletteRow,
@@ -2269,7 +2270,17 @@ impl MuxApp {
                 self.send_workspace(WorkspaceCommand::ResizePane(direction));
             }
             Action::ClosePane => {
-                if let Some(pane_id) = self.focused_pane_id() {
+                // A tab's only pane closes the tab, as ⌘W does in any Mac
+                // terminal.
+                let lone = self
+                    .session
+                    .as_ref()
+                    .and_then(Session::active_tab)
+                    .filter(|tab| matches!(tab.layout, mux_workspace::PaneLayout::Leaf(_)))
+                    .map(|tab| tab.id);
+                if let Some(tab_id) = lone {
+                    self.request_close(CloseTarget::Tab(tab_id));
+                } else if let Some(pane_id) = self.focused_pane_id() {
                     self.request_close(CloseTarget::Pane(pane_id));
                 }
             }
@@ -2300,6 +2311,7 @@ impl MuxApp {
             Action::MoveTab(direction) => self.move_active_tab(direction),
             Action::BreakPaneToTab => self.break_pane_to_tab(cx),
             Action::RenamePane => self.open_rename_pane(window, cx),
+            Action::ReopenClosedTab => self.send_workspace(WorkspaceCommand::ReopenClosedTab),
             Action::ToggleSyncTab => {
                 self.toggle_sync_tab();
                 let said = if self.active_tab_synced() {
@@ -4639,7 +4651,10 @@ impl MuxApp {
         root: gpui::Stateful<gpui::Div>,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        root.on_action(cx.listener(|_, _: &MinimizeMuxWindow, window, _| {
+        root.on_action(cx.listener(|this, _: &ReopenMuxTab, window, cx| {
+            this.run_shortcut(Action::ReopenClosedTab, window, cx);
+        }))
+        .on_action(cx.listener(|_, _: &MinimizeMuxWindow, window, _| {
             window.minimize_window();
         }))
         .on_action(cx.listener(|_, _: &ZoomMuxWindow, window, _| window.zoom_window()))
@@ -6169,6 +6184,7 @@ fn configure_application_menu(cx: &mut App) {
             disabled: false,
             items: vec![
                 MenuItem::action("New Tab", NewMuxTab),
+                MenuItem::action("Reopen Closed Tab", ReopenMuxTab),
                 MenuItem::separator(),
                 MenuItem::action("Split Right", SplitMuxRight),
                 MenuItem::action("Split Down", SplitMuxDown),
@@ -6207,6 +6223,7 @@ fn configure_application_menu(cx: &mut App) {
 fn bind_mac_shortcuts(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-t", NewMuxTab, None),
+        KeyBinding::new("cmd-shift-t", ReopenMuxTab, None),
         KeyBinding::new("cmd-d", SplitMuxRight, None),
         KeyBinding::new("cmd-shift-d", SplitMuxDown, None),
         KeyBinding::new("cmd-shift-enter", ZoomMuxPane, None),

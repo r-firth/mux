@@ -20,6 +20,7 @@ use tokio::sync::broadcast;
 
 use crate::pane::{ForegroundChange, PaneRuntime};
 
+mod reopen;
 mod restore;
 
 pub struct DaemonState {
@@ -288,6 +289,7 @@ impl DaemonState {
                 size: request.initial_size,
             },
             mutation: Mutex::new(()),
+            closed_tabs: Mutex::new(Vec::new()),
         });
         let summary = runtime.summary();
         sessions.insert(summary.id, runtime);
@@ -479,6 +481,8 @@ struct SessionRuntime {
     events: broadcast::Sender<ServerEvent>,
     spawn: SpawnTemplate,
     mutation: Mutex<()>,
+    /// The tabs closed last, the newest at the end.
+    closed_tabs: Mutex<Vec<reopen::ClosedTab>>,
 }
 
 impl SessionRuntime {
@@ -593,13 +597,17 @@ impl SessionRuntime {
                 self.panes.write().insert(pane_id, pane);
             }
             WorkspaceCommand::CloseTab => {
+                let active = self.model.read().active_tab;
+                self.remember_closed_tab(active);
                 let pane_ids = self.model.write().close_active_tab()?;
                 self.remove_panes(&pane_ids);
             }
             WorkspaceCommand::CloseTabWithId(tab_id) => {
+                self.remember_closed_tab(tab_id);
                 let pane_ids = self.model.write().close_tab(tab_id)?;
                 self.remove_panes(&pane_ids);
             }
+            WorkspaceCommand::ReopenClosedTab => self.reopen_closed_tab(replay_bytes)?,
             WorkspaceCommand::RenameTab(title) => {
                 let title = validated_name("tab", &title)?;
                 self.model
@@ -703,6 +711,8 @@ enum SessionMutationError {
     Pane(#[from] crate::pane::PaneError),
     #[error("{kind} name cannot be empty")]
     EmptyName { kind: &'static str },
+    #[error("there is no closed tab to reopen")]
+    NothingClosed,
 }
 
 fn validated_name(kind: &'static str, value: &str) -> Result<String, SessionMutationError> {

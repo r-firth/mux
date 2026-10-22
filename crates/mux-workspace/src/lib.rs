@@ -261,6 +261,26 @@ impl PaneLayout {
         }
     }
 
+    /// The same layout with each pane swapped for the one `new_id` gives,
+    /// as when a closed tab comes back with fresh shells.
+    #[must_use]
+    pub fn renamed(&self, new_id: &impl Fn(PaneId) -> PaneId) -> Self {
+        match self {
+            Self::Leaf(pane) => Self::Leaf(new_id(*pane)),
+            Self::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => Self::Split {
+                axis: *axis,
+                ratio: *ratio,
+                first: Box::new(first.renamed(new_id)),
+                second: Box::new(second.renamed(new_id)),
+            },
+        }
+    }
+
     /// The first pane in reading order: the top-left one.
     #[must_use]
     pub fn first_pane(&self) -> PaneId {
@@ -586,6 +606,19 @@ impl Session {
         Ok(id)
     }
 
+    /// Put a tab back at a place in the strip, or at its end when the strip
+    /// is shorter now, and show it. Numbered tabs take their places'
+    /// numbers.
+    pub fn insert_tab(&mut self, mut tab: Tab, at: usize) {
+        if tab.ink.is_none() {
+            tab.ink = Some(self.fresh_ink());
+        }
+        let at = at.min(self.tabs.len());
+        self.active_tab = tab.id;
+        self.tabs.insert(at, tab);
+        self.normalize_numeric_tab_titles();
+    }
+
     pub fn close_active_tab(&mut self) -> Result<Vec<PaneId>, WorkspaceError> {
         self.close_tab(self.active_tab)
     }
@@ -733,6 +766,8 @@ pub enum Action {
     ToggleSyncTab,
     /// Name the focused pane in its head.
     RenamePane,
+    /// Bring back the tab closed last.
+    ReopenClosedTab,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -772,6 +807,9 @@ pub enum WorkspaceCommand {
     SetTabInk(u8),
     /// Close this tab, on screen or not. See [`Session::close_tab`].
     CloseTabWithId(TabId),
+    /// Bring back the tab closed last, with fresh shells where its panes
+    /// were.
+    ReopenClosedTab,
     /// Name a pane, or clear its name. See [`Session::rename_pane`].
     RenamePane {
         pane: PaneId,
@@ -1569,6 +1607,33 @@ mod tests {
         assert!(SplitRatio::new(500).is_ok());
         assert!(SplitRatio::new(0).is_err());
         assert!(SplitRatio::new(1_000).is_err());
+    }
+
+    #[test]
+    fn a_tab_comes_back_with_its_layout_under_new_panes() {
+        let [left, right] = [PaneId::new(), PaneId::new()];
+        let mut session = Session::with_panes("reopen", &[PaneId::new()]).expect("session");
+        let mut tab = Tab::with_panes("build", &[left]).expect("tab");
+        tab.split_focused(right, SplitAxis::Horizontal)
+            .expect("split");
+        let [new_left, new_right] = [PaneId::new(), PaneId::new()];
+        let renamed = tab
+            .layout
+            .renamed(&|pane| if pane == left { new_left } else { new_right });
+        let mut ids = Vec::new();
+        renamed.pane_ids(&mut ids);
+        assert_eq!(ids, vec![new_left, new_right]);
+        let back = Tab {
+            id: TabId::new(),
+            layout: renamed,
+            focused_pane: new_right,
+            ..tab
+        };
+        let id = back.id;
+        session.insert_tab(back, 9);
+        assert_eq!(session.active_tab, id);
+        assert_eq!(session.tabs.len(), 2);
+        assert_eq!(session.tabs[1].title, "build");
     }
 
     #[test]

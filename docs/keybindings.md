@@ -35,10 +35,11 @@ from an agent pane too. They are in the menu bar's Shell and Window menus.
 | Keys | Action |
 | --- | --- |
 | `Cmd+T` | Create a tab |
+| `Cmd+Shift+T` | Reopen the tab closed last, its splits and names, with a fresh shell in each pane's directory |
 | `Cmd+D` | Split to the right |
 | `Cmd+Shift+D` | Split downward |
 | `Cmd+Shift+Return` | Toggle focused-pane zoom |
-| `Cmd+W` | Close the focused pane |
+| `Cmd+W` | Close the focused pane, or its tab when it is the tab's only pane |
 | `Cmd+A` | Select everything in the focused pane, its history too |
 | `Cmd+Left` / `Cmd+Right` | Go to the start or end of the line being typed (sends `Ctrl+a` / `Ctrl+e`, as Ghostty does) |
 | `Cmd+Backspace` | Delete back to the start of the line (sends `Ctrl+u`) |

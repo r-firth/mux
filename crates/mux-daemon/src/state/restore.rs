@@ -157,6 +157,7 @@ impl DaemonState {
                 size: saved.size,
             },
             mutation: Mutex::new(()),
+            closed_tabs: Mutex::new(Vec::new()),
         });
         self.sessions.write().insert(id, runtime);
         Ok(count)
