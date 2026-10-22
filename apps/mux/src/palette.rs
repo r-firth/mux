@@ -75,6 +75,10 @@ enum Command {
     MoveTabLeft,
     MoveTabRight,
     Clear,
+    NextPane,
+    BiggerText,
+    SmallerText,
+    ActualSize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -288,6 +292,22 @@ impl MuxApp {
             }
             Command::Clear => {
                 self.clear_pane(cx);
+                return;
+            }
+            Command::NextPane => {
+                self.cycle_pane(true, cx);
+                return;
+            }
+            Command::BiggerText => {
+                self.step_font_size(1.0, cx);
+                return;
+            }
+            Command::SmallerText => {
+                self.step_font_size(-1.0, cx);
+                return;
+            }
+            Command::ActualSize => {
+                self.set_font_size(self.configured_font_size, cx);
                 return;
             }
             Command::NewSession => {
@@ -616,7 +636,7 @@ impl MuxApp {
     /// What mux can do, each with the keys that do it and other words it
     /// answers to. Some say what they will do to the pane or tab on screen.
     #[allow(clippy::too_many_lines)] // One entry per command.
-    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 19] {
+    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 23] {
         let zoomed = self
             .session
             .as_ref()
@@ -650,6 +670,12 @@ impl MuxApp {
                 "maximise maximize fullscreen unzoom",
             ),
             (Command::Resize, "⌃p ⌃n", "resize panes", "size grow shrink"),
+            (
+                Command::NextPane,
+                "⌘]",
+                "next pane",
+                "focus switch cycle other",
+            ),
             (Command::RenameTab, "⌃t r", "rename this tab", "name title"),
             (
                 Command::MoveTabLeft,
@@ -720,6 +746,24 @@ impl MuxApp {
                 "⌘,",
                 "settings",
                 "preferences agents config",
+            ),
+            (
+                Command::BiggerText,
+                "⌘=",
+                "bigger text",
+                "font size larger increase zoom in",
+            ),
+            (
+                Command::SmallerText,
+                "⌘-",
+                "smaller text",
+                "font size decrease zoom out",
+            ),
+            (
+                Command::ActualSize,
+                "⌘0",
+                "actual text size",
+                "font size reset default",
             ),
             (Command::ClosePane, "⌃p x", "close this pane", "kill exit"),
             (Command::CloseTab, "⌃t x", "close this tab", "kill exit"),
