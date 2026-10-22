@@ -42,7 +42,6 @@ mod session_sheet;
 mod settings;
 mod settings_sheet;
 mod sync_input;
-mod tab_numbers;
 mod window_frame;
 
 use std::borrow::Cow;
@@ -822,9 +821,7 @@ struct MuxApp {
     /// A program's clipboard read waiting on a ⌘V: the pane, the clipboard
     /// it named, and the strip message that asks.
     clipboard_read_asked: Option<(PaneId, String, u64)>,
-    /// When Mux last closed a pane or tab, for ⌘Z to bring it back.
-    closed_at: Option<Instant>,
-    /// What was last selected with the pointer, for ⌘⇧V.
+    /// What was last selected, for Ghostty's `paste_from_selection`.
     selection_clipboard: Option<String>,
     /// The focused pane's size shows in its head while sizes are changing
     /// (and in resize mode), then gets out of the way.
@@ -887,8 +884,6 @@ struct MuxApp {
     selection_scrolling: Option<Instant>,
     /// What was typed into a field before it had the keys, by the field.
     early_typed: Option<(gpui::EntityId, String)>,
-    /// Whether the tabs show the numbers Cmd picks them by.
-    tab_numbers: tab_numbers::TabNumbers,
     /// An Option-click that will move the cursor if it comes up in place.
     cursor_click: Option<cursor_click::CursorClick>,
     /// The title last given to the window.
@@ -901,7 +896,7 @@ struct MuxApp {
     mode: InputMode,
     motion: MotionPreference,
     metrics: GridMetrics,
-    /// The size Ghostty's config asks for, which `Cmd+0` goes back to.
+    /// The size Ghostty's config asks for, which actual size goes back to.
     configured_font_size: f32,
     terminal_font: String,
     ghostty_theme: GhosttyTheme,
@@ -975,19 +970,8 @@ impl MuxApp {
         Self::spawn_backend_event_loop(receiver, window, cx);
         // This view is kept from frame to frame until told otherwise, and
         // what it shows depends on whether the window is in front.
-        cx.observe_window_activation(window, |this, window, cx| {
-            if !window.is_window_active() {
-                this.hide_tab_numbers();
-            }
-            cx.notify();
-        })
-        .detach();
-        // Before the keys are handled, which may stop them going further.
-        let entity = cx.entity().downgrade();
-        cx.intercept_keystrokes(move |_, _, cx| {
-            let _ = entity.update(cx, |this, _| this.tab_numbers_key_pressed());
-        })
-        .detach();
+        cx.observe_window_activation(window, |_, _, cx| cx.notify())
+            .detach();
         Self::keep_window_frame(window, cx);
         let ground = ground::SharedGround::default();
         let ground_view = cx.new(|cx| ground::GroundView::new(Rc::clone(&ground), window, cx));
@@ -1049,7 +1033,6 @@ impl MuxApp {
             close_armed: None,
             paste_armed: None,
             clipboard_read_asked: None,
-            closed_at: None,
             selection_clipboard: None,
             pane_menu: None,
             size_readout: false,
@@ -1091,7 +1074,6 @@ impl MuxApp {
             selection_edge: None,
             selection_scrolling: None,
             early_typed: None,
-            tab_numbers: tab_numbers::TabNumbers::default(),
             cursor_click: None,
             window_title: String::new(),
             mouse_reporting: None,
@@ -1163,7 +1145,7 @@ impl MuxApp {
         let said = if (size - self.configured_font_size).abs() < f32::EPSILON {
             format!("text back to {}", font_size_words(size))
         } else {
-            format!("text {}  ·  ⌘0 resets", font_size_words(size))
+            format!("text {}", font_size_words(size))
         };
         self.say_in_strip(said, false, cx);
         cx.notify();
@@ -2283,41 +2265,14 @@ impl MuxApp {
             self.copy_selection(cx);
             return;
         }
-        if keystroke.modifiers.platform && !keystroke.modifiers.shift && keystroke.key == "a" {
-            self.select_all();
-            cx.notify();
-            return;
-        }
-        if keystroke.modifiers.platform && keystroke.modifiers.shift && keystroke.key == "o" {
-            self.select_last_output(cx);
-            cx.notify();
-            return;
-        }
         if self.exited_pane_key(keystroke, held)
             || self.scrollback_key_down(keystroke, cx)
             || self.adjust_selection_key(keystroke, cx)
         {
             return;
         }
-        // ⌘Z just after a close brings it back, as Ghostty's undo does;
-        // later, the key goes to the program as ever.
-        if keystroke.modifiers.platform
-            && !keystroke.modifiers.shift
-            && keystroke.key == "z"
-            && self
-                .closed_at
-                .take()
-                .is_some_and(|at| at.elapsed() < undo_timeout())
-        {
-            self.send_workspace(WorkspaceCommand::ReopenClosedTab);
-            return;
-        }
         if keystroke.modifiers.platform && keystroke.key == "v" {
-            if keystroke.modifiers.shift {
-                self.paste_selection_clipboard(cx);
-            } else {
-                self.paste_clipboard(cx);
-            }
+            self.paste_clipboard(cx);
             return;
         }
 
@@ -2335,18 +2290,6 @@ impl MuxApp {
         let Some(pane_id) = pane_id else {
             return;
         };
-        if let Some(bytes) = mac_line_edit(keystroke).filter(|_| !keybind::unbinds(keystroke)) {
-            self.return_to_latest(pane_id, cx);
-            self.clear_selection_on_typing(pane_id);
-            for target in self.key_targets(pane_id) {
-                self.note_pane_key(target);
-                self.backend.send(CommandMessage::Write {
-                    pane_id: target,
-                    bytes: bytes.to_vec(),
-                });
-            }
-            return;
-        }
         if !keystroke.modifiers.platform {
             self.return_to_latest(pane_id, cx);
             self.clear_selection_on_typing(pane_id);
@@ -2481,7 +2424,7 @@ impl MuxApp {
     }
 
     /// A selection, made with the pointer or the keys, goes to the
-    /// selection clipboard for ⌘⇧V, as in Ghostty, and with
+    /// selection clipboard for `paste_from_selection`, as in Ghostty, and with
     /// `copy-on-select = clipboard` in the user's Ghostty config on the
     /// clipboard too, without a word in the strip.
     fn copy_on_select(&mut self) {
@@ -2514,7 +2457,7 @@ impl MuxApp {
         }
     }
 
-    /// Paste what was last selected with the pointer, as Ghostty's ⌘⇧V
+    /// Paste what was last selected, as Ghostty's `paste_from_selection`
     /// does, without going through the clipboard.
     fn paste_selection_clipboard(&mut self, cx: &mut Context<Self>) {
         match self.selection_clipboard.clone() {
@@ -2681,8 +2624,7 @@ impl MuxApp {
                 self.send_workspace(WorkspaceCommand::ResizePane(direction));
             }
             Action::ClosePane => {
-                // A tab's only pane closes the tab, as ⌘W does in any Mac
-                // terminal.
+                // A tab's only pane closes the tab.
                 let lone = self
                     .session
                     .as_ref()
@@ -2833,7 +2775,6 @@ impl MuxApp {
 
     /// Close the pane or tab, if it is still the one with the keys.
     fn close_now(&mut self, target: CloseTarget) {
-        self.closed_at = Some(Instant::now());
         match target {
             CloseTarget::Pane(pane_id) if self.focused_pane_id() == Some(pane_id) => {
                 self.send_workspace(WorkspaceCommand::ClosePane);
@@ -4481,7 +4422,7 @@ impl MuxApp {
     /// hovered. Jump numbers only appear while tab mode is listening for them.
     fn render_tab_chip(
         &self,
-        (position, count): (usize, usize),
+        position: usize,
         tab: &mux_workspace::Tab,
         active: bool,
         cx: &mut Context<Self>,
@@ -4537,11 +4478,7 @@ impl MuxApp {
             );
         let chip = Self::with_chip_pane_drop(chip, tab_id, active, cx);
         let mut chip = Self::with_tab_drag(chip, tab_id, position, label.clone(), ink, cx);
-        // Tab mode names each tab's key beside it; Cmd held puts the
-        // number in place of the dot, so the strip doesn't shift.
-        let held_number = (!tab_mode && self.tab_numbers.showing)
-            .then(|| tab_numbers::command_number(position, count))
-            .flatten();
+        // Tab mode names each tab's key beside it.
         if let Some(number) = (position < 9 && tab_mode).then_some(position + 1) {
             chip = chip.child(kbd(
                 number.to_string(),
@@ -4559,7 +4496,7 @@ impl MuxApp {
             _ if active => ink.color(),
             _ => ink.color().opacity(0.72),
         };
-        chip = Self::with_tab_close(chip, tab_id, (dot, held_number), &group, cx);
+        chip = Self::with_tab_close(chip, tab_id, dot, &group, cx);
         chip = chip.child(self.render_tab_label(tab_id, label, active, group, cx));
         // Said in words as well, since a peach-inked tab's dot is peach
         // anyway: what its agent or a pane of it wants.
@@ -4616,23 +4553,15 @@ impl MuxApp {
     /// The tab's dot, which turns into a close mark while the pointer is
     /// over the chip, as a Safari tab's icon does; a middle click on the
     /// chip closes it too. Closing a tab with something running asks first,
-    /// as Cmd+W does.
+    /// as closing a pane does.
     fn with_tab_close(
         chip: gpui::Stateful<gpui::Div>,
         tab_id: TabId,
-        (dot, number): (Hsla, Option<usize>),
+        dot: Hsla,
         group: &SharedString,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let mark = match number {
-            Some(number) => div()
-                .text_size(px(12.0))
-                .line_height(px(12.0))
-                .font_weight(FontWeight::BOLD)
-                .text_color(dot.opacity(1.0))
-                .child(number.to_string()),
-            None => div().size(px(6.0)).rounded_full().bg(dot),
-        };
+        let mark = div().size(px(6.0)).rounded_full().bg(dot);
         let close = div()
             .id(SharedString::from(format!("tab-close-{tab_id}")))
             .relative()
@@ -4770,8 +4699,7 @@ impl MuxApp {
         if let Some(session) = &self.session {
             for (position, tab) in session.tabs.iter().enumerate() {
                 let active = tab.id == session.active_tab;
-                let place = (position, session.tabs.len());
-                tabs = tabs.child(self.render_tab_chip(place, tab, active, cx));
+                tabs = tabs.child(self.render_tab_chip(position, tab, active, cx));
             }
             let shown = Some((session.active_tab, self.mode));
             if self.tab_strip_active.replace(shown) != shown {
@@ -5313,7 +5241,6 @@ impl MuxApp {
         .on_modifiers_changed(cx.listener(
             |this, event: &gpui::ModifiersChangedEvent, _, cx| {
                 this.link_modifiers_changed(event.modifiers.platform, cx);
-                this.tab_numbers_modifiers_changed(event.modifiers, cx);
             },
         ))
     }
@@ -6621,23 +6548,6 @@ fn terminal_key_event(
     }
 }
 
-/// The line-editing keys of a Mac text field, as Ghostty sends them on a
-/// Mac: ⌘← and ⌘→ to the start and end of the line (^A, ^E) and ⌘⌫ to
-/// delete back to its start (^U), which shells and most line editors read.
-/// (Ghostty's ⌥← and ⌥→ for a word are Zellij's pane keys here.)
-fn mac_line_edit(keystroke: &gpui::Keystroke) -> Option<&'static [u8]> {
-    let modifiers = keystroke.modifiers;
-    if !modifiers.platform || modifiers.control || modifiers.alt || modifiers.shift {
-        return None;
-    }
-    match keystroke.key.as_str() {
-        "left" => Some(b"\x01"),
-        "right" => Some(b"\x05"),
-        "backspace" => Some(b"\x15"),
-        _ => None,
-    }
-}
-
 /// Whether pastes that would run commands wait for a second ⌘V, as the
 /// user's Ghostty has it.
 fn paste_protection() -> bool {
@@ -6775,13 +6685,6 @@ fn terminal_codepoint(key: &str, terminal_key: TerminalKey) -> Option<char> {
 /// How soon a second close must follow one that found something running.
 const CLOSE_AGAIN_WINDOW: Duration = Duration::from_secs(5);
 
-/// How long after a close ⌘Z brings it back: Ghostty's `undo-timeout`.
-fn undo_timeout() -> Duration {
-    static TIMEOUT: ghostty_config::Reloadable<Duration> =
-        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_undo_timeout);
-    TIMEOUT.get()
-}
-
 /// The range of terminal text sizes, in points.
 const MIN_FONT_SIZE: f32 = 8.0;
 const MAX_FONT_SIZE: f32 = 36.0;
@@ -6865,58 +6768,6 @@ fn configure_application_menu(cx: &mut App) {
     ]);
 }
 
-/// The keys a Mac terminal answers to, beside Zellij's.
-fn bind_mac_shortcuts(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("cmd-t", NewMuxTab, None),
-        KeyBinding::new("cmd-n", NewMuxSession, None),
-        KeyBinding::new("cmd-shift-t", ReopenMuxTab, None),
-        KeyBinding::new("cmd-d", SplitMuxRight, None),
-        KeyBinding::new("cmd-shift-d", SplitMuxDown, None),
-        KeyBinding::new("cmd-shift-enter", ZoomMuxPane, None),
-        KeyBinding::new("cmd-w", CloseMuxPane, None),
-        KeyBinding::new("cmd-alt-w", CloseMuxTab, None),
-        KeyBinding::new("cmd-k", ClearMuxPane, None),
-        KeyBinding::new("cmd-}", NextMuxTab, None),
-        KeyBinding::new("cmd-{", PreviousMuxTab, None),
-        KeyBinding::new("ctrl-tab", NextMuxTab, None),
-        KeyBinding::new("ctrl-shift-tab", PreviousMuxTab, None),
-        KeyBinding::new("cmd-1", SelectMuxTab1, None),
-        KeyBinding::new("cmd-2", SelectMuxTab2, None),
-        KeyBinding::new("cmd-3", SelectMuxTab3, None),
-        KeyBinding::new("cmd-4", SelectMuxTab4, None),
-        KeyBinding::new("cmd-5", SelectMuxTab5, None),
-        KeyBinding::new("cmd-6", SelectMuxTab6, None),
-        KeyBinding::new("cmd-7", SelectMuxTab7, None),
-        KeyBinding::new("cmd-8", SelectMuxTab8, None),
-        KeyBinding::new("cmd-9", SelectLastMuxTab, None),
-        KeyBinding::new("cmd-=", GrowMuxText, None),
-        KeyBinding::new("cmd-+", GrowMuxText, None),
-        KeyBinding::new("cmd--", ShrinkMuxText, None),
-        KeyBinding::new("cmd-0", ResetMuxText, None),
-        KeyBinding::new("cmd-alt-left", FocusMuxPaneLeft, None),
-        KeyBinding::new("cmd-alt-right", FocusMuxPaneRight, None),
-        KeyBinding::new("cmd-alt-up", FocusMuxPaneUp, None),
-        KeyBinding::new("cmd-alt-down", FocusMuxPaneDown, None),
-        KeyBinding::new("cmd-]", NextMuxPane, None),
-        KeyBinding::new("cmd-[", PreviousMuxPane, None),
-        KeyBinding::new("cmd-ctrl-left", ResizeMuxPaneLeft, None),
-        KeyBinding::new("cmd-ctrl-right", ResizeMuxPaneRight, None),
-        KeyBinding::new("cmd-ctrl-up", ResizeMuxPaneUp, None),
-        KeyBinding::new("cmd-ctrl-down", ResizeMuxPaneDown, None),
-        KeyBinding::new("cmd-ctrl-=", EqualizeMuxPanes, None),
-    ]);
-}
-
-/// ⌘⇧, reloads the Ghostty config, as in Ghostty; some keyboards report
-/// it as the shifted key, ⌘<.
-fn bind_reload_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("cmd-shift-,", ReloadMuxConfig, None),
-        KeyBinding::new("cmd-<", ReloadMuxConfig, None),
-    ]);
-}
-
 /// The keys of the palette's and find's fields.
 fn bind_field_keys(cx: &mut App) {
     // The palette's field keeps typing; the keys that move through the
@@ -6944,28 +6795,20 @@ fn bind_field_keys(cx: &mut App) {
 }
 
 fn configure_application_actions(cx: &mut App) {
-    bind_reload_keys(cx);
     cx.on_action(quit_mux);
     cx.on_action(|_: &HideMux, cx| cx.hide());
     cx.on_action(|_: &HideOtherApps, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAllApps, cx| cx.unhide_other_apps());
     cx.bind_keys([
         KeyBinding::new("cmd-q", QuitMux, None),
-        KeyBinding::new("cmd-h", HideMux, None),
-        KeyBinding::new("cmd-alt-h", HideOtherApps, None),
-        KeyBinding::new("cmd-m", MinimizeMuxWindow, None),
-        KeyBinding::new("cmd-ctrl-f", ToggleMuxFullScreen, None),
         KeyBinding::new("cmd-,", OpenMuxSettings, None),
         KeyBinding::new("cmd-p", OpenMuxPalette, None),
         KeyBinding::new("cmd-shift-p", OpenMuxPalette, None),
         KeyBinding::new("cmd-f", OpenFind, None),
-        KeyBinding::new("cmd-e", FindSelection, None),
         KeyBinding::new("cmd-g", FindOlder, None),
         KeyBinding::new("cmd-shift-g", FindNewer, None),
         KeyBinding::new("cmd-shift-space", OpenQuickSelect, None),
-        KeyBinding::new("cmd-j", GoToMuxCall, None),
     ]);
-    bind_mac_shortcuts(cx);
     bind_field_keys(cx);
     // Terminal panes own Tab; the component root must not turn it into focus traversal.
     cx.bind_keys([
@@ -7340,11 +7183,10 @@ mod tests {
         AgentTabActivity, GridMetrics, PaneOutputUpdate, PaneReplica, PaneScrollState,
         agent_session_is_visible, agent_tab_activity, agent_tab_activity_label,
         command_needs_agent, format_agent_context_usage, format_session_pane_count,
-        input_position_at, layout, mac_line_edit, option_as_meta, or_list, pane_needs_live_frame,
-        pane_parser, paste_runs_lines, reconcile_pane_replicas, strip_wording,
-        take_terminal_key_release, terminal_frame_text, terminal_input_pane,
-        terminal_key_down_target, terminal_key_event, terminal_sizes_for_geometry,
-        terminal_tab_keystroke,
+        input_position_at, layout, option_as_meta, or_list, pane_needs_live_frame, pane_parser,
+        paste_runs_lines, reconcile_pane_replicas, strip_wording, take_terminal_key_release,
+        terminal_frame_text, terminal_input_pane, terminal_key_down_target, terminal_key_event,
+        terminal_sizes_for_geometry, terminal_tab_keystroke,
     };
     use mux_acp::AgentSessionStatus;
 
@@ -7556,31 +7398,6 @@ mod tests {
             Some(clicked)
         );
         assert_eq!(terminal_input_pane(None, Some(focused)), Some(focused));
-    }
-
-    #[test]
-    fn command_arrows_and_backspace_edit_the_line_as_on_a_mac() {
-        let key = |key: &str, platform: bool, shift: bool| gpui::Keystroke {
-            modifiers: gpui::Modifiers {
-                platform,
-                shift,
-                ..gpui::Modifiers::default()
-            },
-            key: key.to_owned(),
-            key_char: None,
-        };
-        assert_eq!(mac_line_edit(&key("left", true, false)), Some(&b"\x01"[..]));
-        assert_eq!(
-            mac_line_edit(&key("right", true, false)),
-            Some(&b"\x05"[..])
-        );
-        assert_eq!(
-            mac_line_edit(&key("backspace", true, false)),
-            Some(&b"\x15"[..])
-        );
-        assert_eq!(mac_line_edit(&key("left", false, false)), None);
-        assert_eq!(mac_line_edit(&key("left", true, true)), None);
-        assert_eq!(mac_line_edit(&key("up", true, false)), None);
     }
 
     #[test]

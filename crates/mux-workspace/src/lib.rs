@@ -1220,10 +1220,9 @@ impl Keymap {
                 );
             }
         }
-        // Zellij's Locked mode, reached here from a mode (Ctrl+p or Ctrl+t
-        // first) so that Normal input keeps Ctrl+g for the program, hands
-        // every key to the program until Ctrl+g.
-        for mode in modes.into_iter().filter(|mode| *mode != InputMode::Normal) {
+        // Zellij's Locked mode, Ctrl+g from any mode, hands every key to the
+        // program until Ctrl+g again.
+        for mode in modes {
             self.bind(
                 mode,
                 KeyChord::control('g'),
@@ -1292,7 +1291,7 @@ impl Keymap {
             InputMode::Pane,
             KeyChord::plain(Key::Character('n')),
             Action::Sequence(vec![
-                Action::SplitPaneAuto,
+                Action::SplitPane(SplitAxis::Horizontal),
                 Action::EnterMode(InputMode::Normal),
             ]),
         );
@@ -1553,6 +1552,26 @@ mod tests {
         tab.layout.pane_ids(&mut actual);
         assert_eq!(actual, panes);
         assert_eq!(tab.focused_pane, panes[0]);
+    }
+
+    #[test]
+    fn ctrl_g_locks_and_unlocks_and_pane_mode_n_splits_right() {
+        let keymap = Keymap::zellij_default();
+        assert_eq!(
+            keymap.resolve(InputMode::Normal, KeyChord::control('g')),
+            Some(&Action::EnterMode(InputMode::Locked)),
+        );
+        assert_eq!(
+            keymap.resolve(InputMode::Locked, KeyChord::control('g')),
+            Some(&Action::EnterMode(InputMode::Normal)),
+        );
+        assert_eq!(
+            keymap.resolve(InputMode::Pane, KeyChord::plain(Key::Character('n'))),
+            Some(&Action::Sequence(vec![
+                Action::SplitPane(SplitAxis::Horizontal),
+                Action::EnterMode(InputMode::Normal),
+            ])),
+        );
     }
 
     #[test]

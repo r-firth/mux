@@ -99,6 +99,7 @@ enum Command {
     CopyOutput,
     OpenHistory,
     RevealDirectory,
+    ReloadConfig,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -374,6 +375,10 @@ impl MuxApp {
             }
             Command::Reset => {
                 self.reset_pane(cx);
+                return;
+            }
+            Command::ReloadConfig => {
+                self.reload_ghostty_config(cx);
                 return;
             }
             Command::SelectOutput => {
@@ -796,7 +801,7 @@ impl MuxApp {
     /// What mux can do, each with the keys that do it and other words it
     /// answers to. Some say what they will do to the pane or tab on screen.
     #[allow(clippy::too_many_lines)] // One entry per command.
-    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 34] {
+    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 35] {
         let zoomed = self.active_tab_zoomed();
         let agent_here = self
             .active_agent_pane()
@@ -828,19 +833,19 @@ impl MuxApp {
             (Command::Resize, "⌃p ⌃n", "resize panes", "size grow shrink"),
             (
                 Command::Lock,
-                "⌃p ⌃g",
+                "⌃g",
                 "lock: every key to the program",
                 "locked passthrough ctrl prefix",
             ),
             (
                 Command::EqualizePanes,
-                "⌘⌃=",
+                "⌃p ⌃n =",
                 "even out panes",
                 "equalize balance same size split",
             ),
             (
                 Command::NextPane,
-                "⌘]",
+                "",
                 "next pane",
                 "focus switch cycle other",
             ),
@@ -865,7 +870,7 @@ impl MuxApp {
             ),
             (
                 Command::ReopenTab,
-                "⌘⇧t",
+                "",
                 "reopen the tab or pane closed last",
                 "undo restore closed tab pane split back",
             ),
@@ -899,7 +904,7 @@ impl MuxApp {
             ),
             (
                 Command::Clear,
-                "⌘k",
+                "",
                 "clear this pane",
                 "clean wipe cls history scrollback",
             ),
@@ -911,7 +916,7 @@ impl MuxApp {
             ),
             (
                 Command::SelectOutput,
-                "⌘⇧o",
+                "",
                 "select the last command's output",
                 "output result printed prompt",
             ),
@@ -935,7 +940,7 @@ impl MuxApp {
             ),
             (
                 Command::GoToCall,
-                "⌘j",
+                "",
                 "go to the pane that called",
                 "jump bell notification agent waiting needs attention",
             ),
@@ -963,9 +968,15 @@ impl MuxApp {
             ),
             (
                 Command::NewSession,
-                "⌘n",
+                "",
                 "start a session here",
                 "new session create workspace",
+            ),
+            (
+                Command::ReloadConfig,
+                "",
+                "reload the Ghostty config",
+                "refresh ghostty config settings theme font keybind",
             ),
             (
                 Command::Settings,
@@ -975,19 +986,19 @@ impl MuxApp {
             ),
             (
                 Command::BiggerText,
-                "⌘=",
+                "",
                 "bigger text",
                 "font size larger increase zoom in",
             ),
             (
                 Command::SmallerText,
-                "⌘-",
+                "",
                 "smaller text",
                 "font size decrease zoom out",
             ),
             (
                 Command::ActualSize,
-                "⌘0",
+                "",
                 "actual text size",
                 "font size reset default",
             ),

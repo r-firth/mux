@@ -450,7 +450,7 @@ impl MuxApp {
                     .gap(px(16.0))
                     .child(div().flex_none().w(px(NAME_WIDTH)))
                     .child(div().flex_1().min_w_0().whitespace_normal().child(
-                        "cursor, padding and the rest come from it too; ⌘⇧, reloads it after an edit",
+                        "cursor, padding and the rest come from it too; reload it from ⌘p after an edit",
                     )),
             )
     }

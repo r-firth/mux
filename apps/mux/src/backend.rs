@@ -90,7 +90,7 @@ pub enum CommandMessage {
         pane_id: PaneId,
         written: String,
     },
-    /// Clear a pane's screen and history, as Cmd+K does.
+    /// Clear a pane's screen and history, as the palette's clear does.
     ClearPane {
         pane_id: PaneId,
     },

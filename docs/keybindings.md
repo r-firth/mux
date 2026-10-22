@@ -15,16 +15,15 @@ the GUI and daemon do not hardcode key behavior into workspace mutations.
 | `Option+j` / `Option+Down` | Focus pane below |
 | `Option+k` / `Option+Up` | Focus pane above |
 | `Ctrl+p`, `a` | Turn the focused pane into its native ACP agent surface |
+| `Ctrl+g` | Lock: every key goes to the program until `Ctrl+g` again |
 
 `Alt` is the same modifier as `Option` on macOS. Shared bindings remain active
 inside the supported modes, matching Zellij.
 
-`Ctrl+g` from Pane or Tab mode (`Ctrl+p Ctrl+g`) locks Mux, as Zellij's
-Locked mode does: every key goes to the program, `Ctrl+p`, `Ctrl+t`,
-`Ctrl+a` and `Option` with an arrow too, for shell history, fzf's `Ctrl+t`
-or a Mux or tmux inside a pane, until `Ctrl+g` unlocks it. The strip says
-`LOCKED` meanwhile, and the Mac shortcuts still work. Normal input leaves
-`Ctrl+g` to the program. Enter or Escape returns from a
+`Ctrl+g` locks Mux, as Zellij's Locked mode does: every key goes to the
+program, `Ctrl+p`, `Ctrl+t`, `Ctrl+a` and `Option` with an arrow too, for
+shell history, fzf's `Ctrl+t` or a Mux or tmux inside a pane, until `Ctrl+g`
+unlocks it. The strip says `LOCKED` meanwhile. Enter or Escape returns from a
 mode to normal terminal input. All other Normal-mode keys, including
 `Ctrl+n`, `Ctrl+o`, and `:`, pass through to the foreground program.
 
@@ -55,8 +54,8 @@ actions (`scroll_page_lines` and `scroll_page_fractional` too), `jump_to_prompt`
 actions Mux has nothing for are left out. `performable:` works as in
 Ghostty, so `performable:ctrl+c=copy_to_clipboard` copies a selection and
 otherwise lets `Ctrl+C` interrupt the program, and `unconsumed:` sends the
-key to the program as well. `Cmd+Shift+,` picks up new and
-changed binds; one taken out of the config gives its key back to the pane.
+key to the program as well. Reloading the Ghostty config (from `Cmd+P` or
+the Mux menu) picks up new and changed binds; one taken out of the config gives its key back to the pane.
 
 Option composes characters, `Option+e` an accent and `Option+b` a `∫`, unless
 your Ghostty config sets `macos-option-as-alt`: then Option is Meta, so
@@ -64,9 +63,6 @@ your Ghostty config sets `macos-option-as-alt`: then Option is Meta, so
 Ghostty. Mux can't tell the two Option keys apart, so `left` and `right` both
 turn it on for either key.
 
-The line keys above (`Cmd+Left`, `Cmd+Right` and `Cmd+Backspace`) are
-Ghostty's defaults on a Mac; `unbind` one, such as
-`keybind = super+left=unbind`, to send the program the key itself instead.
 Ghostty's `Option+Left` and `Option+Right` for a word are Zellij's pane keys
 in Mux; a `keybind = alt+left=esc:b` line takes them back for the shell.
 
@@ -77,50 +73,13 @@ of them): then it starts where Mux was started.
 A new tab goes at the end of the strip, or just after the current one with
 `window-new-tab-position = current`.
 
-## Mac shortcuts
-
-The keys a Mac terminal answers to work beside Zellij's, from any mode and
-from an agent pane too. They are in the menu bar's Shell and Window menus.
-
-| Keys | Action |
-| --- | --- |
-| `Cmd+T` | Create a tab |
-| `Cmd+Shift+T` | Reopen the tab or pane closed last: a tab with its splits and names, a pane beside the pane that took its room, each with a fresh shell in its directory under what it showed |
-| `Cmd+Z` | Just after closing a pane or tab, bring it back, as Ghostty's undo does: within its `undo-timeout`, five seconds by default; later, the key goes to the program |
-| `Cmd+D` | Split to the right |
-| `Cmd+Shift+D` | Split downward |
-| `Cmd+Shift+Return` | Toggle focused-pane zoom |
-| `Cmd+W` | Close the focused pane, or its tab when it is the tab's only pane |
-| `Cmd+Option+W` | Close the tab, all its panes |
-| `Cmd+N` | Start a session in the focused pane's directory and switch to it (sessions are Mux's windows; Ghostty's `new_window` keybind does the same) |
-| `Cmd+A` | Select everything in the focused pane, its history too |
-| `Cmd+Shift+O` | Select what the last command printed, or what a running one has printed so far (needs the shell's prompt marks; see Scrollback) |
-| `Cmd+Left` / `Cmd+Right` | Go to the start or end of the line being typed (sends `Ctrl+a` / `Ctrl+e`, as Ghostty does) |
-| `Cmd+Backspace` | Delete back to the start of the line (sends `Ctrl+u`) |
-| `Cmd+J` | Go to the pane that called last (see Panes that call) |
-| `Cmd+K` | Clear the focused pane: its screen and history at the prompt, only its history with a program in front |
-| `Cmd+1` through `Cmd+8` | Select a numbered tab |
-| `Cmd+9` | Select the last tab |
-| `Cmd+Shift+]` / `Ctrl+Tab` | Next tab |
-| `Cmd+Shift+[` / `Ctrl+Shift+Tab` | Previous tab |
-| `Cmd+]` / `Cmd+[` | Focus the next or previous pane, coming round at the ends |
-| `Cmd+Option+arrows` | Focus the pane in that direction |
-| `Cmd+Control+arrows` | Move the focused pane's edge in that direction |
-| `Cmd+Control+=` | Share the tab's room evenly between its panes |
-| `Cmd+M` | Minimize the window |
-| `Cmd+Control+F` | Enter or leave full screen |
-| `Cmd+H` / `Cmd+Option+H` | Hide Mux, or every other app |
-
-Hold Cmd on its own a moment and each tab's dot turns into the number Cmd picks it by,
-the last tab 9, as in Safari. A shortcut pressed before then shows nothing.
-
 ## Pane mode
 
 | Keys | Action |
 | --- | --- |
 | `h/j/k/l` or arrows | Focus a neighboring pane |
 | `Shift+h/j/k/l` or Shift+arrows | Trade places with the neighboring pane that way; the pane keeps the keys |
-| `n` | Split the focused pane across its longer side (side by side when wide, one above the other when tall) and return to Normal |
+| `n` | Create a pane and return to Normal |
 | `d` | Split downward and return to Normal |
 | `r` | Split to the right and return to Normal |
 | `Ctrl+n` | Enter Resize mode (Normal-mode `Ctrl+n` still reaches the terminal) |
@@ -146,7 +105,7 @@ empty goes; dropped on the strip's `+`, it gets a tab of its own.
 
 Enter with `Ctrl+p`, then `Ctrl+n`. Use `h/j/k/l` or the arrow keys to move
 the nearest boundary in that direction, and `=` to share the tab's room
-evenly between its panes, as `Cmd+Control+=` does from anywhere, so three
+evenly between its panes, so three
 panes side by side get a third each. Enter or Escape returns to Normal.
 This nested prefix preserves Zellij's resize muscle memory without stealing
 Normal-mode `Ctrl+n` from Vim and other terminal applications.
@@ -293,12 +252,10 @@ is what a pane starts with when Mux opens or moves to another session.
 | `Cmd+Home` / `Cmd+End` | Go to the top or bottom of the history |
 | `Cmd+PageUp` / `Cmd+PageDown` | Move a page through the history |
 | `Shift+PageUp` / `Shift+PageDown` | The same, unless the program has no history (a full-screen program keeps them) |
-| `Cmd+Up` / `Cmd+Down` | The prompt before, or after, the top of the view (`Cmd+Shift` as well, as in iTerm) |
 
-The shell marks where each prompt begins for `Cmd+Up` and `Cmd+Down`; the
-prompt gone to washes for a moment in the tab's ink, so the eye finds it. Mux
-starts zsh and bash so they do; fish marks its own. In a shell that marks
-none, the keys go to the program. While a pane is scrolled back, a faint
+The shell marks where each prompt begins, for Ghostty's `jump_to_prompt`
+keybind and the palette; the prompt gone to washes for a moment in the tab's ink, so the eye finds it. Mux
+starts zsh and bash so they do; fish marks its own. While a pane is scrolled back, a faint
 tick beside its scroll thumb marks each prompt in its history, orange for
 a command that failed, and when the view starts partway through a
 command's output, that command's prompt line stays pinned to the top of the
@@ -330,8 +287,6 @@ arrives.
 | Escape | Close find, leaving the pane where it is |
 | `Cmd+F` | Back to the field with its text selected, to type over it |
 
-`Cmd+E` finds what is selected, as in any Mac app: its first line goes
-into the field and the search starts from the newest output.
 
 ## Quick select
 
@@ -377,8 +332,8 @@ pastes it. A shell that brackets its pastes, as bash, zsh and fish do,
 gets the paste at once, since it holds it as text until Return. Setting
 `clipboard-paste-protection = false` in your Ghostty config turns this off.
 
-`Cmd+Shift+V` pastes what you last selected instead of the clipboard
-(Ghostty's `paste_from_selection`).
+A `paste_from_selection` keybind in your Ghostty config pastes what you
+last selected instead of the clipboard.
 
 A program can copy to the clipboard itself with OSC 52, as Neovim, tmux
 and programs over ssh do; the strip says how many lines it copied.
@@ -401,11 +356,9 @@ Shift with an arrow moves the end of a selection a character or a row, as
 Ghostty's does, to take in a little more or less before copying. With
 nothing selected, the keys go to the program.
 
-A selection you make, with the pointer or the keys (`Cmd+Shift+O`, a
-failure mark, Shift with an arrow), is kept for `Cmd+Shift+V`, which pastes
-it without touching the clipboard, as in Ghostty and Terminal.app:
-`Cmd+Shift+O` then `Cmd+Shift+V` puts what the last command printed at the
-prompt.
+A selection you make, with the pointer or the keys (a failure mark, Shift
+with an arrow), is kept for `paste_from_selection`, which pastes it without
+touching the clipboard, as in Ghostty.
 With `copy-on-select = clipboard` in your Ghostty config, it goes on the
 clipboard as well, and `copy-on-select = false` keeps nothing.
 
@@ -471,9 +424,9 @@ While a pane is zoomed, what a pane hidden behind it says shows in the
 zoomed pane's head (`zoom · behind: tests passed`), since the hidden pane
 has no head on screen.
 
-`Cmd+J` goes to the pane that called last and hasn't been looked at, in
-whatever tab it is, or failing that to an agent in another tab waiting for
-you to allow something, so whatever is asking for you is one key away.
+"go to the pane that called" in `Cmd+P` goes to the pane that called last
+and hasn't been looked at, in whatever tab it is, or failing that to an
+agent in another tab waiting for you to allow something.
 
 A program that reports its progress with OSC 9;4, as Ghostty shows, gets a
 thin bar along the top of its pane: the tab's ink while it goes, peach when
@@ -563,7 +516,7 @@ and the font and theme Mux took from it. Files the config includes with
 | `o` | Show `settings.json` in Finder |
 | `g` | Show the Ghostty config Mux reads in Finder |
 
-`Cmd+Shift+,` reloads the Ghostty config, as it does in Ghostty: colours,
+"reload the Ghostty config" in `Cmd+P` reloads it: colours,
 font, cursor, padding and the rest take effect in every pane at once, and
 the text size goes back to the config's. It is in the Mux menu too.
 | Escape or `Cmd+,` | Close the sheet |

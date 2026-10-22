@@ -1,8 +1,8 @@
 //! Shift-click extends a selection to where you click, as it does in every
 //! Mac text view: from the selection's far end, so clicking past its end
-//! grows it forward and clicking before its start grows it back. Cmd+A
-//! selects everything a pane holds, its history too, and Cmd+Shift+O what
-//! the last command printed.
+//! grows it forward and clicking before its start grows it back. Select all
+//! in the pane menu selects everything a pane holds, its history too, and
+//! the palette can select what the last command printed.
 
 use mux_terminal::{RenderFrame, TerminalInteraction as _, TerminalPoint, TerminalSelection};
 

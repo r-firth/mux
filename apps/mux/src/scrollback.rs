@@ -39,20 +39,6 @@ fn scrollback_key(
     }
 }
 
-/// ⌘↑ and ⌘↓ (with ⇧ too, as iTerm has them) step through the shell's
-/// prompts: whether the key goes to an older one.
-fn prompt_key(keystroke: &gpui::Keystroke) -> Option<bool> {
-    let modifiers = keystroke.modifiers;
-    if !modifiers.platform || modifiers.control || modifiers.alt {
-        return None;
-    }
-    match keystroke.key.as_str() {
-        "up" => Some(true),
-        "down" => Some(false),
-        _ => None,
-    }
-}
-
 /// The scroll that brings the next prompt above the view's top, or below
 /// it, to the top. Past the newest prompt is the latest output.
 fn prompt_jump(
@@ -373,27 +359,12 @@ impl MuxApp {
             return false;
         };
         let scroll = pane.frame.scroll;
-        let movement = match prompt_key(keystroke) {
-            Some(older) => {
-                let prompts = pane
-                    .with_engine(|engine| engine.prompt_rows())
-                    .unwrap_or_default();
-                if prompts.is_empty() {
-                    return false;
-                }
-                prompt_jump(&prompts, scroll, older)
-            }
-            None => scrollback_key(keystroke, pane.frame.rows, scroll.total > scroll.len)
-                .map(|movement| (movement, None)),
-        };
-        let Some((movement, prompt)) = movement else {
+        let Some(movement) = scrollback_key(keystroke, pane.frame.rows, scroll.total > scroll.len)
+        else {
             return false;
         };
         if self.scroll_viewport(pane_id, movement) {
             cx.notify();
-        }
-        if let Some(prompt) = prompt {
-            self.flash_prompt(pane_id, prompt, cx);
         }
         true
     }
@@ -1114,9 +1085,6 @@ mod tests {
             "past the newest prompt is the latest output"
         );
         assert_eq!(prompt_jump(&[10, 120], scroll(460), false), None);
-        assert_eq!(prompt_key(&keystroke("up", true, false)), Some(true));
-        assert_eq!(prompt_key(&keystroke("down", true, true)), Some(false));
-        assert_eq!(prompt_key(&keystroke("up", false, false)), None);
     }
 
     #[test]

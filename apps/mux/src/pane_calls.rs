@@ -17,7 +17,7 @@
 //! A bell in the pane you are looking at has nothing to mark, so the pane
 //! flashes instead, washed for a moment in its tab's ink.
 //!
-//! Cmd+J goes to the pane that called last, in whatever tab, or to an
+//! Go to the pane that called, from ⌘P, goes to the pane that called last, in whatever tab, or to an
 //! agent waiting on you, so whatever is asking for you is one key away.
 
 use super::*;
@@ -132,7 +132,7 @@ impl MuxApp {
         changed
     }
 
-    /// The pane has just called: it is the one Cmd+J goes to.
+    /// The pane has just called: it is the one go to the pane that called goes to.
     fn note_call_order(&mut self, pane_id: PaneId) {
         self.call_order.retain(|called| *called != pane_id);
         self.call_order.push(pane_id);

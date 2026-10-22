@@ -1,4 +1,4 @@
-//! A prompt gone to, by Cmd+Up or Cmd+Down, the palette or the pinned
+//! A prompt gone to, by a `jump_to_prompt` keybind, the palette or the pinned
 //! header, washes for a moment in the tab's ink, so the eye lands on it in
 //! a screen of output.
 

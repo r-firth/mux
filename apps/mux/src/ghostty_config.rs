@@ -1,5 +1,5 @@
 //! Settings read from the user's Ghostty config, kept until the config is
-//! reloaded (⌘⇧, as in Ghostty), and read again the next time they are
+//! reloaded (from ⌘P or the Mux menu), and read again the next time they are
 //! wanted after that.
 
 use std::sync::Mutex;
@@ -51,7 +51,7 @@ pub(crate) fn forget_settings() {
 }
 
 impl super::MuxApp {
-    /// Read the user's Ghostty config again, as ⌘⇧, does in Ghostty:
+    /// Read the user's Ghostty config again, as Ghostty's reload does:
     /// colours, font, cursor and the rest take effect at once, in every
     /// pane. The text size goes back to the config's.
     pub(super) fn reload_ghostty_config(&mut self, cx: &mut gpui::Context<Self>) {

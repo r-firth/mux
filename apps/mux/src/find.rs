@@ -127,7 +127,7 @@ impl MuxApp {
         cx.notify();
     }
 
-    /// ⌘E, as in any Mac app: find what is selected, its first line, in the
+    /// Find what is selected, its first line, in the
     /// pane with the keys, starting from the newest.
     pub(super) fn find_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(query) = self.selected_text().and_then(|text| {
