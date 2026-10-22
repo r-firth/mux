@@ -194,6 +194,7 @@ gpui::actions!(
         NextPaletteRow,
         OpenFind,
         FindSelection,
+        GoToMuxCall,
         OpenMuxPalette,
         OpenMuxSettings,
         ReloadMuxConfig,
@@ -813,6 +814,8 @@ struct MuxApp {
     pane_restart: Option<pane_exit::PaneRestart>,
     /// Panes out of sight that rang or sent a notification, until seen.
     pane_calls: HashMap<PaneId, mux_terminal::Attention>,
+    /// The panes that have called, the latest last.
+    call_order: Vec<PaneId>,
     /// How far along each pane's program last said it was, and when.
     pane_progress: HashMap<PaneId, (mux_terminal::Progress, Instant)>,
     /// When stale progress reports will next be looked for, if they will.
@@ -1019,6 +1022,7 @@ impl MuxApp {
             pane_exits: HashMap::new(),
             pane_restart: None,
             pane_calls: HashMap::new(),
+            call_order: Vec::new(),
             pane_progress: HashMap::new(),
             progress_sweep: None,
             finished_commands: Vec::new(),
@@ -5529,6 +5533,7 @@ impl Render for MuxApp {
             .on_action(cx.listener(|this, _: &OpenQuickSelect, window, cx| {
                 this.toggle_quick_select(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &GoToMuxCall, _, cx| this.go_to_call(cx)))
             .on_key_down(cx.listener(Self::handle_key_down))
             .on_key_up(cx.listener(Self::handle_key_up))
             // Quick select is for the keys: a click anywhere puts it away
@@ -6567,6 +6572,8 @@ fn configure_application_menu(cx: &mut App) {
             name: "Window".into(),
             disabled: false,
             items: vec![
+                MenuItem::action("Go to the Pane That Called", GoToMuxCall),
+                MenuItem::separator(),
                 MenuItem::action("Minimize", MinimizeMuxWindow),
                 MenuItem::action("Zoom", ZoomMuxWindow),
                 MenuItem::separator(),
@@ -6680,6 +6687,7 @@ fn configure_application_actions(cx: &mut App) {
         KeyBinding::new("cmd-g", FindOlder, None),
         KeyBinding::new("cmd-shift-g", FindNewer, None),
         KeyBinding::new("cmd-shift-space", OpenQuickSelect, None),
+        KeyBinding::new("cmd-j", GoToMuxCall, None),
     ]);
     bind_mac_shortcuts(cx);
     bind_field_keys(cx);

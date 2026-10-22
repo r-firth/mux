@@ -16,6 +16,9 @@
 //!
 //! A bell in the pane you are looking at has nothing to mark, so the pane
 //! flashes instead, washed for a moment in its tab's ink.
+//!
+//! Cmd+J goes to the pane that called last, in whatever tab, so an agent
+//! asking for you is one key away.
 
 use super::*;
 use mux_terminal::Attention;
@@ -60,6 +63,7 @@ impl MuxApp {
         let mut fresh = false;
         let mut changed = false;
         let mut rung = None;
+        let mut called = Vec::new();
         let watched_too = command_finish_notice().watched_too;
         for (pane_id, words) in std::mem::take(&mut self.finished_commands) {
             if (Some(pane_id) == watched && !watched_too) || !self.panes.contains_key(&pane_id) {
@@ -69,6 +73,7 @@ impl MuxApp {
             fresh |= !self.pane_calls.contains_key(&pane_id);
             changed |= self.pane_calls.get(&pane_id) != Some(&call);
             self.pane_calls.insert(pane_id, call);
+            self.note_call_order(pane_id);
         }
         for (pane_id, pane) in &mut self.panes {
             let Some(call) = pane.title.take_attention() else {
@@ -87,8 +92,12 @@ impl MuxApp {
                     fresh |= previous.is_none();
                     changed |= previous != Some(&call);
                     self.pane_calls.insert(*pane_id, call);
+                    called.push(*pane_id);
                 }
             }
+        }
+        for pane_id in called {
+            self.note_call_order(pane_id);
         }
         if fresh {
             window.request_attention();
@@ -98,6 +107,45 @@ impl MuxApp {
             changed = true;
         }
         changed
+    }
+
+    /// The pane has just called: it is the one Cmd+J goes to.
+    fn note_call_order(&mut self, pane_id: PaneId) {
+        self.call_order.retain(|called| *called != pane_id);
+        self.call_order.push(pane_id);
+    }
+
+    /// Go to the pane that called last and has not been looked at since,
+    /// in whatever tab it is.
+    pub(super) fn go_to_call(&mut self, cx: &mut Context<Self>) {
+        let calls = &self.pane_calls;
+        self.call_order
+            .retain(|pane_id| calls.contains_key(pane_id));
+        let here = self.terminal_input_pane_id();
+        let Some(pane_id) = self
+            .call_order
+            .iter()
+            .rev()
+            .copied()
+            .find(|pane_id| Some(*pane_id) != here)
+        else {
+            self.say_in_strip("no pane is calling", false, cx);
+            return;
+        };
+        let tab_id = self.session.as_ref().and_then(|session| {
+            session
+                .tabs
+                .iter()
+                .find(|tab| tab.layout.contains(pane_id))
+                .map(|tab| tab.id)
+        });
+        if let Some(tab_id) = tab_id
+            && Some(tab_id) != self.active_tab_id()
+        {
+            self.send_workspace(WorkspaceCommand::SelectTab(tab_id));
+        }
+        self.request_pane_focus(pane_id);
+        cx.notify();
     }
 
     /// A bell in the pane you are looking at flashes it, as a visual bell

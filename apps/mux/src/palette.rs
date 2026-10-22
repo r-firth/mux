@@ -65,6 +65,7 @@ enum Destination {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Command {
+    GoToCall,
     NewTab,
     SplitRight,
     SplitDown,
@@ -368,6 +369,10 @@ impl MuxApp {
             }
             Command::SelectOutput => {
                 self.select_last_output(cx);
+                return;
+            }
+            Command::GoToCall => {
+                self.go_to_call(cx);
                 return;
             }
             Command::OpenHistory => {
@@ -761,7 +766,7 @@ impl MuxApp {
     /// What mux can do, each with the keys that do it and other words it
     /// answers to. Some say what they will do to the pane or tab on screen.
     #[allow(clippy::too_many_lines)] // One entry per command.
-    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 29] {
+    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 30] {
         let zoomed = self.active_tab_zoomed();
         let agent_here = self
             .active_agent_pane()
@@ -873,6 +878,12 @@ impl MuxApp {
                 "",
                 "open this pane's history in an editor",
                 "scrollback export save text file dump",
+            ),
+            (
+                Command::GoToCall,
+                "⌘j",
+                "go to the pane that called",
+                "jump bell notification agent waiting needs attention",
             ),
             (
                 Command::QuickSelect,

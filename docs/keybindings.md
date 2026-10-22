@@ -69,6 +69,7 @@ from an agent pane too. They are in the menu bar's Shell and Window menus.
 | `Cmd+Shift+O` | Select what the last command printed, or what a running one has printed so far (needs the shell's prompt marks; see Scrollback) |
 | `Cmd+Left` / `Cmd+Right` | Go to the start or end of the line being typed (sends `Ctrl+a` / `Ctrl+e`, as Ghostty does) |
 | `Cmd+Backspace` | Delete back to the start of the line (sends `Ctrl+u`) |
+| `Cmd+J` | Go to the pane that called last (see Panes that call) |
 | `Cmd+K` | Clear the focused pane: its screen and history at the prompt, only its history with a program in front |
 | `Cmd+1` through `Cmd+8` | Select a numbered tab |
 | `Cmd+9` | Select the last tab |
@@ -384,6 +385,9 @@ it off (`never`) or on for the pane you are looking at too (`always`).
 While Mux is in the background, the first call also bounces its Dock icon.
 A bell in the pane you are looking at flashes it for a moment in the tab's
 ink instead.
+
+`Cmd+J` goes to the pane that called last and hasn't been looked at, in
+whatever tab it is, so the agent asking for you is one key away.
 
 A program that reports its progress with OSC 9;4, as Ghostty shows, gets a
 thin bar along the top of its pane: the tab's ink while it goes, peach when
