@@ -28,7 +28,7 @@ use tokio::task::JoinHandle;
 /// break a pane out into a tab of its own, a request for what is running in
 /// a pane besides its shell, an event when such a program finishes, and a
 /// request to clear a pane.
-pub const PROTOCOL_VERSION: u16 = 9;
+pub const PROTOCOL_VERSION: u16 = 10;
 /// Request id zero is reserved for latency-sensitive messages whose successful
 /// completion does not require a response.
 pub const UNACKNOWLEDGED_REQUEST_ID: u64 = 0;
@@ -215,6 +215,10 @@ pub struct PaneAttachment {
     pub title: Option<String>,
     /// The program in front of the pane's shell, if one is.
     pub program: Option<String>,
+    /// How the commands run at the pane's prompts ended, oldest first, as
+    /// far back as the daemon has seen; a window opened later can't learn
+    /// them from the output it is sent.
+    pub command_endings: Vec<mux_terminal::CommandEnding>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

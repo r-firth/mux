@@ -638,6 +638,7 @@ mod tests {
                 exit_status: None,
                 title: None,
                 program: None,
+                command_endings: Vec::new(),
             }],
         }
     }

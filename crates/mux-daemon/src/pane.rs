@@ -441,12 +441,18 @@ impl PaneRuntime {
         terminal.validate_sequence_contract()?;
         // Asked apart: the exit status is held while the attachment is built.
         let program = self.running_program();
+        let (title, command_endings) = {
+            let scanner = self.title.lock();
+            let endings = scanner.command_endings().iter().copied().collect();
+            (scanner.title().map(str::to_owned), endings)
+        };
         Ok(mux_protocol::PaneAttachment {
             pane_id: self.id,
             terminal,
             exit_status: *self.exit_status.lock(),
-            title: self.title.lock().title().map(str::to_owned),
+            title,
             program,
+            command_endings,
         })
     }
 

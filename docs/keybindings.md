@@ -261,8 +261,8 @@ a second or more; click it to go to the prompt.
 
 A command that failed also gets a slim peach bar in the left margin beside
 its prompt, as iTerm marks them, so a failure among many commands stands
-out at a glance. (Mux learns how a command ended as it ends, so commands
-from before Mux last opened aren't marked.)
+out at a glance. The marks stay when you close and reopen the window, since
+the session remembers how its commands ended.
 
 ## Find
 

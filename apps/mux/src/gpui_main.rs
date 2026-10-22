@@ -539,6 +539,9 @@ fn restore_pane_replica(
         engine.apply_output(chunk.sequence, &chunk.bytes)?;
         title.scan(&chunk.bytes);
     }
+    // The daemon has seen every command end, those before the checkpoint
+    // too, and the replay's among them.
+    title.seed_command_endings(pane.command_endings.clone());
     // A bell in the replayed history rang long ago, what it copied has
     // likely been copied over since, and its progress is long out of date.
     let _ = title.take_attention();
@@ -7539,6 +7542,7 @@ mod tests {
             exit_status: None,
             title: None,
             program: None,
+            command_endings: Vec::new(),
         };
         let reconciled = reconcile_pane_replicas(
             HashMap::from([(pane_id, local_replica)]),
@@ -7585,6 +7589,7 @@ mod tests {
             exit_status: None,
             title: None,
             program: None,
+            command_endings: Vec::new(),
         };
 
         let mut reconciled = reconcile_pane_replicas(
@@ -7633,6 +7638,7 @@ mod tests {
             exit_status: None,
             title: None,
             program: None,
+            command_endings: Vec::new(),
         };
 
         let mut reconciled = reconcile_pane_replicas(
@@ -7705,6 +7711,7 @@ mod tests {
             exit_status: None,
             title: None,
             program: None,
+            command_endings: Vec::new(),
         };
 
         let Err(error) = super::restore_pane_replica(&pane, &GhosttyTheme::default()) else {

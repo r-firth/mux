@@ -23,7 +23,7 @@ pub struct TitleScanner {
 }
 
 /// How the command run from one prompt ended, as far as the shell said.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CommandEnding {
     /// Its exit status; `None` while it runs, or for an empty line.
     pub status: Option<i32>,
@@ -122,6 +122,12 @@ impl TitleScanner {
             title: title.filter(|title| !title.trim().is_empty()),
             ..Self::default()
         }
+    }
+
+    /// Take how commands ended from a scanner that has seen more of the
+    /// output than this one, such as the daemon's.
+    pub fn seed_command_endings(&mut self, endings: Vec<CommandEnding>) {
+        self.commands = endings.into();
     }
 
     #[must_use]
