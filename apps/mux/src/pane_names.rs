@@ -19,7 +19,7 @@ use super::{
 /// A pane being named where its name is shown, in its head.
 pub(super) struct PaneRename {
     pub(super) pane_id: PaneId,
-    input: Entity<InputState>,
+    pub(super) input: Entity<InputState>,
     /// What the head said before. Entering it unchanged leaves the pane as
     /// it was, so a pane that follows its shell keeps following it.
     shown: String,

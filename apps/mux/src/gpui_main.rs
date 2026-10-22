@@ -10,6 +10,7 @@ mod backend;
 mod chrome;
 mod cursor_blink;
 mod cursor_click;
+mod early_typing;
 mod file_drop;
 mod find;
 mod ghostty_config;
@@ -824,6 +825,8 @@ struct MuxApp {
     selection_edge: Option<select_scroll::SelectionEdge>,
     /// Since when the held pane has been scrolling under a selection.
     selection_scrolling: Option<Instant>,
+    /// What was typed into a field before it had the keys, by the field.
+    early_typed: Option<(gpui::EntityId, String)>,
     /// An Option-click that will move the cursor if it comes up in place.
     cursor_click: Option<cursor_click::CursorClick>,
     /// The title last given to the window.
@@ -1008,6 +1011,7 @@ impl MuxApp {
             selection_drag: None,
             selection_edge: None,
             selection_scrolling: None,
+            early_typed: None,
             cursor_click: None,
             window_title: String::new(),
             mouse_reporting: None,
@@ -2090,9 +2094,7 @@ impl MuxApp {
             // the window lost focus before GPUI delivered the prior key-up.
             self.terminal_key_presses.remove(&event.keystroke.key);
         }
-        if self.catch_palette_typing(&event.keystroke, window, cx)
-            || self.catch_find_typing(&event.keystroke, window, cx)
-        {
+        if self.catch_early_typing(&event.keystroke, window, cx) {
             cx.stop_propagation();
             return;
         }
@@ -6983,19 +6985,6 @@ fn main() -> Result<()> {
 
     run_graphical_application(state_dir, settings, settings_error);
     Ok(())
-}
-
-/// What a key types into a text field, if it types anything: not a key
-/// with Ctrl or Cmd, nor one that types a control character.
-fn typed_text(keystroke: &gpui::Keystroke) -> Option<&str> {
-    let modifiers = keystroke.modifiers;
-    if modifiers.control || modifiers.platform || modifiers.function {
-        return None;
-    }
-    keystroke
-        .key_char
-        .as_deref()
-        .filter(|text| !text.is_empty() && !text.chars().any(char::is_control))
 }
 
 #[cfg(test)]

@@ -31,7 +31,7 @@ struct Found {
 
 pub(super) struct PaneFind {
     pub(super) pane_id: PaneId,
-    input: Entity<InputState>,
+    pub(super) input: Entity<InputState>,
     query: String,
     found: Vec<Found>,
     current: Option<usize>,
@@ -46,13 +46,13 @@ pub(super) struct PaneFind {
     refresh_due: bool,
     /// When it opened: letters typed before its field has the keys are
     /// its, not the pane's.
-    opened: Instant,
+    pub(super) opened: Instant,
     _subscription: gpui::Subscription,
 }
 
 /// How long after opening find catches letters typed before its field has
 /// the keys; after that, a pane given the keys back keeps them.
-const FIND_CATCHES_TYPING: Duration = Duration::from_millis(600);
+pub(super) const FIND_CATCHES_TYPING: Duration = Duration::from_millis(600);
 
 impl PaneFind {
     fn current(&self) -> Option<Found> {
@@ -158,40 +158,13 @@ impl MuxApp {
     }
 
     /// Whether the find field holds the keys, so typing goes to it.
-    /// Letters typed straight after ⌘F, before its field has the keys, go
-    /// into the field rather than to the pane's program. Returns whether
-    /// the key was one.
-    pub(super) fn catch_find_typing(
-        &mut self,
-        keystroke: &gpui::Keystroke,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(find) = &self.find else {
-            return false;
-        };
-        if find.opened.elapsed() > FIND_CATCHES_TYPING || self.find_has_keyboard(window, cx) {
-            return false;
-        }
-        let Some(text) = typed_text(keystroke) else {
-            return false;
-        };
-        let query = format!("{}{text}", find.input.read(cx).value());
-        find.input.clone().update(cx, |input, cx| {
-            input.set_value(query.clone(), window, cx);
-        });
-        self.find_typed(query, cx);
-        cx.notify();
-        true
-    }
-
     pub(super) fn find_has_keyboard(&self, window: &Window, cx: &App) -> bool {
         self.find.as_ref().is_some_and(|find| {
             gpui::Focusable::focus_handle(find.input.read(cx), cx).is_focused(window)
         })
     }
 
-    fn find_typed(&mut self, query: String, cx: &mut Context<Self>) {
+    pub(super) fn find_typed(&mut self, query: String, cx: &mut Context<Self>) {
         let Some(find) = self.find.as_mut() else {
             return;
         };

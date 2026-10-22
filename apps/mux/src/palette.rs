@@ -33,7 +33,7 @@ const MARK_X: f32 = LIST_PAD + ROW_PAD + GUTTER + GUTTER_GAP;
 const LABEL_X: f32 = MARK_X + MARK + MARK_GAP;
 
 pub(super) struct Palette {
-    input: Entity<InputState>,
+    pub(super) input: Entity<InputState>,
     query: String,
     /// The row the keys act on, by where it leads, so the list can change
     /// under it (a title updating, a tab closing) without losing it. `None`
@@ -148,6 +148,15 @@ impl Row {
     }
 }
 
+impl Palette {
+    /// What was typed before the field had the keys, as though typed into
+    /// it.
+    pub(super) fn typed(&mut self, query: &str) {
+        query.clone_into(&mut self.query);
+        self.selected = None;
+    }
+}
+
 impl MuxApp {
     /// Open the palette, or close it if it is open: ⌘P does both.
     pub(super) fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -190,36 +199,6 @@ impl MuxApp {
         });
         self.mode = InputMode::Normal;
         cx.notify();
-    }
-
-    /// Letters typed straight after ⌘P, before its field has the keys,
-    /// go into the field rather than being lost. Returns whether the key
-    /// was one.
-    pub(super) fn catch_palette_typing(
-        &mut self,
-        keystroke: &gpui::Keystroke,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(palette) = &self.palette else {
-            return false;
-        };
-        if gpui::Focusable::focus_handle(palette.input.read(cx), cx).is_focused(window) {
-            return false;
-        }
-        let Some(text) = typed_text(keystroke) else {
-            return false;
-        };
-        let query = format!("{}{text}", palette.input.read(cx).value());
-        palette.input.clone().update(cx, |input, cx| {
-            input.set_value(query.clone(), window, cx);
-        });
-        if let Some(palette) = self.palette.as_mut() {
-            palette.query = query;
-            palette.selected = None;
-        }
-        cx.notify();
-        true
     }
 
     pub(super) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
