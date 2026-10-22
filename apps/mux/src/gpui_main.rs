@@ -2082,6 +2082,10 @@ impl MuxApp {
             // the window lost focus before GPUI delivered the prior key-up.
             self.terminal_key_presses.remove(&event.keystroke.key);
         }
+        if self.catch_palette_typing(&event.keystroke, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if window.has_active_dialog(cx)
             || window.has_active_sheet(cx)
             || self.field_has_keyboard()

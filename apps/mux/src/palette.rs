@@ -192,6 +192,45 @@ impl MuxApp {
         cx.notify();
     }
 
+    /// Letters typed straight after ⌘P, before its field has the keys,
+    /// go into the field rather than being lost. Returns whether the key
+    /// was one.
+    pub(super) fn catch_palette_typing(
+        &mut self,
+        keystroke: &gpui::Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(palette) = &self.palette else {
+            return false;
+        };
+        let modifiers = keystroke.modifiers;
+        if modifiers.control
+            || modifiers.platform
+            || modifiers.function
+            || gpui::Focusable::focus_handle(palette.input.read(cx), cx).is_focused(window)
+        {
+            return false;
+        }
+        let Some(text) = keystroke
+            .key_char
+            .as_deref()
+            .filter(|text| !text.is_empty() && !text.chars().any(char::is_control))
+        else {
+            return false;
+        };
+        let query = format!("{}{text}", palette.input.read(cx).value());
+        palette.input.clone().update(cx, |input, cx| {
+            input.set_value(query.clone(), window, cx);
+        });
+        if let Some(palette) = self.palette.as_mut() {
+            palette.query = query;
+            palette.selected = None;
+        }
+        cx.notify();
+        true
+    }
+
     pub(super) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.take().is_some() {
             self.restore_keyboard(window, cx);
