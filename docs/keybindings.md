@@ -38,6 +38,9 @@ from an agent pane too. They are in the menu bar's Shell and Window menus.
 | `Cmd+9` | Select the last tab |
 | `Cmd+Shift+]` / `Ctrl+Tab` | Next tab |
 | `Cmd+Shift+[` / `Ctrl+Shift+Tab` | Previous tab |
+| `Cmd+]` / `Cmd+[` | Focus the next or previous pane, coming round at the ends |
+| `Cmd+Option+arrows` | Focus the pane in that direction |
+| `Cmd+Control+arrows` | Move the focused pane's edge in that direction |
 
 ## Pane mode
 

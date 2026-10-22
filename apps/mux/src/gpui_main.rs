@@ -200,6 +200,16 @@ gpui::actions!(
         ShrinkMuxText,
         SplitMuxDown,
         SplitMuxRight,
+        FocusMuxPaneLeft,
+        FocusMuxPaneRight,
+        FocusMuxPaneUp,
+        FocusMuxPaneDown,
+        NextMuxPane,
+        PreviousMuxPane,
+        ResizeMuxPaneLeft,
+        ResizeMuxPaneRight,
+        ResizeMuxPaneUp,
+        ResizeMuxPaneDown,
         ToggleAgentPane,
         ZoomMuxPane
     ]
@@ -4271,6 +4281,10 @@ impl MuxApp {
             .on_action(cx.listener(|this, _: &SelectMuxTab8, window, cx| {
                 this.run_shortcut(Action::SelectTab(8), window, cx);
             }))
+            .on_action(cx.listener(|this, _: &NextMuxPane, _, cx| this.cycle_pane(true, cx)))
+            .on_action(cx.listener(|this, _: &PreviousMuxPane, _, cx| {
+                this.cycle_pane(false, cx);
+            }))
             .on_action(cx.listener(|this, _: &SelectLastMuxTab, window, cx| {
                 let last = this
                     .session
@@ -4282,6 +4296,63 @@ impl MuxApp {
                     cx,
                 );
             }))
+    }
+
+    /// The keys iTerm moves between panes and resizes them with.
+    fn with_pane_shortcut_actions(
+        root: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        root.on_action(cx.listener(|this, _: &FocusMuxPaneLeft, window, cx| {
+            this.run_shortcut(Action::FocusPane(Direction::Left), window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &FocusMuxPaneRight, window, cx| {
+            this.run_shortcut(Action::FocusPane(Direction::Right), window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &FocusMuxPaneUp, window, cx| {
+            this.run_shortcut(Action::FocusPane(Direction::Up), window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &FocusMuxPaneDown, window, cx| {
+            this.run_shortcut(Action::FocusPane(Direction::Down), window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &ResizeMuxPaneLeft, window, cx| {
+            this.run_shortcut(Action::ResizePane(Direction::Left), window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &ResizeMuxPaneRight, window, cx| {
+            this.run_shortcut(Action::ResizePane(Direction::Right), window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &ResizeMuxPaneUp, window, cx| {
+            this.run_shortcut(Action::ResizePane(Direction::Up), window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &ResizeMuxPaneDown, window, cx| {
+            this.run_shortcut(Action::ResizePane(Direction::Down), window, cx);
+        }))
+    }
+
+    /// Show the next pane of the tab, or the one before, in the order the
+    /// layout reads, coming round at the ends.
+    fn cycle_pane(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(tab) = self.session.as_ref().and_then(Session::active_tab) else {
+            return;
+        };
+        let mut panes = Vec::new();
+        tab.layout.pane_ids(&mut panes);
+        let Some(at) = panes
+            .iter()
+            .position(|pane_id| *pane_id == tab.focused_pane)
+        else {
+            return;
+        };
+        let next = if forward {
+            (at + 1) % panes.len()
+        } else {
+            (at + panes.len() - 1) % panes.len()
+        };
+        if next != at {
+            self.mode = InputMode::Normal;
+            self.request_pane_focus(panes[next]);
+            cx.notify();
+        }
     }
 
     fn with_pointer_capture(
@@ -4714,10 +4785,13 @@ impl Render for MuxApp {
             }));
         let drawn = self.draw_layout(&geometry, viewport, window);
         self.publish_ground(&drawn, viewport, window, cx);
-        let mut root = Self::with_pointer_capture(Self::with_shortcut_actions(root, cx), cx)
-            .font_family(EMBEDDED_TERMINAL_FONT)
-            .text_color(theme.text)
-            .child(self.render_tabs(cx));
+        let mut root = Self::with_pointer_capture(
+            Self::with_pane_shortcut_actions(Self::with_shortcut_actions(root, cx), cx),
+            cx,
+        )
+        .font_family(EMBEDDED_TERMINAL_FONT)
+        .text_color(theme.text)
+        .child(self.render_tabs(cx));
 
         let zoomed = self
             .session
@@ -5671,6 +5745,9 @@ fn configure_application_menu(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Show Next Tab", NextMuxTab),
                 MenuItem::action("Show Previous Tab", PreviousMuxTab),
+                MenuItem::separator(),
+                MenuItem::action("Select Next Pane", NextMuxPane),
+                MenuItem::action("Select Previous Pane", PreviousMuxPane),
             ],
         },
     ]);
@@ -5702,6 +5779,16 @@ fn bind_mac_shortcuts(cx: &mut App) {
         KeyBinding::new("cmd-+", GrowMuxText, None),
         KeyBinding::new("cmd--", ShrinkMuxText, None),
         KeyBinding::new("cmd-0", ResetMuxText, None),
+        KeyBinding::new("cmd-alt-left", FocusMuxPaneLeft, None),
+        KeyBinding::new("cmd-alt-right", FocusMuxPaneRight, None),
+        KeyBinding::new("cmd-alt-up", FocusMuxPaneUp, None),
+        KeyBinding::new("cmd-alt-down", FocusMuxPaneDown, None),
+        KeyBinding::new("cmd-]", NextMuxPane, None),
+        KeyBinding::new("cmd-[", PreviousMuxPane, None),
+        KeyBinding::new("cmd-ctrl-left", ResizeMuxPaneLeft, None),
+        KeyBinding::new("cmd-ctrl-right", ResizeMuxPaneRight, None),
+        KeyBinding::new("cmd-ctrl-up", ResizeMuxPaneUp, None),
+        KeyBinding::new("cmd-ctrl-down", ResizeMuxPaneDown, None),
     ]);
 }
 
