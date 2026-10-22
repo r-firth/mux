@@ -172,6 +172,11 @@ A pane shows the cursor your Ghostty does: `cursor-style` in its config
 that picks its own cursor, as Vim does in insert mode, still gets it, and the
 pane goes back to yours when the program resets it.
 
+At a zsh or bash prompt the cursor is a blinking bar, and the program's own
+while a command runs, as Ghostty's shell integration has it;
+`shell-integration-features = no-cursor` in your Ghostty config keeps your
+`cursor-style` at the prompt too.
+
 Right-clicking a pane opens its menu, unless `right-click-action` in your
 Ghostty config says otherwise: `paste`, `copy`, `copy-or-paste` (copy what
 is selected and let go of it, or paste when nothing is), or `ignore`. A
