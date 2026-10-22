@@ -209,6 +209,11 @@ pastes it. A shell that brackets its pastes, as bash, zsh and fish do,
 gets the paste at once, since it holds it as text until Return. Setting
 `clipboard-paste-protection = false` in your Ghostty config turns this off.
 
+A program can copy to the clipboard itself with OSC 52, as Neovim, tmux
+and programs over ssh do; the strip says how many lines it copied.
+`clipboard-write = deny` in your Ghostty config stops it. Reading the
+clipboard that way is not allowed.
+
 ## Selecting
 
 Drag to select, double-click for a word and triple-click for a line;

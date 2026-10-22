@@ -114,7 +114,13 @@ impl PaneOutputWorker {
             if !responses.is_empty() && !self.write_responses(&responses) {
                 break;
             }
-            self.title.lock().scan(&bytes);
+            {
+                let mut title = self.title.lock();
+                title.scan(&bytes);
+                // The windows put copies on the clipboard; the daemon has
+                // nothing to keep them for.
+                let _ = title.take_copied();
+            }
             if reset_keyboard {
                 warn!(
                     session_id = %self.session_id,

@@ -4497,6 +4497,7 @@ dependencies = [
 name = "mux-terminal"
 version = "0.9.1"
 dependencies = [
+ "base64",
  "memchr",
  "serde",
  "thiserror 2.0.20",

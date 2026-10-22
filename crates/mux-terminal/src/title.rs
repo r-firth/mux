@@ -1,16 +1,19 @@
-//! Window titles, and calls for attention, from a pane's output.
+//! Window titles, calls for attention, and copies to the clipboard, from a
+//! pane's output.
 
 /// Follows OSC 0/2 window-title sequences in a pane's output so the pane head
 /// can name what is running. It also notices a program asking to be noticed,
 /// which shares the same escape grammar: the bell, and the desktop
 /// notifications of OSC 9 (iTerm2) and OSC 777 (rxvt, Ghostty). Sequences may
-/// be split across output chunks.
+/// be split across output chunks. A program copying to the clipboard with OSC
+/// 52, as Neovim, tmux and programs over ssh do, uses it too.
 #[derive(Debug, Default)]
 pub struct TitleScanner {
     state: TitleScan,
     buffer: Vec<u8>,
     title: Option<String>,
     attention: Option<Attention>,
+    copied: Option<String>,
 }
 
 /// A program asking to be noticed.
@@ -31,6 +34,8 @@ enum TitleScan {
     TitleEscape,
     Notice(u16),
     NoticeEscape(u16),
+    Clipboard,
+    ClipboardEscape,
     Other,
     OtherEscape,
 }
@@ -39,6 +44,9 @@ const ESC: u8 = 0x1b;
 const BEL: u8 = 0x07;
 const MAX_TITLE_BYTES: usize = 256;
 const MAX_NOTICE_BYTES: usize = 512;
+/// The most of a copy kept, base64 and all: past it, the copy is dropped
+/// rather than cut short.
+const MAX_CLIPBOARD_BYTES: usize = 8 * 1024 * 1024;
 
 impl TitleScanner {
     /// A scanner that already knows the title, as a client restoring a pane
@@ -62,6 +70,12 @@ impl TitleScanner {
         self.attention.take()
     }
 
+    /// The text a program last copied to the clipboard since this was last
+    /// called.
+    pub fn take_copied(&mut self) -> Option<String> {
+        self.copied.take()
+    }
+
     pub fn scan(&mut self, bytes: &[u8]) {
         let mut rest = bytes;
         while let Some((&byte, after)) = rest.split_first() {
@@ -83,6 +97,19 @@ impl TitleScanner {
                 (TitleScan::Notice(number), BEL) | (TitleScan::NoticeEscape(number), b'\\') => {
                     self.commit_notice(number);
                     TitleScan::Ground
+                }
+                (TitleScan::Clipboard, BEL) | (TitleScan::ClipboardEscape, b'\\') => {
+                    self.commit_copy();
+                    TitleScan::Ground
+                }
+                (TitleScan::Clipboard, ESC) => TitleScan::ClipboardEscape,
+                (TitleScan::Clipboard, _) => {
+                    // One past the most is kept, so a copy too big to keep
+                    // is known to be.
+                    if self.buffer.len() <= MAX_CLIPBOARD_BYTES {
+                        self.buffer.push(byte);
+                    }
+                    TitleScan::Clipboard
                 }
                 (TitleScan::Notice(number), ESC) => TitleScan::NoticeEscape(number),
                 (TitleScan::Notice(number), _) => {
@@ -113,6 +140,10 @@ impl TitleScanner {
                     self.buffer.clear();
                     TitleScan::Title
                 }
+                (TitleScan::Number(52), b';') => {
+                    self.buffer.clear();
+                    TitleScan::Clipboard
+                }
                 (TitleScan::Number(number @ (9 | 777)), b';') => {
                     self.buffer.clear();
                     TitleScan::Notice(number)
@@ -132,6 +163,30 @@ impl TitleScanner {
         let title = String::from_utf8_lossy(&self.buffer).trim().to_owned();
         self.title = (!title.is_empty()).then_some(title);
         self.buffer.clear();
+    }
+
+    /// OSC 52 ; where ; base64. Which clipboard the program names makes no
+    /// difference, since a Mac has the one; a `?` asks to read it, which is
+    /// not given.
+    fn commit_copy(&mut self) {
+        use base64::Engine as _;
+        let buffer = std::mem::take(&mut self.buffer);
+        if buffer.len() > MAX_CLIPBOARD_BYTES {
+            return;
+        }
+        let Some(at) = buffer.iter().position(|&byte| byte == b';') else {
+            return;
+        };
+        let data = &buffer[at + 1..];
+        if data == b"?" {
+            return;
+        }
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data)
+            && let Ok(text) = String::from_utf8(bytes)
+            && !text.is_empty()
+        {
+            self.copied = Some(text);
+        }
     }
 
     fn commit_notice(&mut self, number: u16) {
@@ -249,6 +304,23 @@ mod tests {
         // ConEmu's progress report is not a notification.
         scanner.scan(b"\x1b]9;4;1;50\x07");
         assert_eq!(scanner.take_attention(), None);
+        assert_eq!(scanner.title(), None);
+    }
+
+    #[test]
+    fn a_copy_to_the_clipboard_is_decoded() {
+        let mut scanner = TitleScanner::default();
+        scanner.scan(b"before\x1b]52;c;aGVsbG8gd29y");
+        assert_eq!(scanner.take_copied(), None, "not finished yet");
+        scanner.scan(b"bGQ=\x07after");
+        assert_eq!(scanner.take_copied().as_deref(), Some("hello world"));
+        assert_eq!(scanner.take_copied(), None);
+        assert_eq!(scanner.take_attention(), None, "its BEL is no bell");
+
+        scanner.scan(b"\x1b]52;;bXV4\x1b\\");
+        assert_eq!(scanner.take_copied().as_deref(), Some("mux"));
+        scanner.scan(b"\x1b]52;c;?\x07\x1b]52;c;!!!\x07");
+        assert_eq!(scanner.take_copied(), None, "a read, and nonsense");
         assert_eq!(scanner.title(), None);
     }
 

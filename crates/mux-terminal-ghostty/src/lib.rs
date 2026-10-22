@@ -204,6 +204,35 @@ fn parse_unfocused_split_opacity(contents: &str, opacity: &mut f32) {
     }
 }
 
+/// Whether a program may copy to the clipboard with OSC 52:
+/// `clipboard-write` from the user's Ghostty config, allowed by default as in
+/// Ghostty. Mux has no prompt to ask with, so `ask` allows it, and the strip
+/// says what was copied either way.
+#[must_use]
+pub fn user_clipboard_write() -> bool {
+    let mut allowed = true;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_clipboard_write(&contents, &mut allowed);
+            }
+        }
+    }
+    allowed
+}
+
+fn parse_clipboard_write(contents: &str, allowed: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "clipboard-write" {
+            match value.as_str() {
+                "" | "allow" | "ask" => *allowed = true,
+                "deny" => *allowed = false,
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Whether a paste that would run commands is held for a second ⌘V:
 /// `clipboard-paste-protection` from the user's Ghostty config, on by
 /// default as in Ghostty.
@@ -2815,6 +2844,17 @@ mod theme_tests {
         assert!((opacity - 1.0).abs() < f32::EPSILON);
         parse_unfocused_split_opacity("unfocused-split-opacity =\n", &mut opacity);
         assert!((opacity - 0.7).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn clipboard_write_is_allowed_unless_denied() {
+        let mut allowed = true;
+        parse_clipboard_write("clipboard-write = deny\n", &mut allowed);
+        assert!(!allowed);
+        parse_clipboard_write("clipboard-write = maybe\n", &mut allowed);
+        assert!(!allowed);
+        parse_clipboard_write("clipboard-write = ask\n", &mut allowed);
+        assert!(allowed);
     }
 
     #[test]

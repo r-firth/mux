@@ -426,6 +426,12 @@ fn unfocused_split_opacity() -> f32 {
     *OPACITY.get_or_init(mux_terminal_ghostty::user_unfocused_split_opacity)
 }
 
+/// Whether programs may copy to the clipboard, as in the user's Ghostty.
+fn clipboard_write_allowed() -> bool {
+    static ALLOWED: OnceLock<bool> = OnceLock::new();
+    *ALLOWED.get_or_init(mux_terminal_ghostty::user_clipboard_write)
+}
+
 fn restore_pane_replica(
     pane: &PaneAttachment,
     ghostty_theme: &GhosttyTheme,
@@ -458,8 +464,10 @@ fn restore_pane_replica(
         engine.apply_output(chunk.sequence, &chunk.bytes)?;
         title.scan(&chunk.bytes);
     }
-    // A bell in the replayed history rang long ago.
+    // A bell in the replayed history rang long ago, and what it copied has
+    // likely been copied over since.
     let _ = title.take_attention();
+    let _ = title.take_copied();
     let restored_next_sequence = engine.next_output_sequence();
     if restored_next_sequence != pane.terminal.next_sequence {
         return Err(anyhow!(
@@ -1228,6 +1236,7 @@ impl MuxApp {
         }
         self.publish_terminal_frames(&mut dirty_panes, cx);
         self.refresh_link_hover(cx);
+        self.collect_pane_copies(cx);
         self.collect_pane_calls(window, cx) || needs_render
     }
 
@@ -2122,6 +2131,31 @@ impl MuxApp {
                     "copied 1 line".to_owned()
                 } else {
                     format!("copied {lines} lines")
+                };
+                self.say_in_strip(copied, false, cx);
+            }
+        }
+    }
+
+    /// Put on the clipboard what programs copied with OSC 52 in the output
+    /// just applied, and say how much in the strip.
+    fn collect_pane_copies(&mut self, cx: &mut Context<Self>) {
+        let mut copied = None;
+        for pane in self.panes.values_mut() {
+            if let Some(text) = pane.title.take_copied() {
+                copied = Some(text);
+            }
+        }
+        let Some(text) = copied.filter(|_| clipboard_write_allowed()) else {
+            return;
+        };
+        if let Some(clipboard) = &mut self.clipboard {
+            let lines = text.lines().count().max(1);
+            if clipboard.set_text(text).is_ok() {
+                let copied = if lines == 1 {
+                    "a program copied 1 line".to_owned()
+                } else {
+                    format!("a program copied {lines} lines")
                 };
                 self.say_in_strip(copied, false, cx);
             }
