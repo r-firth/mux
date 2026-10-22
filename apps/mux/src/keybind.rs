@@ -412,7 +412,9 @@ fn gpui_trigger(trigger: &str) -> Option<String> {
 }
 
 fn gpui_key(key: &str) -> Option<String> {
-    let lower = key.to_ascii_lowercase();
+    // `physical:` (older configs) names the key by its place, as Mux does.
+    let key = key.strip_prefix("physical:").unwrap_or(key);
+    let lower = w3c_key_name(key).to_ascii_lowercase();
     let lower = lower.strip_prefix("key_").unwrap_or(&lower);
     let lower = lower.strip_prefix("digit_").unwrap_or(lower);
     let lower = lower.strip_prefix("arrow_").unwrap_or(lower);
@@ -470,6 +472,24 @@ fn gpui_key(key: &str) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// A key in the W3C spelling Ghostty also reads, `KeyA`, `Digit1`,
+/// `ArrowLeft`, `BracketLeft` or `PageUp`, in its snake-case one.
+fn w3c_key_name(key: &str) -> String {
+    if !key.starts_with(|character: char| character.is_ascii_uppercase()) || key.contains('_') {
+        return key.to_owned();
+    }
+    let mut snake = String::with_capacity(key.len() + 4);
+    for (index, character) in key.char_indices() {
+        let starts_word = character.is_ascii_uppercase()
+            || (character.is_ascii_digit() && matches!(snake.as_str(), "digit" | "numpad"));
+        if index > 0 && starts_word {
+            snake.push('_');
+        }
+        snake.push(character.to_ascii_lowercase());
+    }
+    snake
 }
 
 fn parse_action(action: &str) -> Option<Bound> {
@@ -596,6 +616,20 @@ mod tests {
             Some("cmd-shift-up")
         );
         assert_eq!(gpui_trigger("ctrl+key_a").as_deref(), Some("ctrl-a"));
+        assert_eq!(gpui_trigger("ctrl+KeyA").as_deref(), Some("ctrl-a"));
+        assert_eq!(gpui_trigger("super+Digit1").as_deref(), Some("cmd-1"));
+        assert_eq!(
+            gpui_trigger("shift+ArrowLeft").as_deref(),
+            Some("shift-left")
+        );
+        assert_eq!(gpui_trigger("super+BracketLeft").as_deref(), Some("cmd-["));
+        assert_eq!(
+            gpui_trigger("shift+PageUp").as_deref(),
+            Some("shift-pageup")
+        );
+        assert_eq!(gpui_trigger("ctrl+physical:t").as_deref(), Some("ctrl-t"));
+        assert_eq!(gpui_trigger("ctrl+A").as_deref(), Some("ctrl-a"));
+        assert_eq!(gpui_trigger("shift+F12").as_deref(), Some("shift-f12"));
         assert_eq!(gpui_trigger("cmd+digit_1").as_deref(), Some("cmd-1"));
         assert_eq!(gpui_trigger("opt+left_bracket").as_deref(), Some("alt-["));
         assert_eq!(gpui_trigger("ctrl+=").as_deref(), Some("ctrl-="));
