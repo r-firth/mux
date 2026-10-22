@@ -29,6 +29,7 @@ mod pane_names;
 mod pane_parser;
 mod progress;
 mod quick_select;
+mod run_clock;
 mod scrollback;
 mod seams;
 mod select_extend;
@@ -284,6 +285,8 @@ struct PaneReplica {
     title: TitleScanner,
     /// The program in front of the pane's shell, as the daemon last said.
     program: Option<String>,
+    /// When that program started, as far as this window saw.
+    program_since: Option<Instant>,
 }
 
 fn next_frame_serial() -> u64 {
@@ -321,6 +324,7 @@ impl PaneReplica {
             render_cache: Rc::new(RefCell::new(TerminalRenderCache::default())),
             title: TitleScanner::default(),
             program: None,
+            program_since: None,
         }
     }
 
@@ -690,6 +694,8 @@ struct MuxApp {
     /// has kept it blinking.
     blink_since: Instant,
     blink_timer: Option<Instant>,
+    /// Since when the clock in long-running programs' heads has ticked.
+    run_clock: Option<Instant>,
     backend: BackendHandle,
     /// Where the window's events arrive, for the panes' parsers to say they
     /// have taken in output.
@@ -913,6 +919,7 @@ impl MuxApp {
             ime_marked: None,
             blink_since: Instant::now(),
             blink_timer: None,
+            run_clock: None,
             backend,
             events,
             state_dir,
@@ -1113,6 +1120,7 @@ impl MuxApp {
     fn ensure_animations(&mut self, cx: &mut Context<Self>) {
         self.ensure_agent_pulse(cx);
         self.ensure_cursor_blink(cx);
+        self.ensure_run_clock(cx);
     }
 
     fn ensure_agent_pulse(&mut self, cx: &mut Context<Self>) {
@@ -1713,6 +1721,7 @@ impl MuxApp {
             } => {
                 if let Some(pane) = self.panes.get_mut(&pane_id) {
                     pane.program = None;
+                    pane.program_since = None;
                 }
                 self.note_finished_command(pane_id, &program, seconds);
             }
@@ -1721,6 +1730,7 @@ impl MuxApp {
             } => {
                 if let Some(pane) = self.panes.get_mut(&pane_id) {
                     pane.program = Some(program);
+                    pane.program_since = Some(Instant::now());
                 }
             }
         }
@@ -5072,14 +5082,14 @@ impl MuxApp {
         } else if let Some(name) = self.pane_name(geometry.pane_id) {
             name.to_owned().into()
         } else {
-            pane.and_then(PaneReplica::head_title)
+            pane.and_then(PaneReplica::timed_head_title)
                 .map_or_else(|| format!("pane {number}").into(), Into::into)
         };
         // A named pane still says what its shell does, beside the name.
         let beside = self
             .pane_name(geometry.pane_id)
             .and(pane)
-            .and_then(PaneReplica::head_title);
+            .and_then(PaneReplica::timed_head_title);
         let call = self
             .pane_call(geometry.pane_id)
             .filter(|_| !focused && !agent_pane);

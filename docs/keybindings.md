@@ -148,6 +148,8 @@ tab keeps its name; a numbered tab takes the number of its new place.
 A tab without a name of its own is named for the program running in its
 focused pane, `htop` or `npm`, while one runs, even under a shell that
 leaves the title alone, and the pane's head says it beside the directory.
+Once it has run ten seconds the head also says for how long (`cargo · ~/src
+· 42s`), by the second for its first minute and by the minute after.
 With the mouse, drag a tab's chip along the strip to move it, and
 double-click the chip of the tab on screen to rename it. A chip's dot turns
 into a close mark under the pointer; click it, or middle-click the chip, to
