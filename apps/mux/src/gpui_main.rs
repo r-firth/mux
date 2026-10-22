@@ -13,6 +13,7 @@ mod file_drop;
 mod find;
 mod gpui_terminal;
 mod ground;
+mod ime;
 mod layout;
 mod links;
 mod motion;
@@ -665,6 +666,8 @@ enum MotionPreference {
 
 struct MuxApp {
     focus_handle: FocusHandle,
+    /// What a dead key or an input method has composed so far.
+    ime_marked: Option<String>,
     backend: BackendHandle,
     /// Where the window's events arrive, for the panes' parsers to say they
     /// have taken in output.
@@ -884,6 +887,7 @@ impl MuxApp {
         Self::check_agent_availability(&profiles, window, cx);
         let mut app = Self {
             focus_handle,
+            ime_marked: None,
             backend,
             events,
             state_dir,
@@ -2122,6 +2126,10 @@ impl MuxApp {
             return;
         }
 
+        // A key the pane hears ends whatever was being composed: on Linux a
+        // dead key's composed letter arrives as a key, not from the input
+        // method.
+        self.ime_marked = None;
         let pane_id = terminal_key_down_target(
             &self.terminal_key_presses,
             &keystroke.key,
@@ -5429,6 +5437,7 @@ impl Render for MuxApp {
                 root = root.children(self.render_find_ticks(geometry));
                 root = root.children(self.render_pane_find(geometry, cx));
                 root = root.children(self.render_link_underline(geometry));
+                root = root.children(self.render_ime(geometry, cx));
             }
             if let Some(letter) = hints.get(&pane_id) {
                 root = root.child(pane_focus_hint(

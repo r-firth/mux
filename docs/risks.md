@@ -38,7 +38,9 @@ URIs are carried through the adapter per cell, but activation UI is not yet wire
 Ghostty's gesture engine owns cell/word/line selection, repeat-click
 thresholds, and direction-aware and rectangular dragging; the GUI translates
 native pane geometry. The primary
-remaining terminal risks are IME, hyperlink interaction, cursor-blink scheduling,
+remaining terminal risks are IME (composition is wired through GPUI's input
+handler at the cursor, but only dead keys under X11 have been exercised),
+hyperlink interaction, cursor-blink scheduling,
 search, accessibility, and broader compatibility testing. The pinned C API exposes viewport and history cells but not Ghostty's
 synchronous screen-search engine, so search is deliberately held behind the
 terminal boundary instead of duplicating VT-aware matching with an O(history)
