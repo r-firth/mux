@@ -46,6 +46,9 @@ enum Command {
     NextTab,
     PreviousTab,
     GotoTab(u8),
+    /// Places to move the tab, right when positive.
+    MoveTab(i8),
+    Reopen,
     LastTab,
     GrowText,
     ShrinkText,
@@ -235,6 +238,18 @@ impl MuxApp {
                 return;
             }
             Command::Prompt(older) => return self.jump_to_prompt(older, cx),
+            Command::MoveTab(by) => {
+                let direction = if by < 0 {
+                    Direction::Left
+                } else {
+                    Direction::Right
+                };
+                for _ in 0..by.unsigned_abs() {
+                    self.run_shortcut(Action::MoveTab(direction), window, cx);
+                }
+                return;
+            }
+            Command::Reopen => return self.run_shortcut(Action::ReopenClosedTab, window, cx),
             Command::GotoTab(index) => {
                 return self.run_shortcut(Action::SelectTab(index), window, cx);
             }
@@ -425,6 +440,8 @@ fn parse_action(action: &str) -> Option<Bound> {
         "next_tab" => Command::NextTab,
         "previous_tab" => Command::PreviousTab,
         "last_tab" => Command::LastTab,
+        "move_tab" => Command::MoveTab(parameter.trim().parse().ok().filter(|&by| by != 0)?),
+        "undo" => Command::Reopen,
         "goto_tab" => Command::GotoTab(parameter.parse().ok().filter(|&tab| tab > 0)?),
         "increase_font_size" => Command::GrowText,
         "decrease_font_size" => Command::ShrinkText,
@@ -575,6 +592,14 @@ mod tests {
             parse_keybind("cmd+shift+s=write_scrollback_file:paste"),
             None
         );
+        assert_eq!(
+            parse_keybind("cmd+shift+left=move_tab:-1"),
+            Some((
+                "cmd-shift-left".to_owned(),
+                Bound::Run(Command::MoveTab(-1))
+            ))
+        );
+        assert_eq!(parse_keybind("cmd+shift+left=move_tab:0"), None);
         assert_eq!(parse_keybind("cmd+j=toggle_quick_terminal"), None);
         assert_eq!(parse_keybind("no action"), None);
     }

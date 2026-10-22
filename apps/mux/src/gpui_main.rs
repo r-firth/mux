@@ -2849,6 +2849,16 @@ impl MuxApp {
     /// Move the tab on screen one place along the strip; at either end it
     /// stays where it is.
     fn move_active_tab(&mut self, direction: Direction) {
+        match direction {
+            Direction::Left => self.move_active_tab_by(-1),
+            Direction::Right => self.move_active_tab_by(1),
+            Direction::Up | Direction::Down => {}
+        }
+    }
+
+    /// Move the tab on screen `by` places along the strip, right when
+    /// positive, stopping at either end.
+    fn move_active_tab_by(&mut self, by: isize) {
         let Some(session) = &self.session else {
             return;
         };
@@ -2859,12 +2869,10 @@ impl MuxApp {
         else {
             return;
         };
-        let to = match direction {
-            Direction::Left => from.checked_sub(1),
-            Direction::Right => Some(from + 1).filter(|to| *to < session.tabs.len()),
-            Direction::Up | Direction::Down => None,
-        };
-        if let Some(to) = to {
+        let to = from
+            .saturating_add_signed(by)
+            .min(session.tabs.len().saturating_sub(1));
+        if to != from {
             self.send_workspace(WorkspaceCommand::MoveTab {
                 tab: session.active_tab,
                 to,

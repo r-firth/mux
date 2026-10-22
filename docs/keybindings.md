@@ -45,7 +45,7 @@ gives the key back to the program and `ignore` swallows it. Ghostty's
 actions for what Mux has a key for do what that key does: `new_tab`,
 `new_window` (a new session), `new_split` (`auto` too), `close_surface`, `close_tab`, `goto_split`, `resize_split`,
 `equalize_splits`, `toggle_split_zoom`, `next_tab`, `previous_tab`,
-`goto_tab`, `last_tab`, the font size actions, `reload_config`,
+`goto_tab`, `last_tab`, `move_tab`, `undo` (reopens what was closed last), the font size actions, `reload_config`,
 `open_config` (the settings), `toggle_fullscreen`, `clear_screen`, `quit`,
 `toggle_command_palette`, `start_search`, `search_selection`,
 `copy_to_clipboard`, `paste_from_clipboard`, `paste_from_selection`, `select_all`, the scroll
