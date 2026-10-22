@@ -2789,9 +2789,12 @@ impl MuxApp {
     }
 
     /// A Mac shortcut does what its Zellij keys do, from whatever mode the
-    /// keys were in, and leaves them in Normal.
+    /// keys were in, and leaves them in Normal; Locked stays locked until
+    /// Ctrl+g.
     fn run_shortcut(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
-        self.mode = InputMode::Normal;
+        if self.mode != InputMode::Locked {
+            self.mode = InputMode::Normal;
+        }
         self.perform_action(action, window, cx);
     }
 
