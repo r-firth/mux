@@ -4778,6 +4778,7 @@ impl MuxApp {
                     ("f", "zoom"),
                     ("c", "name"),
                     ("⌃n", "resize"),
+                    ("⌃g", "lock"),
                 ],
                 InputMode::Tab => &[
                     ("hl", "go"),
@@ -4789,6 +4790,7 @@ impl MuxApp {
                     ("c", "ink"),
                     ("s", "sync"),
                     ("x", "close"),
+                    ("⌃g", "lock"),
                 ],
                 InputMode::Session => &[("w", "switch"), ("d", "detach")],
                 InputMode::Resize => &[("hjkl", "resize"), ("=", "even"), ("enter", "done")],
