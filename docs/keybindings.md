@@ -132,6 +132,9 @@ A pane shows the cursor your Ghostty does: `cursor-style` in its config
 that picks its own cursor, as Vim does in insert mode, still gets it, and the
 pane goes back to yours when the program resets it.
 
+With `focus-follows-mouse = true` in your Ghostty config, the pane under
+the pointer takes the keys as the pointer moves onto it.
+
 A split without the keys fades back, as in Ghostty, by
 `unfocused-split-opacity` in its config (0.7 by default; 1 turns it off).
 The panes of a synced tab all take the keys, so none fades.

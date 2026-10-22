@@ -434,6 +434,13 @@ fn clipboard_write_allowed() -> bool {
     *ALLOWED.get_or_init(mux_terminal_ghostty::user_clipboard_write)
 }
 
+/// Whether the pane under the pointer takes the keys, as in the user's
+/// Ghostty.
+fn focus_follows_mouse() -> bool {
+    static FOLLOWS: OnceLock<bool> = OnceLock::new();
+    *FOLLOWS.get_or_init(mux_terminal_ghostty::user_focus_follows_mouse)
+}
+
 fn restore_pane_replica(
     pane: &PaneAttachment,
     ghostty_theme: &GhosttyTheme,
@@ -3748,6 +3755,23 @@ impl MuxApp {
         ended
     }
 
+    /// With `focus-follows-mouse` in the user's Ghostty config, the pane
+    /// under the pointer takes the keys, unless a button is held or
+    /// something is open over the panes.
+    fn follow_mouse_focus(&mut self, pane_id: PaneId, event: &gpui::MouseMoveEvent, active: bool) {
+        if active
+            && event.pressed_button.is_none()
+            && focus_follows_mouse()
+            && self.palette.is_none()
+            && self.pane_menu.is_none()
+            && self.session_sheet.is_none()
+            && self.settings_sheet.is_none()
+            && !self.seam_dragging()
+        {
+            self.request_pane_focus(pane_id);
+        }
+    }
+
     fn pointer_hover(
         &mut self,
         pane_id: PaneId,
@@ -5160,10 +5184,12 @@ impl MuxApp {
                 });
                 cx.stop_propagation();
             })
-            .on_mouse_move(move |event, _, cx| {
+            .on_mouse_move(move |event, window, cx| {
+                let active = window.is_window_active();
                 let handled = hover_app
                     .update(cx, |this, cx| {
                         let command = event.modifiers.platform;
+                        this.follow_mouse_focus(pane_id, event, active);
                         this.hover_link(pane_id, rect, event.position, command, cx);
                         this.pointer_hover(pane_id, rect, event)
                     })

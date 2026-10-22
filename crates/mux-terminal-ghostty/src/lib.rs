@@ -233,6 +233,33 @@ fn parse_clipboard_write(contents: &str, allowed: &mut bool) {
     }
 }
 
+/// Whether the pane under the pointer takes the keys: `focus-follows-mouse`
+/// from the user's Ghostty config, off by default as in Ghostty.
+#[must_use]
+pub fn user_focus_follows_mouse() -> bool {
+    let mut follows = false;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_focus_follows_mouse(&contents, &mut follows);
+            }
+        }
+    }
+    follows
+}
+
+fn parse_focus_follows_mouse(contents: &str, follows: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "focus-follows-mouse" {
+            match value.as_str() {
+                "true" => *follows = true,
+                "" | "false" => *follows = false,
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Whether a paste that would run commands is held for a second ⌘V:
 /// `clipboard-paste-protection` from the user's Ghostty config, on by
 /// default as in Ghostty.
@@ -2855,6 +2882,15 @@ mod theme_tests {
         assert!(!allowed);
         parse_clipboard_write("clipboard-write = ask\n", &mut allowed);
         assert!(allowed);
+    }
+
+    #[test]
+    fn focus_follows_mouse_only_when_asked() {
+        let mut follows = false;
+        parse_focus_follows_mouse("focus-follows-mouse = true\n", &mut follows);
+        assert!(follows);
+        parse_focus_follows_mouse("focus-follows-mouse =\n", &mut follows);
+        assert!(!follows);
     }
 
     #[test]
