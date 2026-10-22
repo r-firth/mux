@@ -64,7 +64,12 @@ enum Command {
     SelectAll,
     Scroll(TerminalViewportScroll),
     ScrollPage(bool),
+    ScrollLines(i64),
+    /// A share of a page, in thousandths.
+    ScrollFraction(i64),
     Prompt(bool),
+    NamePane,
+    OpenHistory,
 }
 
 static KEYBINDS: ghostty_config::Reloadable<Vec<(String, Bound)>> =
@@ -190,6 +195,16 @@ impl MuxApp {
         }
     }
 
+    /// Rows in a page of the pane with the keys: all but one, as Ghostty
+    /// keeps a line of context.
+    fn input_pane_page(&self) -> i64 {
+        let rows = self
+            .terminal_input_pane_id()
+            .and_then(|pane_id| self.panes.get(&pane_id))
+            .map_or(1, |pane| pane.frame.rows);
+        i64::from(rows.saturating_sub(1).max(1))
+    }
+
     fn run_bound_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
         let action: Box<dyn gpui::Action> = match command {
             Command::Copy => return self.copy_selection(cx),
@@ -201,13 +216,23 @@ impl MuxApp {
             }
             Command::Scroll(movement) => return self.scroll_input_pane(movement, cx),
             Command::ScrollPage(up) => {
-                let rows = self
-                    .terminal_input_pane_id()
-                    .and_then(|pane_id| self.panes.get(&pane_id))
-                    .map_or(1, |pane| pane.frame.rows);
-                let page = i64::from(rows.saturating_sub(1).max(1));
+                let page = self.input_pane_page();
                 let movement = TerminalViewportScroll::Delta(if up { -page } else { page });
                 return self.scroll_input_pane(movement, cx);
+            }
+            Command::ScrollLines(lines) => {
+                return self.scroll_input_pane(TerminalViewportScroll::Delta(lines), cx);
+            }
+            Command::ScrollFraction(thousandths) => {
+                let lines = self.input_pane_page() * thousandths / 1000;
+                return self.scroll_input_pane(TerminalViewportScroll::Delta(lines), cx);
+            }
+            Command::NamePane => return self.open_rename_pane(window, cx),
+            Command::OpenHistory => {
+                if let Some(pane_id) = self.terminal_input_pane_id() {
+                    self.open_history_in_editor(pane_id, cx);
+                }
+                return;
             }
             Command::Prompt(older) => return self.jump_to_prompt(older, cx),
             Command::GotoTab(index) => {
@@ -420,6 +445,16 @@ fn parse_action(action: &str) -> Option<Bound> {
         "scroll_to_bottom" => Command::Scroll(TerminalViewportScroll::Bottom),
         "scroll_page_up" => Command::ScrollPage(true),
         "scroll_page_down" => Command::ScrollPage(false),
+        "scroll_page_lines" => Command::ScrollLines(parameter.trim().parse().ok()?),
+        "scroll_page_fractional" => {
+            let fraction: f64 = parameter.trim().parse().ok()?;
+            #[expect(clippy::cast_possible_truncation, reason = "a share of a page")]
+            Command::ScrollFraction((fraction * 1000.0).round() as i64)
+        }
+        "prompt_surface_title" => Command::NamePane,
+        "write_scrollback_file" | "write_screen_file" if parameter == "open" => {
+            Command::OpenHistory
+        }
         "jump_to_prompt" => Command::Prompt(parameter.trim().starts_with('-')),
         _ => return None,
     };
@@ -520,6 +555,25 @@ mod tests {
         assert_eq!(
             parse_keybind("cmd+3=goto_tab:3"),
             Some(("cmd-3".to_owned(), Bound::Run(Command::GotoTab(3))))
+        );
+        assert_eq!(
+            parse_keybind("shift+up=scroll_page_lines:-3"),
+            Some(("shift-up".to_owned(), Bound::Run(Command::ScrollLines(-3))))
+        );
+        assert_eq!(
+            parse_keybind("shift+down=scroll_page_fractional:0.5"),
+            Some((
+                "shift-down".to_owned(),
+                Bound::Run(Command::ScrollFraction(500))
+            ))
+        );
+        assert_eq!(
+            parse_keybind("cmd+shift+s=write_scrollback_file:open"),
+            Some(("cmd-shift-s".to_owned(), Bound::Run(Command::OpenHistory)))
+        );
+        assert_eq!(
+            parse_keybind("cmd+shift+s=write_scrollback_file:paste"),
+            None
         );
         assert_eq!(parse_keybind("cmd+j=toggle_quick_terminal"), None);
         assert_eq!(parse_keybind("no action"), None);
