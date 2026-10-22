@@ -797,6 +797,8 @@ struct MuxApp {
     /// A paste that would run lines, and when: pasting it again soon after
     /// goes ahead.
     paste_armed: Option<(u64, Instant)>,
+    /// When Mux last closed a pane or tab, for ⌘Z to bring it back.
+    closed_at: Option<Instant>,
     /// What was last selected with the pointer, for ⌘⇧V.
     selection_clipboard: Option<String>,
     /// The focused pane's size shows in its head while sizes are changing
@@ -1021,6 +1023,7 @@ impl MuxApp {
             bell_serial: 0,
             close_armed: None,
             paste_armed: None,
+            closed_at: None,
             selection_clipboard: None,
             pane_menu: None,
             size_readout: false,
@@ -2270,6 +2273,19 @@ impl MuxApp {
         {
             return;
         }
+        // ⌘Z just after a close brings it back, as Ghostty's undo does;
+        // later, the key goes to the program as ever.
+        if keystroke.modifiers.platform
+            && !keystroke.modifiers.shift
+            && keystroke.key == "z"
+            && self
+                .closed_at
+                .take()
+                .is_some_and(|at| at.elapsed() < UNDO_CLOSE_WINDOW)
+        {
+            self.send_workspace(WorkspaceCommand::ReopenClosedTab);
+            return;
+        }
         if keystroke.modifiers.platform && keystroke.key == "v" {
             if keystroke.modifiers.shift {
                 self.paste_selection_clipboard(cx);
@@ -2730,6 +2746,7 @@ impl MuxApp {
 
     /// Close the pane or tab, if it is still the one with the keys.
     fn close_now(&mut self, target: CloseTarget) {
+        self.closed_at = Some(Instant::now());
         match target {
             CloseTarget::Pane(pane_id) if self.focused_pane_id() == Some(pane_id) => {
                 self.send_workspace(WorkspaceCommand::ClosePane);
@@ -6627,6 +6644,9 @@ fn terminal_codepoint(key: &str, terminal_key: TerminalKey) -> Option<char> {
 
 /// How soon a second close must follow one that found something running.
 const CLOSE_AGAIN_WINDOW: Duration = Duration::from_secs(5);
+
+/// How long after a close ⌘Z brings it back: Ghostty's `undo-timeout`.
+const UNDO_CLOSE_WINDOW: Duration = Duration::from_secs(5);
 
 /// The range of terminal text sizes, in points.
 const MIN_FONT_SIZE: f32 = 8.0;
