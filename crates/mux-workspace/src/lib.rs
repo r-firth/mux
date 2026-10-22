@@ -749,6 +749,39 @@ impl Session {
         Ok(id)
     }
 
+    /// Move a pane of the active tab into another tab, beside that tab's
+    /// focused pane, and show it there with the keys. A tab left with no
+    /// panes goes.
+    pub fn move_pane_to_tab(&mut self, pane_id: PaneId, to: TabId) -> Result<(), WorkspaceError> {
+        let from = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == self.active_tab)
+            .ok_or(WorkspaceError::UnknownTab(self.active_tab))?;
+        if self.tabs[from].id == to {
+            return Ok(());
+        }
+        if !self.tabs.iter().any(|tab| tab.id == to) {
+            return Err(WorkspaceError::UnknownTab(to));
+        }
+        let source = &mut self.tabs[from];
+        source.focus(pane_id)?;
+        if matches!(source.layout, PaneLayout::Leaf(_)) {
+            self.tabs.remove(from);
+        } else {
+            source.close_focused()?;
+        }
+        let target = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == to)
+            .ok_or(WorkspaceError::UnknownTab(to))?;
+        target.split_focused(pane_id, SplitAxis::Horizontal)?;
+        self.active_tab = to;
+        self.normalize_numeric_tab_titles();
+        Ok(())
+    }
+
     pub fn select_tab(&mut self, tab_id: TabId) -> Result<(), WorkspaceError> {
         if self.tabs.iter().any(|tab| tab.id == tab_id) {
             self.active_tab = tab_id;
@@ -899,6 +932,12 @@ pub enum WorkspaceCommand {
     SwapPanes {
         moved: PaneId,
         with: PaneId,
+    },
+    /// Move a pane of the tab on screen into another tab. See
+    /// [`Session::move_pane_to_tab`].
+    MovePaneToTab {
+        pane: PaneId,
+        tab: TabId,
     },
 }
 
@@ -1620,6 +1659,28 @@ mod tests {
             .map(|tab| tab.title.as_str())
             .collect::<Vec<_>>();
         assert_eq!(titles, vec!["1", "build", "3"]);
+    }
+
+    #[test]
+    fn a_pane_moves_into_another_tab() {
+        let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+        let mut session = Session::with_panes("s", &[a, b]).expect("session");
+        let first = session.active_tab;
+        let second = session.add_tab(c).expect("tab");
+        session.select_tab(first).expect("select");
+        session.move_pane_to_tab(b, second).expect("move");
+        assert_eq!(session.active_tab, second);
+        let tab = session.active_tab().expect("tab");
+        assert!(tab.layout.contains(b) && tab.layout.contains(c));
+        assert_eq!(tab.focused_pane, b);
+        // The last pane of a tab takes the tab with it.
+        session.move_pane_to_tab(b, first).expect("back");
+        session.select_tab(second).expect("select");
+        session.move_pane_to_tab(c, first).expect("last");
+        assert_eq!(session.tabs.len(), 1);
+        let mut panes = Vec::new();
+        session.tabs[0].layout.pane_ids(&mut panes);
+        assert_eq!(panes.len(), 3);
     }
 
     #[test]

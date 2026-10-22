@@ -3,6 +3,8 @@
 //! A pane's head can be dragged onto another pane of the tab, and the two
 //! trade places, as Shift with h, j, k or l does in Pane mode. The dragged
 //! pane keeps the keys; the pane it is over shows it will be the one moved.
+//! Dropped on another tab's chip, the pane moves into that tab; dropped on
+//! the strip's + it gets a tab of its own.
 
 use super::*;
 
@@ -75,6 +77,47 @@ impl MuxApp {
                         with: pane_id,
                     });
                 }
+            }))
+    }
+
+    /// Let a tab's chip take a pane dropped on it: the pane moves into the
+    /// tab.
+    pub(super) fn with_chip_pane_drop(
+        chip: gpui::Stateful<gpui::Div>,
+        tab_id: TabId,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        if active {
+            return chip;
+        }
+        chip.drag_over::<DraggedPane>(|style, dragged, _, _| {
+            style
+                .bg(wash(0.10))
+                .border_b_2()
+                .border_color(dragged.ink.color())
+        })
+        .on_drop(cx.listener(move |this, dragged: &DraggedPane, _, _| {
+            this.send_workspace(WorkspaceCommand::MovePaneToTab {
+                pane: dragged.pane_id,
+                tab: tab_id,
+            });
+        }))
+    }
+
+    /// Let the strip's + take a pane dropped on it: the pane gets a tab of
+    /// its own.
+    pub(super) fn with_new_tab_pane_drop(
+        button: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        button
+            .drag_over::<DraggedPane>(|style, dragged, _, _| {
+                style.bg(wash(0.10)).text_color(dragged.ink.color())
+            })
+            .on_drop(cx.listener(|this, dragged: &DraggedPane, _, _| {
+                this.send_workspace(WorkspaceCommand::SetFocusedPane(dragged.pane_id));
+                this.send_workspace(WorkspaceCommand::BreakPaneToTab);
             }))
     }
 }

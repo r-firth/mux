@@ -4134,6 +4134,7 @@ impl MuxApp {
                     }
                 }),
             );
+        let chip = Self::with_chip_pane_drop(chip, tab_id, active, cx);
         let mut chip = Self::with_tab_drag(chip, tab_id, position, label.clone(), ink, cx);
         if tab_mode && position < 9 {
             chip = chip.child(kbd(
@@ -4402,7 +4403,7 @@ impl MuxApp {
         }
         strip
             .child(tabs)
-            .child(
+            .child(Self::with_new_tab_pane_drop(
                 div()
                     .id("tab-new")
                     .flex_none()
@@ -4420,7 +4421,8 @@ impl MuxApp {
                         this.send_workspace(WorkspaceCommand::NewTab);
                     }))
                     .child("+"),
-            )
+                cx,
+            ))
             .child(
                 div()
                     .id("window-drag-region")

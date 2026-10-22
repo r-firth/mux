@@ -569,6 +569,9 @@ impl SessionRuntime {
                 tab.focus(moved)?;
                 tab.layout.swap(moved, with);
             }
+            WorkspaceCommand::MovePaneToTab { pane, tab } => {
+                self.model.write().move_pane_to_tab(pane, tab)?;
+            }
             WorkspaceCommand::SwapPane(direction) => {
                 self.model
                     .write()
