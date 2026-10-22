@@ -190,6 +190,7 @@ gpui::actions!(
         NavigateAgentLeft,
         NavigateAgentRight,
         NavigateAgentUp,
+        NewMuxSession,
         NewMuxTab,
         ReopenMuxTab,
         NextAgentChoice,
@@ -4939,6 +4940,7 @@ impl MuxApp {
             .on_action(cx.listener(|this, _: &CloseMuxTab, window, cx| {
                 this.run_shortcut(Action::CloseTab, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &NewMuxSession, _, _| this.start_session_here()))
             .on_action(cx.listener(|this, _: &NextMuxTab, window, cx| {
                 this.run_shortcut(Action::NextTab, window, cx);
             }))
@@ -6652,6 +6654,7 @@ fn configure_application_menu(cx: &mut App) {
             disabled: false,
             items: vec![
                 MenuItem::action("New Tab", NewMuxTab),
+                MenuItem::action("New Session", NewMuxSession),
                 MenuItem::action("Reopen Closed Tab or Pane", ReopenMuxTab),
                 MenuItem::separator(),
                 MenuItem::action("Split Right", SplitMuxRight),
@@ -6695,6 +6698,7 @@ fn configure_application_menu(cx: &mut App) {
 fn bind_mac_shortcuts(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-t", NewMuxTab, None),
+        KeyBinding::new("cmd-n", NewMuxSession, None),
         KeyBinding::new("cmd-shift-t", ReopenMuxTab, None),
         KeyBinding::new("cmd-d", SplitMuxRight, None),
         KeyBinding::new("cmd-shift-d", SplitMuxDown, None),

@@ -933,7 +933,7 @@ impl MuxApp {
             ),
             (
                 Command::NewSession,
-                "",
+                "⌘n",
                 "start a session here",
                 "new session create workspace",
             ),

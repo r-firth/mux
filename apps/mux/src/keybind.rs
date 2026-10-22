@@ -31,6 +31,7 @@ enum Bound {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Command {
     NewTab,
+    NewSession,
     SplitRight,
     SplitDown,
     SplitAuto,
@@ -224,6 +225,7 @@ impl MuxApp {
             Command::SplitAuto => Box::new(SplitMuxAuto),
             Command::ClosePane => Box::new(CloseMuxPane),
             Command::CloseTab => Box::new(CloseMuxTab),
+            Command::NewSession => Box::new(NewMuxSession),
             Command::NextPane => Box::new(NextMuxPane),
             Command::PreviousPane => Box::new(PreviousMuxPane),
             Command::Equalize => Box::new(EqualizeMuxPanes),
@@ -379,6 +381,7 @@ fn parse_action(action: &str) -> Option<Bound> {
         "unbind" => return Some(Bound::Unbind),
         "ignore" => return Some(Bound::Ignore),
         "new_tab" => Command::NewTab,
+        "new_window" => Command::NewSession,
         "new_split" => match parameter {
             "down" | "up" => Command::SplitDown,
             "auto" => Command::SplitAuto,

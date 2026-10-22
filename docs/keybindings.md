@@ -36,7 +36,7 @@ keybind = super+k=unbind
 `\u{e9}` as in Ghostty), `csi:` and `esc:` send an escape sequence, `unbind`
 gives the key back to the program and `ignore` swallows it. Ghostty's
 actions for what Mux has a key for do what that key does: `new_tab`,
-`new_split` (`auto` too), `close_surface`, `close_tab`, `goto_split`, `resize_split`,
+`new_window` (a new session), `new_split` (`auto` too), `close_surface`, `close_tab`, `goto_split`, `resize_split`,
 `equalize_splits`, `toggle_split_zoom`, `next_tab`, `previous_tab`,
 `goto_tab`, `last_tab`, the font size actions, `reload_config`,
 `open_config` (the settings), `toggle_fullscreen`, `clear_screen`, `quit`,
@@ -72,6 +72,7 @@ from an agent pane too. They are in the menu bar's Shell and Window menus.
 | `Cmd+Shift+Return` | Toggle focused-pane zoom |
 | `Cmd+W` | Close the focused pane, or its tab when it is the tab's only pane |
 | `Cmd+Option+W` | Close the tab, all its panes |
+| `Cmd+N` | Start a session in the focused pane's directory and switch to it (sessions are Mux's windows; Ghostty's `new_window` keybind does the same) |
 | `Cmd+A` | Select everything in the focused pane, its history too |
 | `Cmd+Shift+O` | Select what the last command printed, or what a running one has printed so far (needs the shell's prompt marks; see Scrollback) |
 | `Cmd+Left` / `Cmd+Right` | Go to the start or end of the line being typed (sends `Ctrl+a` / `Ctrl+e`, as Ghostty does) |
