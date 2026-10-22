@@ -227,6 +227,27 @@ pub enum ForegroundChange {
     Finished(String, Duration),
 }
 
+/// Whether an inherited variable belongs to the terminal the daemon was
+/// started from rather than to Mux.
+fn names_another_terminal(key: &str) -> bool {
+    const PREFIXES: [&str; 6] = [
+        "GHOSTTY_",
+        "ITERM_",
+        "KITTY_",
+        "WEZTERM_",
+        "ALACRITTY_",
+        "KONSOLE_",
+    ];
+    const NAMES: [&str; 5] = [
+        "TERMINFO",
+        "TERM_SESSION_ID",
+        "LC_TERMINAL",
+        "LC_TERMINAL_VERSION",
+        "WT_SESSION",
+    ];
+    PREFIXES.iter().any(|prefix| key.starts_with(prefix)) || NAMES.contains(&key)
+}
+
 impl PaneRuntime {
     pub fn spawn(
         session_id: SessionId,
@@ -245,6 +266,17 @@ impl PaneRuntime {
         builder.cwd(cwd);
         builder.env("TERM", "xterm-256color");
         builder.env("COLORTERM", "truecolor");
+        // Programs ask TERM_PROGRAM which terminal they are in. A daemon
+        // started from inside another terminal, as one run from Ghostty is,
+        // would otherwise hand its shells that terminal's name and the
+        // variables that go with it, and they would take Mux for it.
+        builder.env("TERM_PROGRAM", "mux");
+        builder.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+        for (key, _) in std::env::vars_os() {
+            if key.to_str().is_some_and(names_another_terminal) {
+                builder.env_remove(key);
+            }
+        }
         for (key, value) in &command.environment {
             builder.env(key, value);
         }
@@ -572,7 +604,24 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use super::{ForegroundProcessTracker, OUTPUT_BATCH_SIZE, collect_output_batch};
+    use super::{
+        ForegroundProcessTracker, OUTPUT_BATCH_SIZE, collect_output_batch, names_another_terminal,
+    };
+
+    #[test]
+    fn the_terminal_mux_was_started_from_is_not_passed_on() {
+        for key in [
+            "GHOSTTY_RESOURCES_DIR",
+            "ITERM_SESSION_ID",
+            "TERMINFO",
+            "WT_SESSION",
+        ] {
+            assert!(names_another_terminal(key), "{key}");
+        }
+        for key in ["PATH", "TERM", "HOME", "TERM_PROGRAM", "GHOSTTY"] {
+            assert!(!names_another_terminal(key), "{key}");
+        }
+    }
 
     #[test]
     fn queued_output_joins_the_batch_without_a_wait() {
