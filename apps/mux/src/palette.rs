@@ -204,19 +204,10 @@ impl MuxApp {
         let Some(palette) = &self.palette else {
             return false;
         };
-        let modifiers = keystroke.modifiers;
-        if modifiers.control
-            || modifiers.platform
-            || modifiers.function
-            || gpui::Focusable::focus_handle(palette.input.read(cx), cx).is_focused(window)
-        {
+        if gpui::Focusable::focus_handle(palette.input.read(cx), cx).is_focused(window) {
             return false;
         }
-        let Some(text) = keystroke
-            .key_char
-            .as_deref()
-            .filter(|text| !text.is_empty() && !text.chars().any(char::is_control))
-        else {
+        let Some(text) = typed_text(keystroke) else {
             return false;
         };
         let query = format!("{}{text}", palette.input.read(cx).value());

@@ -44,8 +44,15 @@ pub(super) struct PaneFind {
     /// When the places were last found, and whether a look is already due.
     searched_when: Instant,
     refresh_due: bool,
+    /// When it opened: letters typed before its field has the keys are
+    /// its, not the pane's.
+    opened: Instant,
     _subscription: gpui::Subscription,
 }
+
+/// How long after opening find catches letters typed before its field has
+/// the keys; after that, a pane given the keys back keeps them.
+const FIND_CATCHES_TYPING: Duration = Duration::from_millis(600);
 
 impl PaneFind {
     fn current(&self) -> Option<Found> {
@@ -113,6 +120,7 @@ impl MuxApp {
             searched: (0, 0, 0),
             searched_when: Instant::now(),
             refresh_due: false,
+            opened: Instant::now(),
             _subscription: subscription,
         });
         self.mode = InputMode::Normal;
@@ -150,6 +158,33 @@ impl MuxApp {
     }
 
     /// Whether the find field holds the keys, so typing goes to it.
+    /// Letters typed straight after ⌘F, before its field has the keys, go
+    /// into the field rather than to the pane's program. Returns whether
+    /// the key was one.
+    pub(super) fn catch_find_typing(
+        &mut self,
+        keystroke: &gpui::Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(find) = &self.find else {
+            return false;
+        };
+        if find.opened.elapsed() > FIND_CATCHES_TYPING || self.find_has_keyboard(window, cx) {
+            return false;
+        }
+        let Some(text) = typed_text(keystroke) else {
+            return false;
+        };
+        let query = format!("{}{text}", find.input.read(cx).value());
+        find.input.clone().update(cx, |input, cx| {
+            input.set_value(query.clone(), window, cx);
+        });
+        self.find_typed(query, cx);
+        cx.notify();
+        true
+    }
+
     pub(super) fn find_has_keyboard(&self, window: &Window, cx: &App) -> bool {
         self.find.as_ref().is_some_and(|find| {
             gpui::Focusable::focus_handle(find.input.read(cx), cx).is_focused(window)
