@@ -421,6 +421,24 @@ int32_t mux_ghostty_terminal_set_history_limit(
       &max_bytes);
 }
 
+/* The cursor a pane shows until its program picks one, and goes back to on
+ * a DECSCUSR reset: 0 bar, 1 block, 2 underline, 3 hollow block. */
+int32_t mux_ghostty_terminal_set_default_cursor_style(
+    mux_ghostty_terminal_t terminal,
+    uint8_t style) {
+  GhosttyTerminalCursorStyle value;
+  switch (style) {
+    case 0: value = GHOSTTY_TERMINAL_CURSOR_STYLE_BAR; break;
+    case 2: value = GHOSTTY_TERMINAL_CURSOR_STYLE_UNDERLINE; break;
+    case 3: value = GHOSTTY_TERMINAL_CURSOR_STYLE_BLOCK_HOLLOW; break;
+    default: value = GHOSTTY_TERMINAL_CURSOR_STYLE_BLOCK; break;
+  }
+  return (int32_t)ghostty_terminal_set(
+      (GhosttyTerminal)terminal,
+      GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_STYLE,
+      &value);
+}
+
 int32_t mux_ghostty_terminal_apply_theme(
     mux_ghostty_terminal_t raw_terminal,
     const mux_ghostty_rgb_t *background,

@@ -122,6 +122,13 @@ Zellij's `Ctrl+o` session prefix intentionally has no Normal-mode binding yet.
 This keeps foreground Control-key input untouched except for `Ctrl+p` and
 `Ctrl+t`.
 
+## Cursor
+
+A pane shows the cursor your Ghostty does: `cursor-style` in its config
+(`block`, `bar`, `underline` or `block_hollow`), a block by default. A program
+that picks its own cursor, as Vim does in insert mode, still gets it, and the
+pane goes back to yours when the program resets it.
+
 ## Scrollback
 
 The wheel or trackpad moves through a pane's history; a thin thumb on the

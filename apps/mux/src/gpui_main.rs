@@ -413,6 +413,13 @@ fn pane_history_bytes() -> usize {
     *LIMIT.get_or_init(mux_terminal_ghostty::user_history_limit)
 }
 
+/// The cursor a pane shows until its program picks one, as in the user's
+/// Ghostty.
+fn pane_cursor_style() -> mux_terminal::CursorStyle {
+    static STYLE: OnceLock<mux_terminal::CursorStyle> = OnceLock::new();
+    *STYLE.get_or_init(mux_terminal_ghostty::user_cursor_style)
+}
+
 fn restore_pane_replica(
     pane: &PaneAttachment,
     ghostty_theme: &GhosttyTheme,
@@ -430,6 +437,9 @@ fn restore_pane_replica(
     engine
         .set_history_limit(pane_history_bytes())
         .with_context(|| format!("set the history of terminal pane {}", pane.pane_id))?;
+    engine
+        .set_default_cursor_style(pane_cursor_style())
+        .with_context(|| format!("set the cursor of terminal pane {}", pane.pane_id))?;
     // The daemon remembers the title; the sequence that set it may predate
     // the checkpoint, so the replay alone cannot be trusted to carry it.
     let mut title = TitleScanner::seeded(pane.title.clone());

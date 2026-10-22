@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use directories::BaseDirs;
-use mux_terminal::Rgb;
+use mux_terminal::{CursorStyle, Rgb};
 
 pub const GHOSTTY_REVISION: &str = "b2fa2931b6599f7e32a7c547b3f5520ac3333881";
 
@@ -141,6 +141,35 @@ pub fn user_option_as_alt() -> bool {
         }
     }
     enabled
+}
+
+/// The cursor a pane shows until its program picks one: `cursor-style`
+/// from the user's Ghostty config, a block by default as in Ghostty.
+#[must_use]
+pub fn user_cursor_style() -> CursorStyle {
+    let mut style = CursorStyle::Block;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_cursor_style(&contents, &mut style);
+            }
+        }
+    }
+    style
+}
+
+fn parse_cursor_style(contents: &str, style: &mut CursorStyle) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "cursor-style" {
+            match value.as_str() {
+                "" | "block" => *style = CursorStyle::Block,
+                "bar" => *style = CursorStyle::Bar,
+                "underline" => *style = CursorStyle::Underline,
+                "block_hollow" => *style = CursorStyle::HollowBlock,
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Whether a paste that would run commands is held for a second ⌘V:
@@ -579,6 +608,7 @@ mod linked {
             out_has_selection: *mut bool,
         ) -> i32;
         fn mux_ghostty_terminal_set_history_limit(terminal: *mut c_void, max_bytes: usize) -> i32;
+        fn mux_ghostty_terminal_set_default_cursor_style(terminal: *mut c_void, style: u8) -> i32;
         fn mux_ghostty_terminal_screen_text(
             terminal: *mut c_void,
             out_bytes: *mut *mut u8,
@@ -946,6 +976,21 @@ mod linked {
             // SAFETY: the terminal is owned and the limit is passed by value.
             check(unsafe {
                 mux_ghostty_terminal_set_history_limit(self.terminal.as_ptr(), max_bytes)
+            })
+        }
+
+        /// Show `style` until the program picks a cursor, and go back to it
+        /// when the program resets its choice.
+        pub fn set_default_cursor_style(&mut self, style: CursorStyle) -> Result<(), GhosttyError> {
+            let style = match style {
+                CursorStyle::Bar => 0,
+                CursorStyle::Block => 1,
+                CursorStyle::Underline => 2,
+                CursorStyle::HollowBlock => 3,
+            };
+            // SAFETY: the terminal is owned and the style is passed by value.
+            check(unsafe {
+                mux_ghostty_terminal_set_default_cursor_style(self.terminal.as_ptr(), style)
             })
         }
 
@@ -2710,6 +2755,19 @@ mod theme_tests {
         assert!(!enabled);
         parse_paste_protection("clipboard-paste-protection =\n", &mut enabled);
         assert!(enabled);
+    }
+
+    #[test]
+    fn cursor_style_follows_the_last_setting() {
+        let mut style = CursorStyle::Block;
+        parse_cursor_style("cursor-style = bar\n", &mut style);
+        assert_eq!(style, CursorStyle::Bar);
+        parse_cursor_style("cursor-style = block_hollow\n", &mut style);
+        assert_eq!(style, CursorStyle::HollowBlock);
+        parse_cursor_style("cursor-style = wavy\n", &mut style);
+        assert_eq!(style, CursorStyle::HollowBlock);
+        parse_cursor_style("cursor-style = underline\ncursor-style =\n", &mut style);
+        assert_eq!(style, CursorStyle::Block);
     }
 
     #[test]
