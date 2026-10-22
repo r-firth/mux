@@ -4906,8 +4906,14 @@ impl MuxApp {
             .overflow_hidden()
             .bg(rgb(SURFACE))
             .when(opacity < 1.0, |surface| surface.opacity(opacity))
-            .when(self.pane_link_hovered(pane_id), |surface| {
-                surface.cursor_pointer()
+            // Text takes the I-beam, as in any Mac terminal; a link under
+            // ⌘ the pointing hand.
+            .map(|surface| {
+                if self.pane_link_hovered(pane_id) {
+                    surface.cursor_pointer()
+                } else {
+                    surface.cursor(gpui::CursorStyle::IBeam)
+                }
             })
             .on_any_mouse_down(move |event, window, cx| {
                 let _ = pointer_app.update(cx, |this, cx| {
@@ -4955,6 +4961,7 @@ impl MuxApp {
             )
             .children(self.render_quick_select_labels(pane_id, rect))
             .children(self.bell_flash_overlay(pane_id))
+            .children(self.render_thumb_grip(pane_id, body))
             .child(self.file_drop_target(pane_id, cx));
         surface.into_any_element()
     }

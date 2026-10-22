@@ -141,6 +141,25 @@ impl MuxApp {
         self.thumb_drag.take().is_some()
     }
 
+    /// Where the thumb can be taken, in the pane's body, with the arrow
+    /// over it rather than the text's I-beam.
+    pub(super) fn render_thumb_grip(
+        &self,
+        pane_id: PaneId,
+        body: layout::Rect,
+    ) -> Option<gpui::AnyElement> {
+        self.scroll_thumb_shown(pane_id).then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .left(px(body.width - THUMB_GRIP))
+                .w(px(THUMB_GRIP))
+                .h(px(body.height))
+                .cursor_default()
+                .into_any_element()
+        })
+    }
+
     fn scroll_thumb_shown(&self, pane_id: PaneId) -> bool {
         let Some(scroll) = self.panes.get(&pane_id).map(|pane| pane.frame.scroll) else {
             return false;
