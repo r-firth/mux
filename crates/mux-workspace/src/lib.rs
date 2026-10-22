@@ -166,6 +166,44 @@ impl PaneLayout {
         }
     }
 
+    /// Share the room out evenly: each split gives its sides as much as
+    /// the panes in a row along its axis on each side need, so three panes
+    /// side by side get a third each. Returns whether anything moved.
+    pub fn equalize(&mut self) -> bool {
+        let Self::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } = self
+        else {
+            return false;
+        };
+        let changed = first.equalize() | second.equalize();
+        let (before, after) = (first.span(*axis), second.span(*axis));
+        let thousandths = u16::try_from(before * 1_000 / (before + after))
+            .unwrap_or(Self::MAX_SPLIT_THOUSANDTHS)
+            .clamp(Self::MIN_SPLIT_THOUSANDTHS, Self::MAX_SPLIT_THOUSANDTHS);
+        let even = SplitRatio(thousandths);
+        let moved = *ratio != even;
+        *ratio = even;
+        changed || moved
+    }
+
+    /// How many panes lie in a row along `axis`.
+    fn span(&self, axis: SplitAxis) -> u32 {
+        match self {
+            Self::Split {
+                axis: split,
+                first,
+                second,
+                ..
+            } if *split == axis => first.span(axis) + second.span(axis),
+            // A pane, or panes split the other way, take one place.
+            _ => 1,
+        }
+    }
+
     /// Grow the target pane toward `direction` by moving the nearest matching
     /// split boundary. Ratios move in five-percent increments, like Zellij's
     /// default resize behavior, while keeping both children usable.
@@ -768,6 +806,8 @@ pub enum Action {
     RenamePane,
     /// Bring back the tab closed last.
     ReopenClosedTab,
+    /// Share the tab's room evenly between its panes.
+    EqualizePanes,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -815,6 +855,9 @@ pub enum WorkspaceCommand {
         pane: PaneId,
         name: String,
     },
+    /// Share the active tab's room evenly between its panes. See
+    /// [`PaneLayout::equalize`].
+    EqualizePanes,
 }
 
 /// How many tab inks there are to choose from.
@@ -1079,6 +1122,11 @@ impl Keymap {
                 Action::ResizePane(direction),
             );
         }
+        self.bind(
+            InputMode::Resize,
+            KeyChord::plain(Key::Character('=')),
+            Action::EqualizePanes,
+        );
     }
 
     fn bind_zellij_tab_mode(&mut self) {
@@ -1519,6 +1567,43 @@ mod tests {
             .map(|tab| tab.title.as_str())
             .collect::<Vec<_>>();
         assert_eq!(titles, vec!["1", "build", "3"]);
+    }
+
+    #[test]
+    fn equalizing_gives_each_pane_in_a_row_the_same_room() {
+        let pane = || PaneLayout::Leaf(PaneId::new());
+        let split = |axis, ratio, first, second| PaneLayout::Split {
+            axis,
+            ratio: SplitRatio::new(ratio).unwrap(),
+            first: Box::new(first),
+            second: Box::new(second),
+        };
+        // a | (b | (c over d)): three across, the last of them split down.
+        let mut layout = split(
+            SplitAxis::Horizontal,
+            700,
+            pane(),
+            split(
+                SplitAxis::Horizontal,
+                200,
+                pane(),
+                split(SplitAxis::Vertical, 800, pane(), pane()),
+            ),
+        );
+        assert!(layout.equalize());
+        let PaneLayout::Split { ratio, second, .. } = &layout else {
+            panic!("a split")
+        };
+        assert_eq!(ratio.thousandths(), 333);
+        let PaneLayout::Split { ratio, second, .. } = second.as_ref() else {
+            panic!("a split")
+        };
+        assert_eq!(ratio.thousandths(), 500);
+        let PaneLayout::Split { ratio, .. } = second.as_ref() else {
+            panic!("a split")
+        };
+        assert_eq!(ratio.thousandths(), 500);
+        assert!(!layout.equalize(), "already even");
     }
 
     #[test]

@@ -556,6 +556,14 @@ impl SessionRuntime {
                 let focused = tab.focused_pane;
                 tab.layout.resize_toward(focused, direction)?;
             }
+            WorkspaceCommand::EqualizePanes => {
+                self.model
+                    .write()
+                    .active_tab_mut()
+                    .ok_or(SessionMutationError::NoActiveTab)?
+                    .layout
+                    .equalize();
+            }
             WorkspaceCommand::ResizeSplit {
                 first,
                 second,

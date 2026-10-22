@@ -51,6 +51,7 @@ from an agent pane too. They are in the menu bar's Shell and Window menus.
 | `Cmd+]` / `Cmd+[` | Focus the next or previous pane, coming round at the ends |
 | `Cmd+Option+arrows` | Focus the pane in that direction |
 | `Cmd+Control+arrows` | Move the focused pane's edge in that direction |
+| `Cmd+Control+=` | Share the tab's room evenly between its panes |
 | `Cmd+M` | Minimize the window |
 | `Cmd+Control+F` | Enter or leave full screen |
 | `Cmd+H` / `Cmd+Option+H` | Hide Mux, or every other app |
@@ -78,7 +79,9 @@ a pane's head to name it with the mouse.
 ## Resize mode
 
 Enter with `Ctrl+p`, then `Ctrl+n`. Use `h/j/k/l` or the arrow keys to move
-the nearest boundary in that direction. Enter or Escape returns to Normal.
+the nearest boundary in that direction, and `=` to share the tab's room
+evenly between its panes, as `Cmd+Control+=` does from anywhere, so three
+panes side by side get a third each. Enter or Escape returns to Normal.
 This nested prefix preserves Zellij's resize muscle memory without stealing
 Normal-mode `Ctrl+n` from Vim and other terminal applications.
 

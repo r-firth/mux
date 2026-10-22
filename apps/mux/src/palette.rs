@@ -75,6 +75,7 @@ enum Command {
     SyncTab,
     RenamePane,
     ReopenTab,
+    EqualizePanes,
     MoveTabLeft,
     MoveTabRight,
     Clear,
@@ -282,6 +283,7 @@ impl MuxApp {
             Command::SyncTab => Action::ToggleSyncTab,
             Command::RenamePane => Action::RenamePane,
             Command::ReopenTab => Action::ReopenClosedTab,
+            Command::EqualizePanes => Action::EqualizePanes,
             Command::MoveTabLeft => Action::MoveTab(mux_workspace::Direction::Left),
             Command::MoveTabRight => Action::MoveTab(mux_workspace::Direction::Right),
             Command::TabInk => {
@@ -644,7 +646,7 @@ impl MuxApp {
     /// What mux can do, each with the keys that do it and other words it
     /// answers to. Some say what they will do to the pane or tab on screen.
     #[allow(clippy::too_many_lines)] // One entry per command.
-    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 26] {
+    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 27] {
         let zoomed = self.active_tab_zoomed();
         let agent_here = self
             .active_agent_pane()
@@ -674,6 +676,12 @@ impl MuxApp {
                 "maximise maximize fullscreen unzoom",
             ),
             (Command::Resize, "⌃p ⌃n", "resize panes", "size grow shrink"),
+            (
+                Command::EqualizePanes,
+                "⌘⌃=",
+                "even out panes",
+                "equalize balance same size split",
+            ),
             (
                 Command::NextPane,
                 "⌘]",

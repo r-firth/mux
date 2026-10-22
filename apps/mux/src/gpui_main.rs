@@ -217,6 +217,7 @@ gpui::actions!(
         ResizeMuxPaneRight,
         ResizeMuxPaneUp,
         ResizeMuxPaneDown,
+        EqualizeMuxPanes,
         HideMux,
         HideOtherApps,
         ShowAllApps,
@@ -2371,6 +2372,7 @@ impl MuxApp {
             Action::BreakPaneToTab => self.break_pane_to_tab(cx),
             Action::RenamePane => self.open_rename_pane(window, cx),
             Action::ReopenClosedTab => self.send_workspace(WorkspaceCommand::ReopenClosedTab),
+            Action::EqualizePanes => self.send_workspace(WorkspaceCommand::EqualizePanes),
             Action::ToggleSyncTab => {
                 self.toggle_sync_tab();
                 let said = if self.active_tab_synced() {
@@ -4454,7 +4456,7 @@ impl MuxApp {
                     ("x", "close"),
                 ],
                 InputMode::Session => &[("w", "switch"), ("d", "detach")],
-                InputMode::Resize => &[("hjkl", "resize"), ("enter", "done")],
+                InputMode::Resize => &[("hjkl", "resize"), ("=", "even"), ("enter", "done")],
             }
         };
         let key_color = if normal {
@@ -4685,6 +4687,9 @@ impl MuxApp {
         }))
         .on_action(cx.listener(|this, _: &ResizeMuxPaneDown, window, cx| {
             this.run_shortcut(Action::ResizePane(Direction::Down), window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &EqualizeMuxPanes, window, cx| {
+            this.run_shortcut(Action::EqualizePanes, window, cx);
         }))
     }
 
@@ -6285,6 +6290,7 @@ fn configure_application_menu(cx: &mut App) {
                 MenuItem::action("Split Right", SplitMuxRight),
                 MenuItem::action("Split Down", SplitMuxDown),
                 MenuItem::action("Zoom Pane", ZoomMuxPane),
+                MenuItem::action("Even Out Panes", EqualizeMuxPanes),
                 MenuItem::separator(),
                 MenuItem::action("Find…", OpenFind),
                 MenuItem::action("Use Selection for Find", FindSelection),
@@ -6352,6 +6358,7 @@ fn bind_mac_shortcuts(cx: &mut App) {
         KeyBinding::new("cmd-ctrl-right", ResizeMuxPaneRight, None),
         KeyBinding::new("cmd-ctrl-up", ResizeMuxPaneUp, None),
         KeyBinding::new("cmd-ctrl-down", ResizeMuxPaneDown, None),
+        KeyBinding::new("cmd-ctrl-=", EqualizeMuxPanes, None),
     ]);
 }
 
