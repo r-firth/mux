@@ -256,6 +256,38 @@ impl MuxApp {
         }
     }
 
+    /// Shift+Return: a command run before is typed at the prompt of the
+    /// pane with the keys, to run again or change first; any other row is
+    /// chosen as Return chooses it.
+    pub(super) fn paste_palette_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.as_ref() else {
+            return;
+        };
+        let rows = self.palette_rows(&palette.query.clone());
+        let Some(row) = rows.get(self.palette_choice(&rows)) else {
+            return;
+        };
+        let Destination::Ran(pane_id, prompt) = row.destination else {
+            self.go_to(row.destination, window, cx);
+            return;
+        };
+        let command = palette
+            .ran
+            .iter()
+            .find(|ran| ran.pane_id == pane_id && ran.row == prompt)
+            .map(|ran| ran.command.clone());
+        self.close_palette(window, cx);
+        if let Some(command) = command
+            && let Some(pane_id) = self.terminal_input_pane_id()
+            && let Some(pane) = self.panes.get(&pane_id)
+            && let Ok(bytes) = pane.with_engine(|engine| engine.encode_paste(&command))
+        {
+            self.backend.send(CommandMessage::Write { pane_id, bytes });
+            self.return_to_latest(pane_id, cx);
+        }
+        cx.notify();
+    }
+
     fn go_to(&mut self, destination: Destination, window: &mut Window, cx: &mut Context<Self>) {
         self.close_palette(window, cx);
         let active = self.active_tab_id();
@@ -885,7 +917,10 @@ impl MuxApp {
         let slab_width = PALETTE_WIDTH.min(width - 32.0);
 
         let list = Self::palette_list(palette, &rows, chosen, cx);
-        let query = palette_query(&palette.input);
+        let pastes = rows
+            .get(chosen)
+            .is_some_and(|row| matches!(row.destination, Destination::Ran(..)));
+        let query = palette_query(&palette.input, pastes);
         let top = height * 0.14;
         let slab = v_flex()
             .id("palette")
@@ -896,6 +931,9 @@ impl MuxApp {
             }))
             .on_action(cx.listener(|this, _: &ChoosePaletteRow, window, cx| {
                 this.choose_palette_row(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PastePaletteRow, window, cx| {
+                this.paste_palette_row(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ClosePalette, window, cx| {
                 this.close_palette(window, cx);
@@ -1064,7 +1102,7 @@ impl MuxApp {
 
 /// The query line: gofer's prompt over the marks, what is typed in line
 /// with the names, and the key that closes it.
-fn palette_query(input: &Entity<InputState>) -> impl IntoElement {
+fn palette_query(input: &Entity<InputState>, pastes: bool) -> impl IntoElement {
     h_flex()
         .relative()
         .flex_none()
@@ -1098,6 +1136,17 @@ fn palette_query(input: &Entity<InputState>) -> impl IntoElement {
                     .text_color(color(TEXT)),
             ),
         )
+        // A command run before can be typed at the prompt instead of gone
+        // back to.
+        .when(pastes, |row| {
+            row.gap(px(14.0)).child(
+                h_flex()
+                    .gap(px(4.0))
+                    .text_color(color(FAINT_TEXT))
+                    .child(kbd("⇧↩", color(MUTED_TEXT)))
+                    .child("type it here"),
+            )
+        })
         .child(kbd("esc", color(FAINT_TEXT)))
 }
 

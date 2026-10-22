@@ -427,12 +427,14 @@ the pane with the keys, or shows the Codex session already in the tab.
 The commands run in the focused pane are found the same way, newest first
 and each once, with `exit 2` beside one that failed and how long each ran
 (`exit 2 · 3m`): `cargo t` then Return
-scrolls back to where `cargo test` was run.
+scrolls back to where `cargo test` was run, and Shift+Return types it at
+the prompt instead, to run again or change first.
 
 | Keys | Action |
 | --- | --- |
 | Up / Down, `Ctrl+p` / `Ctrl+n`, Tab / Shift+Tab | Choose a row |
 | Return | Go there |
+| Shift+Return | Type a command run before at the prompt |
 | Escape or `Cmd+P` | Close the palette |
 
 ## Sessions sheet

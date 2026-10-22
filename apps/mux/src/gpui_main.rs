@@ -198,6 +198,7 @@ gpui::actions!(
         OpenMuxSettings,
         ReloadMuxConfig,
         OpenQuickSelect,
+        PastePaletteRow,
         PreviousAgentChoice,
         PreviousMuxTab,
         PreviousPaletteRow,
@@ -6613,6 +6614,32 @@ fn bind_reload_keys(cx: &mut App) {
     ]);
 }
 
+/// The keys of the palette's and find's fields.
+fn bind_field_keys(cx: &mut App) {
+    // The palette's field keeps typing; the keys that move through the
+    // list, choose from it and close it are the palette's.
+    let palette = Some("MuxPalette > Input");
+    cx.bind_keys([
+        KeyBinding::new("up", PreviousPaletteRow, palette),
+        KeyBinding::new("ctrl-p", PreviousPaletteRow, palette),
+        KeyBinding::new("shift-tab", PreviousPaletteRow, palette),
+        KeyBinding::new("down", NextPaletteRow, palette),
+        KeyBinding::new("ctrl-n", NextPaletteRow, palette),
+        KeyBinding::new("tab", NextPaletteRow, palette),
+        KeyBinding::new("enter", ChoosePaletteRow, palette),
+        KeyBinding::new("shift-enter", PastePaletteRow, palette),
+        KeyBinding::new("escape", ClosePalette, palette),
+    ]);
+    let find = Some("MuxFind > Input");
+    cx.bind_keys([
+        KeyBinding::new("enter", FindOlder, find),
+        KeyBinding::new("up", FindOlder, find),
+        KeyBinding::new("shift-enter", FindNewer, find),
+        KeyBinding::new("down", FindNewer, find),
+        KeyBinding::new("escape", CloseFind, find),
+    ]);
+}
+
 fn configure_application_actions(cx: &mut App) {
     bind_reload_keys(cx);
     cx.on_action(quit_mux);
@@ -6635,27 +6662,7 @@ fn configure_application_actions(cx: &mut App) {
         KeyBinding::new("cmd-shift-space", OpenQuickSelect, None),
     ]);
     bind_mac_shortcuts(cx);
-    // The palette's field keeps typing; the keys that move through the
-    // list, choose from it and close it are the palette's.
-    let palette = Some("MuxPalette > Input");
-    cx.bind_keys([
-        KeyBinding::new("up", PreviousPaletteRow, palette),
-        KeyBinding::new("ctrl-p", PreviousPaletteRow, palette),
-        KeyBinding::new("shift-tab", PreviousPaletteRow, palette),
-        KeyBinding::new("down", NextPaletteRow, palette),
-        KeyBinding::new("ctrl-n", NextPaletteRow, palette),
-        KeyBinding::new("tab", NextPaletteRow, palette),
-        KeyBinding::new("enter", ChoosePaletteRow, palette),
-        KeyBinding::new("escape", ClosePalette, palette),
-    ]);
-    let find = Some("MuxFind > Input");
-    cx.bind_keys([
-        KeyBinding::new("enter", FindOlder, find),
-        KeyBinding::new("up", FindOlder, find),
-        KeyBinding::new("shift-enter", FindNewer, find),
-        KeyBinding::new("down", FindNewer, find),
-        KeyBinding::new("escape", CloseFind, find),
-    ]);
+    bind_field_keys(cx);
     // Terminal panes own Tab; the component root must not turn it into focus traversal.
     cx.bind_keys([
         KeyBinding::new("tab", ForwardTerminalTab, Some("MuxTerminal")),
