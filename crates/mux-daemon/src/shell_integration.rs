@@ -15,10 +15,13 @@ use tracing::warn;
 
 const ZSHENV: &str = include_str!("shell_integration/zshenv");
 /// How the last command ended and where the prompt begins, keeping `$?` for
-/// a `PROMPT_COMMAND` of the user's that runs after it.
+/// a `PROMPT_COMMAND` of the user's that runs after it. The prompt's own
+/// mark goes into `PS1` too, as Ghostty's integration puts it, so a prompt
+/// bash draws again, as `Ctrl+l` does, is still marked.
 const BASH_PROMPT_COMMAND: &str = concat!(
     "__mux_status=$?; ",
     r"builtin printf '\033]133;D;%s\007\033]133;A\007' $__mux_status; ",
+    r#"[[ $PS1 == *'133;A'* ]] || PS1='\[\e]133;A\a\]'"$PS1"; "#,
     "__mux_keep_status() { return $1; }; __mux_keep_status $__mux_status",
 );
 
