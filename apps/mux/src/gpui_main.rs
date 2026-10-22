@@ -2106,6 +2106,11 @@ impl MuxApp {
             cx.notify();
             return;
         }
+        if keystroke.modifiers.platform && keystroke.modifiers.shift && keystroke.key == "o" {
+            self.select_last_output(cx);
+            cx.notify();
+            return;
+        }
         if self.exited_pane_key(keystroke, held) || self.scrollback_key_down(keystroke, cx) {
             return;
         }

@@ -1,11 +1,12 @@
 //! Shift-click extends a selection to where you click, as it does in every
 //! Mac text view: from the selection's far end, so clicking past its end
 //! grows it forward and clicking before its start grows it back. Cmd+A
-//! selects everything a pane holds, its history too.
+//! selects everything a pane holds, its history too, and Cmd+Shift+O what
+//! the last command printed.
 
 use mux_terminal::{RenderFrame, TerminalInteraction as _, TerminalPoint, TerminalSelection};
 
-use super::{MuxApp, PaneId, layout};
+use super::{Context, MuxApp, PaneId, TerminalViewportScroll, layout};
 
 impl MuxApp {
     /// Select all of the pane with the keys, history and screen, ready for
@@ -31,6 +32,66 @@ impl MuxApp {
             let _ = pane.publish_frame();
             self.selected_pane = Some(pane_id);
         }
+    }
+
+    /// Select what the last command printed, between the prompt it was run
+    /// from and the next, as iTerm's Cmd+Shift+A does (that is the agent here), and bring its start
+    /// into view. A command still running gives what it has printed so far.
+    pub(super) fn select_last_output(&mut self, cx: &mut Context<Self>) {
+        let Some(pane_id) = self.terminal_input_pane_id() else {
+            return;
+        };
+        let Some(pane) = self.panes.get(&pane_id) else {
+            return;
+        };
+        let prompts = pane
+            .with_engine(|engine| engine.prompt_rows())
+            .unwrap_or_default();
+        if prompts.is_empty() {
+            self.say_in_strip("this shell marks no prompts to find output by", true, cx);
+            return;
+        }
+        let text = pane
+            .with_engine(|engine| engine.screen_text())
+            .unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        let Some((first, last)) = last_output_rows(&prompts, &lines) else {
+            self.say_in_strip("the last command printed nothing", false, cx);
+            return;
+        };
+        if self.selected_pane != Some(pane_id)
+            && let Some(previous) = self.selected_pane.take()
+            && let Some(pane) = self.panes.get_mut(&previous)
+        {
+            let _ = pane.with_engine(|engine| engine.set_selection(None));
+            let _ = pane.publish_frame();
+        }
+        let Some(pane) = self.panes.get_mut(&pane_id) else {
+            return;
+        };
+        if pane
+            .with_engine(|engine| engine.select_rows(first, last))
+            .is_err()
+        {
+            return;
+        }
+        let _ = pane.publish_frame();
+        self.selected_pane = Some(pane_id);
+        let scroll = pane.frame.scroll;
+        let top = usize::try_from(scroll.offset).unwrap_or(usize::MAX);
+        let shown = usize::try_from(scroll.len).unwrap_or(usize::MAX);
+        if first < top || first >= top.saturating_add(shown) {
+            let delta =
+                i64::try_from(first).unwrap_or(i64::MAX) - i64::try_from(top).unwrap_or(i64::MAX);
+            self.scroll_viewport(pane_id, TerminalViewportScroll::Delta(delta));
+        }
+        let count = last - first + 1;
+        let lines = if count == 1 {
+            "1 line".to_owned()
+        } else {
+            format!("{count} lines")
+        };
+        self.say_in_strip(format!("{lines} of output selected · ⌘C copies"), false, cx);
     }
 
     /// Extend the pane's selection to a Shift-click, if it has one on
@@ -95,6 +156,31 @@ fn extended_selection(frame: &RenderFrame, click: TerminalPoint) -> Option<Termi
     })
 }
 
+/// The rows the last command printed: after the prompt it was run from, up
+/// to the next prompt, or to the end while it runs. Blank rows at the end
+/// are left out. `None` when it printed nothing.
+fn last_output_rows(prompts: &[usize], lines: &[&str]) -> Option<(usize, usize)> {
+    let &newest = prompts.last()?;
+    let blank_after = |row: usize| {
+        lines
+            .iter()
+            .skip(row + 1)
+            .all(|line| line.trim().is_empty())
+    };
+    // At a prompt, the last command is the one run from the prompt before.
+    let (from, to) = if blank_after(newest) {
+        let before = *prompts.iter().rev().nth(1)?;
+        (before, newest)
+    } else {
+        (newest, lines.len())
+    };
+    let first = from + 1;
+    let last = (first..to)
+        .rev()
+        .find(|&row| lines.get(row).is_some_and(|line| !line.trim().is_empty()))?;
+    Some((first, last))
+}
+
 #[cfg(test)]
 mod tests {
     use mux_terminal::{
@@ -149,5 +235,18 @@ mod tests {
     #[test]
     fn nothing_selected_has_nothing_to_extend() {
         assert_eq!(extended_selection(&frame(0..0), at(3, 3)), None);
+    }
+
+    #[test]
+    fn the_last_output_lies_between_the_last_two_prompts() {
+        let lines = ["$ ls", "a", "b", "", "$ make", "built", "", "", "$ "];
+        assert_eq!(super::last_output_rows(&[0, 4, 8], &lines), Some((5, 5)));
+        let blank_tail = ["$ ls", "a", "b", "", "$ "];
+        assert_eq!(super::last_output_rows(&[0, 4], &blank_tail), Some((1, 2)));
+        let running = ["$ ls", "a", "$ tail -f log", "one", "two"];
+        assert_eq!(super::last_output_rows(&[0, 2], &running), Some((3, 4)));
+        let quiet = ["$ true", "$ "];
+        assert_eq!(super::last_output_rows(&[0, 1], &quiet), None);
+        assert_eq!(super::last_output_rows(&[1], &["", "$ "]), None);
     }
 }

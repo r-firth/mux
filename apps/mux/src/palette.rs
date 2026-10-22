@@ -83,6 +83,7 @@ enum Command {
     BiggerText,
     SmallerText,
     ActualSize,
+    SelectOutput,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -300,6 +301,10 @@ impl MuxApp {
             }
             Command::Clear => {
                 self.clear_pane(cx);
+                return;
+            }
+            Command::SelectOutput => {
+                self.select_last_output(cx);
                 return;
             }
             Command::NextPane => {
@@ -646,7 +651,7 @@ impl MuxApp {
     /// What mux can do, each with the keys that do it and other words it
     /// answers to. Some say what they will do to the pane or tab on screen.
     #[allow(clippy::too_many_lines)] // One entry per command.
-    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 27] {
+    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 28] {
         let zoomed = self.active_tab_zoomed();
         let agent_here = self
             .active_agent_pane()
@@ -746,6 +751,12 @@ impl MuxApp {
                 "⌘k",
                 "clear this pane",
                 "clean wipe reset cls history scrollback",
+            ),
+            (
+                Command::SelectOutput,
+                "⌘⇧o",
+                "select the last command's output",
+                "copy output result printed prompt",
             ),
             (
                 Command::QuickSelect,

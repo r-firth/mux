@@ -844,7 +844,7 @@ mod linked {
             rectangular: bool,
         ) -> i32;
         fn mux_ghostty_terminal_clear_selection(terminal: *mut c_void) -> i32;
-        fn mux_ghostty_terminal_select_all(terminal: *mut c_void) -> i32;
+        fn mux_ghostty_terminal_select_rows(terminal: *mut c_void, first: u32, last: u32) -> i32;
         fn mux_ghostty_selection_gesture_new(out_gesture: *mut *mut c_void) -> i32;
         fn mux_ghostty_selection_gesture_free(gesture: *mut c_void, terminal: *mut c_void);
         fn mux_ghostty_selection_gesture_reset(gesture: *mut c_void, terminal: *mut c_void) -> i32;
@@ -1049,6 +1049,12 @@ mod linked {
         /// Select everything the terminal holds, its history and the screen,
         /// as Cmd+A does in a Mac terminal.
         pub fn select_all(&mut self) -> Result<(), TerminalError> {
+            self.select_rows(0, usize::MAX)
+        }
+
+        /// Select whole rows, `first` to `last`, counted from the top of the
+        /// history as `screen_text`'s lines are.
+        pub fn select_rows(&mut self, first: usize, last: usize) -> Result<(), TerminalError> {
             // SAFETY: both handles are exclusively borrowed; resetting first
             // keeps a later click from continuing an earlier click sequence.
             let reset = unsafe {
@@ -1058,8 +1064,11 @@ mod linked {
                 )
             };
             check(reset).map_err(|error| TerminalError::Engine(error.to_string()))?;
+            let row = |row: usize| u32::try_from(row).unwrap_or(u32::MAX);
             // SAFETY: the terminal is exclusively borrowed for this call.
-            let result = unsafe { mux_ghostty_terminal_select_all(self.terminal.as_ptr()) };
+            let result = unsafe {
+                mux_ghostty_terminal_select_rows(self.terminal.as_ptr(), row(first), row(last))
+            };
             check(result).map_err(|error| TerminalError::Engine(error.to_string()))
         }
 

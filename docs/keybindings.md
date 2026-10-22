@@ -41,6 +41,7 @@ from an agent pane too. They are in the menu bar's Shell and Window menus.
 | `Cmd+Shift+Return` | Toggle focused-pane zoom |
 | `Cmd+W` | Close the focused pane, or its tab when it is the tab's only pane |
 | `Cmd+A` | Select everything in the focused pane, its history too |
+| `Cmd+Shift+O` | Select what the last command printed, or what a running one has printed so far (needs the shell's prompt marks; see Scrollback) |
 | `Cmd+Left` / `Cmd+Right` | Go to the start or end of the line being typed (sends `Ctrl+a` / `Ctrl+e`, as Ghostty does) |
 | `Cmd+Backspace` | Delete back to the start of the line (sends `Ctrl+u`) |
 | `Cmd+K` | Clear the focused pane: its screen and history at the prompt, only its history with a program in front |

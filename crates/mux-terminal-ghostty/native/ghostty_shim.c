@@ -584,9 +584,11 @@ int32_t mux_ghostty_terminal_set_selection(
       terminal, GHOSTTY_TERMINAL_OPT_SELECTION, &selection);
 }
 
-// Selects the whole screen, history included, from its first cell to the
-// last cell of its last row.
-int32_t mux_ghostty_terminal_select_all(mux_ghostty_terminal_t raw_terminal) {
+// Selects whole rows of the screen, history included, from the first cell
+// of `first` to the last cell of `last`, counted from the top of the history.
+// Rows past the end are taken as the last row.
+int32_t mux_ghostty_terminal_select_rows(
+    mux_ghostty_terminal_t raw_terminal, uint32_t first, uint32_t last) {
   GhosttyTerminal terminal = (GhosttyTerminal)raw_terminal;
   uint16_t cols = 0;
   GhosttyResult result =
@@ -596,30 +598,39 @@ int32_t mux_ghostty_terminal_select_all(mux_ghostty_terminal_t raw_terminal) {
   result = ghostty_terminal_get(
       terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &scrollbar);
   if (result != GHOSTTY_SUCCESS) return (int32_t)result;
-  if (cols == 0 || scrollbar.total == 0 || scrollbar.total > UINT32_MAX) {
+  if (cols == 0 || scrollbar.total == 0 || scrollbar.total > UINT32_MAX ||
+      first > last) {
     return (int32_t)GHOSTTY_INVALID_VALUE;
   }
+  uint32_t end = (uint32_t)(scrollbar.total - 1);
+  if (last > end) last = end;
+  if (first > last) first = last;
   GhosttyPoint first_point = {
       .tag = GHOSTTY_POINT_TAG_SCREEN,
-      .value = {.coordinate = {.x = 0, .y = 0}},
+      .value = {.coordinate = {.x = 0, .y = first}},
   };
   GhosttyPoint last_point = {
       .tag = GHOSTTY_POINT_TAG_SCREEN,
-      .value = {.coordinate = {.x = (uint16_t)(cols - 1),
-                               .y = (uint32_t)(scrollbar.total - 1)}},
+      .value = {.coordinate = {.x = (uint16_t)(cols - 1), .y = last}},
   };
-  GhosttyGridRef first = GHOSTTY_INIT_SIZED(GhosttyGridRef);
-  GhosttyGridRef last = GHOSTTY_INIT_SIZED(GhosttyGridRef);
-  result = ghostty_terminal_grid_ref(terminal, first_point, &first);
+  GhosttyGridRef first_ref = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+  GhosttyGridRef last_ref = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+  result = ghostty_terminal_grid_ref(terminal, first_point, &first_ref);
   if (result != GHOSTTY_SUCCESS) return (int32_t)result;
-  result = ghostty_terminal_grid_ref(terminal, last_point, &last);
+  result = ghostty_terminal_grid_ref(terminal, last_point, &last_ref);
   if (result != GHOSTTY_SUCCESS) return (int32_t)result;
   GhosttySelection selection = GHOSTTY_INIT_SIZED(GhosttySelection);
-  selection.start = first;
-  selection.end = last;
+  selection.start = first_ref;
+  selection.end = last_ref;
   selection.rectangle = false;
   return (int32_t)ghostty_terminal_set(
       terminal, GHOSTTY_TERMINAL_OPT_SELECTION, &selection);
+}
+
+// Selects the whole screen, history included, from its first cell to the
+// last cell of its last row.
+int32_t mux_ghostty_terminal_select_all(mux_ghostty_terminal_t raw_terminal) {
+  return mux_ghostty_terminal_select_rows(raw_terminal, 0, UINT32_MAX);
 }
 
 int32_t mux_ghostty_terminal_clear_selection(
