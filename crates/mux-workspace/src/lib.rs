@@ -96,6 +96,23 @@ impl PaneLayout {
     const MAX_SPLIT_THOUSANDTHS: u16 = 900;
     const RESIZE_STEP_THOUSANDTHS: u16 = 50;
 
+    /// Put `first` where `second` is and `second` where `first` is.
+    pub fn swap(&mut self, first: PaneId, second: PaneId) {
+        match self {
+            Self::Leaf(pane) if *pane == first => *pane = second,
+            Self::Leaf(pane) if *pane == second => *pane = first,
+            Self::Leaf(_) => {}
+            Self::Split {
+                first: before,
+                second: after,
+                ..
+            } => {
+                before.swap(first, second);
+                after.swap(first, second);
+            }
+        }
+    }
+
     pub fn pane_ids(&self, output: &mut Vec<PaneId>) {
         match self {
             Self::Leaf(pane_id) => output.push(*pane_id),
@@ -481,6 +498,20 @@ impl Tab {
         };
     }
 
+    /// Trade places with the pane next to the focused one toward
+    /// `direction`; the focused pane keeps the keys in its new place.
+    /// Returns whether there was one to trade with.
+    pub fn swap_with_neighbor(&mut self, direction: Direction) -> Result<bool, WorkspaceError> {
+        let focused = self.focused_pane;
+        let mut probe = self.clone();
+        if !probe.focus_neighbor(direction)? || probe.focused_pane == focused {
+            return Ok(false);
+        }
+        let other = probe.focused_pane;
+        self.layout.swap(focused, other);
+        Ok(true)
+    }
+
     pub fn focus_neighbor(&mut self, direction: Direction) -> Result<bool, WorkspaceError> {
         let mut regions = Vec::new();
         self.layout.regions(
@@ -808,6 +839,8 @@ pub enum Action {
     ReopenClosedTab,
     /// Share the tab's room evenly between its panes.
     EqualizePanes,
+    /// Trade places with the neighbouring pane that way.
+    SwapPane(Direction),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -858,6 +891,9 @@ pub enum WorkspaceCommand {
     /// Share the active tab's room evenly between its panes. See
     /// [`PaneLayout::equalize`].
     EqualizePanes,
+    /// Trade places with a neighbouring pane. See
+    /// [`Tab::swap_with_neighbor`].
+    SwapPane(Direction),
 }
 
 /// How many tab inks there are to choose from.
@@ -1053,6 +1089,17 @@ impl Keymap {
                 KeyChord::plain(arrow),
                 Action::FocusPane(direction),
             );
+            // Shift moves the pane itself, as it moves a tab in Tab mode.
+            for key in [Key::Character(key), arrow] {
+                self.bind(
+                    InputMode::Pane,
+                    KeyChord {
+                        key,
+                        modifiers: Modifiers::SHIFT,
+                    },
+                    Action::SwapPane(direction),
+                );
+            }
         }
         self.bind(
             InputMode::Pane,
@@ -1567,6 +1614,18 @@ mod tests {
             .map(|tab| tab.title.as_str())
             .collect::<Vec<_>>();
         assert_eq!(titles, vec!["1", "build", "3"]);
+    }
+
+    #[test]
+    fn a_pane_trades_places_with_its_neighbour() {
+        let (left, right) = (PaneId::new(), PaneId::new());
+        let mut tab = Tab::with_panes("t", &[left, right]).expect("tab");
+        assert!(tab.swap_with_neighbor(Direction::Right).expect("swap"));
+        let mut order = Vec::new();
+        tab.layout.pane_ids(&mut order);
+        assert_eq!(order, [right, left]);
+        assert_eq!(tab.focused_pane, left, "the moved pane keeps the keys");
+        assert!(!tab.swap_with_neighbor(Direction::Right).expect("edge"));
     }
 
     #[test]

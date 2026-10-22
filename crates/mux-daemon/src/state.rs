@@ -559,6 +559,13 @@ impl SessionRuntime {
                 let focused = tab.focused_pane;
                 tab.layout.resize_toward(focused, direction)?;
             }
+            WorkspaceCommand::SwapPane(direction) => {
+                self.model
+                    .write()
+                    .active_tab_mut()
+                    .ok_or(SessionMutationError::NoActiveTab)?
+                    .swap_with_neighbor(direction)?;
+            }
             WorkspaceCommand::EqualizePanes => {
                 self.model
                     .write()

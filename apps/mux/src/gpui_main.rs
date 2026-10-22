@@ -2399,6 +2399,9 @@ impl MuxApp {
             Action::RenamePane => self.open_rename_pane(window, cx),
             Action::ReopenClosedTab => self.send_workspace(WorkspaceCommand::ReopenClosedTab),
             Action::EqualizePanes => self.send_workspace(WorkspaceCommand::EqualizePanes),
+            Action::SwapPane(direction) => {
+                self.send_workspace(WorkspaceCommand::SwapPane(direction));
+            }
             Action::ToggleSyncTab => {
                 self.toggle_sync_tab();
                 let said = if self.active_tab_synced() {
@@ -4483,6 +4486,7 @@ impl MuxApp {
                 ],
                 InputMode::Pane => &[
                     ("hjkl", "focus"),
+                    ("⇧hjkl", "move"),
                     ("r", "right"),
                     ("d", "down"),
                     ("x", "close"),

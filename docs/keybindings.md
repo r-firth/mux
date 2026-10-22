@@ -61,6 +61,7 @@ from an agent pane too. They are in the menu bar's Shell and Window menus.
 | Keys | Action |
 | --- | --- |
 | `h/j/k/l` or arrows | Focus a neighboring pane |
+| `Shift+h/j/k/l` or Shift+arrows | Trade places with the neighboring pane that way; the pane keeps the keys |
 | `n` | Create a pane and return to Normal |
 | `d` | Split downward and return to Normal |
 | `r` | Split to the right and return to Normal |
