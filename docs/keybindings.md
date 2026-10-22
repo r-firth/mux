@@ -67,6 +67,11 @@ Ghostty's defaults on a Mac; `unbind` one, such as
 Ghostty's `Option+Left` and `Option+Right` for a word are Zellij's pane keys
 in Mux; a `keybind = alt+left=esc:b` line takes them back for the shell.
 
+A new split or tab starts in the focused pane's directory, unless your
+Ghostty config sets `window-inherit-working-directory = false` (or
+`split-inherit-working-directory` / `tab-inherit-working-directory` for one
+of them): then it starts where Mux was started.
+
 ## Mac shortcuts
 
 The keys a Mac terminal answers to work beside Zellij's, from any mode and

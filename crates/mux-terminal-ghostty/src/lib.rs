@@ -425,6 +425,48 @@ fn parse_focus_follows_mouse(contents: &str, follows: &mut bool) {
     }
 }
 
+/// Whether a new split, or a new tab, starts where the focused pane is:
+/// `split-inherit-working-directory` or `tab-inherit-working-directory`
+/// from the user's Ghostty config, else `window-inherit-working-directory`,
+/// on by default as in Ghostty.
+#[must_use]
+pub fn user_inherit_working_directory(split: bool) -> bool {
+    let mut inherit = Inherit::default();
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_inherit_working_directory(&contents, &mut inherit);
+            }
+        }
+    }
+    let own = if split { inherit.split } else { inherit.tab };
+    own.or(inherit.window).unwrap_or(true)
+}
+
+#[derive(Default)]
+struct Inherit {
+    window: Option<bool>,
+    tab: Option<bool>,
+    split: Option<bool>,
+}
+
+fn parse_inherit_working_directory(contents: &str, inherit: &mut Inherit) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        let slot = match key.as_str() {
+            "window-inherit-working-directory" => &mut inherit.window,
+            "tab-inherit-working-directory" => &mut inherit.tab,
+            "split-inherit-working-directory" => &mut inherit.split,
+            _ => continue,
+        };
+        match value.as_str() {
+            "" => *slot = None,
+            "true" => *slot = Some(true),
+            "false" => *slot = Some(false),
+            _ => {}
+        }
+    }
+}
+
 /// Whether programs' desktop notifications (OSC 9, OSC 777) are heeded:
 /// `desktop-notifications` from the user's Ghostty config, on by default
 /// as in Ghostty.
@@ -3877,6 +3919,20 @@ mod theme_tests {
         assert_eq!(title.as_deref(), Some("Work"));
         parse_window_title("title =\n", &mut title);
         assert_eq!(title, None);
+    }
+
+    #[test]
+    fn new_panes_inherit_the_directory_unless_told_not_to() {
+        let mut inherit = Inherit::default();
+        parse_inherit_working_directory(
+            "window-inherit-working-directory = false\nsplit-inherit-working-directory = true\n",
+            &mut inherit,
+        );
+        assert_eq!(inherit.window, Some(false));
+        assert_eq!(inherit.split, Some(true));
+        assert_eq!(inherit.tab, None);
+        parse_inherit_working_directory("window-inherit-working-directory =\n", &mut inherit);
+        assert_eq!(inherit.window, None);
     }
 
     #[test]

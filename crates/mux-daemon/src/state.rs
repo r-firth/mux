@@ -547,7 +547,7 @@ impl SessionRuntime {
             WorkspaceCommand::SplitPane(axis) => {
                 let session_id = self.model.read().id;
                 let pane_id = PaneId::new();
-                let pane = self.spawn_pane_in_focused_cwd(session_id, pane_id, replay_bytes)?;
+                let pane = self.spawn_new_pane(session_id, pane_id, replay_bytes, true)?;
                 let result = self
                     .model
                     .write()
@@ -647,7 +647,7 @@ impl SessionRuntime {
             WorkspaceCommand::NewTab => {
                 let session_id = self.model.read().id;
                 let pane_id = PaneId::new();
-                let pane = self.spawn_pane_in_focused_cwd(session_id, pane_id, replay_bytes)?;
+                let pane = self.spawn_new_pane(session_id, pane_id, replay_bytes, false)?;
                 if let Err(error) = self.model.write().add_tab(pane_id) {
                     let _ = pane.kill();
                     return Err(error.into());
@@ -690,6 +690,29 @@ impl SessionRuntime {
             WorkspaceCommand::SetTabInk(ink) => self.model.write().set_active_tab_ink(ink)?,
         }
         Ok(self.attachment()?)
+    }
+
+    /// A new split's or tab's shell: where the focused pane is, unless the
+    /// user's Ghostty config says new ones start afresh.
+    fn spawn_new_pane(
+        &self,
+        session_id: SessionId,
+        pane_id: PaneId,
+        replay_bytes: usize,
+        split: bool,
+    ) -> Result<Arc<PaneRuntime>, crate::pane::PaneError> {
+        if inherit_working_directory(split) {
+            return self.spawn_pane_in_focused_cwd(session_id, pane_id, replay_bytes);
+        }
+        PaneRuntime::spawn(
+            session_id,
+            pane_id,
+            &self.spawn.cwd,
+            &self.spawn.command,
+            self.spawn.size,
+            replay_bytes,
+            self.events.clone(),
+        )
     }
 
     fn spawn_pane_in_focused_cwd(
@@ -806,6 +829,19 @@ fn agent_error(error: &mux_acp::AgentError) -> RemoteError {
     RemoteError::new(code, error.to_string())
 }
 
+/// Whether a new split (or tab) starts where the focused pane is, as the
+/// user's Ghostty config has it.
+fn inherit_working_directory(split: bool) -> bool {
+    #[cfg(feature = "ghostty")]
+    {
+        mux_terminal_ghostty::user_inherit_working_directory(split)
+    }
+    #[cfg(not(feature = "ghostty"))]
+    {
+        let _ = split;
+        true
+    }
+}
 #[cfg(all(test, unix))]
 mod tests {
     use std::time::{Duration, Instant};
