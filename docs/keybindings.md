@@ -345,7 +345,8 @@ keys stay put while output moves underneath them.
 A right click on a terminal pane opens a menu by the pointer: copy, paste
 and select all, split right or down, zoom, even out the panes, name the
 pane or move it to a tab of its own, clear, find and close, each beside its
-keys. On a link it starts with opening or copying the link (for
+keys. "reset terminal" puts the pane back as it started, for a program that
+left it garbled or stuck in a mode (also in `Cmd+P`). On a link it starts with opening or copying the link (for
 a file, showing it in Finder or copying its path). On a command, or on
 what it printed, it offers to copy the command (without the prompt), all
 of its output, or both as a transcript (`$ make` and what it printed, to
