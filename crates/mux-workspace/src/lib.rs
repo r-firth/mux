@@ -3,7 +3,7 @@
 //! This crate intentionally knows nothing about PTYs, rendering, IPC, or
 //! platform keyboard events.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::str::FromStr;
 
@@ -96,6 +96,23 @@ impl PaneLayout {
     const MAX_SPLIT_THOUSANDTHS: u16 = 900;
     const RESIZE_STEP_THOUSANDTHS: u16 = 50;
 
+    /// Put `first` where `second` is and `second` where `first` is.
+    pub fn swap(&mut self, first: PaneId, second: PaneId) {
+        match self {
+            Self::Leaf(pane) if *pane == first => *pane = second,
+            Self::Leaf(pane) if *pane == second => *pane = first,
+            Self::Leaf(_) => {}
+            Self::Split {
+                first: before,
+                second: after,
+                ..
+            } => {
+                before.swap(first, second);
+                after.swap(first, second);
+            }
+        }
+    }
+
     pub fn pane_ids(&self, output: &mut Vec<PaneId>) {
         match self {
             Self::Leaf(pane_id) => output.push(*pane_id),
@@ -143,6 +160,69 @@ impl PaneLayout {
         }
     }
 
+    /// Split `target` and put `new_pane` on its `side`: left or above it
+    /// as well as right or below, where [`Self::split`] always puts it after.
+    pub fn split_beside(
+        &mut self,
+        target: PaneId,
+        new_pane: PaneId,
+        side: Direction,
+    ) -> Result<(), WorkspaceError> {
+        let axis = match side {
+            Direction::Left | Direction::Right => SplitAxis::Horizontal,
+            Direction::Up | Direction::Down => SplitAxis::Vertical,
+        };
+        self.split(target, new_pane, axis)?;
+        if matches!(side, Direction::Left | Direction::Up) {
+            self.swap(target, new_pane);
+        }
+        Ok(())
+    }
+
+    /// The pane that takes `target`'s room when it closes: of the panes
+    /// beside it in its split, the one nearest it.
+    #[must_use]
+    pub fn heir(&self, target: PaneId) -> Option<PaneId> {
+        let Self::Split { first, second, .. } = self else {
+            return None;
+        };
+        let nearest = |side: &Self, last: bool| {
+            let mut panes = Vec::new();
+            side.pane_ids(&mut panes);
+            if last { panes.last() } else { panes.first() }.copied()
+        };
+        match (first.as_ref(), second.as_ref()) {
+            (Self::Leaf(pane), _) if *pane == target => nearest(second, false),
+            (_, Self::Leaf(pane)) if *pane == target => nearest(first, true),
+            _ if first.contains(target) => first.heir(target),
+            _ => second.heir(target),
+        }
+    }
+
+    /// Which side of its heir (see [`Self::heir`]) `target` is on.
+    #[must_use]
+    pub fn side_of_heir(&self, target: PaneId) -> Option<Direction> {
+        let Self::Split {
+            axis,
+            first,
+            second,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let (before, after) = match axis {
+            SplitAxis::Horizontal => (Direction::Left, Direction::Right),
+            SplitAxis::Vertical => (Direction::Up, Direction::Down),
+        };
+        match (first.as_ref(), second.as_ref()) {
+            (Self::Leaf(pane), _) if *pane == target => Some(before),
+            (_, Self::Leaf(pane)) if *pane == target => Some(after),
+            _ if first.contains(target) => first.side_of_heir(target),
+            _ => second.side_of_heir(target),
+        }
+    }
+
     pub fn remove(&mut self, target: PaneId) -> Result<(), WorkspaceError> {
         match self {
             Self::Leaf(_) => Err(WorkspaceError::CannotCloseLastPane),
@@ -163,6 +243,44 @@ impl PaneLayout {
                 }
             }
             Self::Split { .. } => Err(WorkspaceError::UnknownPane(target)),
+        }
+    }
+
+    /// Share the room out evenly: each split gives its sides as much as
+    /// the panes in a row along its axis on each side need, so three panes
+    /// side by side get a third each. Returns whether anything moved.
+    pub fn equalize(&mut self) -> bool {
+        let Self::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } = self
+        else {
+            return false;
+        };
+        let changed = first.equalize() | second.equalize();
+        let (before, after) = (first.span(*axis), second.span(*axis));
+        let thousandths = u16::try_from(before * 1_000 / (before + after))
+            .unwrap_or(Self::MAX_SPLIT_THOUSANDTHS)
+            .clamp(Self::MIN_SPLIT_THOUSANDTHS, Self::MAX_SPLIT_THOUSANDTHS);
+        let even = SplitRatio(thousandths);
+        let moved = *ratio != even;
+        *ratio = even;
+        changed || moved
+    }
+
+    /// How many panes lie in a row along `axis`.
+    fn span(&self, axis: SplitAxis) -> u32 {
+        match self {
+            Self::Split {
+                axis: split,
+                first,
+                second,
+                ..
+            } if *split == axis => first.span(axis) + second.span(axis),
+            // A pane, or panes split the other way, take one place.
+            _ => 1,
         }
     }
 
@@ -261,6 +379,26 @@ impl PaneLayout {
         }
     }
 
+    /// The same layout with each pane swapped for the one `new_id` gives,
+    /// as when a closed tab comes back with fresh shells.
+    #[must_use]
+    pub fn renamed(&self, new_id: &impl Fn(PaneId) -> PaneId) -> Self {
+        match self {
+            Self::Leaf(pane) => Self::Leaf(new_id(*pane)),
+            Self::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => Self::Split {
+                axis: *axis,
+                ratio: *ratio,
+                first: Box::new(first.renamed(new_id)),
+                second: Box::new(second.renamed(new_id)),
+            },
+        }
+    }
+
     /// The first pane in reading order: the top-left one.
     #[must_use]
     pub fn first_pane(&self) -> PaneId {
@@ -347,6 +485,11 @@ pub struct Tab {
     pub layout: PaneLayout,
     pub focused_pane: PaneId,
     pub zoomed_pane: Option<PaneId>,
+    /// The tab's colour, as a place in the app's set of inks. A tab is given
+    /// one when it is made, so it keeps its colour when tabs move; tabs from
+    /// before this was kept have none and take the colour of their place.
+    #[serde(default)]
+    pub ink: Option<u8>,
 }
 
 impl Tab {
@@ -376,12 +519,14 @@ impl Tab {
             layout,
             focused_pane: first,
             zoomed_pane: None,
+            ink: None,
         })
     }
 
     pub fn focus(&mut self, pane_id: PaneId) -> Result<(), WorkspaceError> {
         if self.layout.contains(pane_id) {
             self.focused_pane = pane_id;
+            self.unzoom_for_focus();
             Ok(())
         } else {
             Err(WorkspaceError::UnknownPane(pane_id))
@@ -401,10 +546,12 @@ impl Tab {
 
     pub fn close_focused(&mut self) -> Result<PaneId, WorkspaceError> {
         let removed = self.focused_pane;
+        let heir = self.layout.heir(removed);
         self.layout.remove(removed)?;
         let mut remaining = Vec::new();
         self.layout.pane_ids(&mut remaining);
-        self.focused_pane = remaining[0];
+        // The keys go to the pane that takes its room, as in Ghostty.
+        self.focused_pane = heir.unwrap_or(remaining[0]);
         self.zoomed_pane = None;
         Ok(removed)
     }
@@ -415,6 +562,41 @@ impl Tab {
         } else {
             Some(self.focused_pane)
         };
+    }
+
+    /// Take `pane` from where it is and put it on `side` of `target`,
+    /// sharing `target`'s room, with the keys.
+    pub fn move_pane_beside(
+        &mut self,
+        pane: PaneId,
+        target: PaneId,
+        side: Direction,
+    ) -> Result<(), WorkspaceError> {
+        if pane == target {
+            return Ok(());
+        }
+        if !self.layout.contains(target) {
+            return Err(WorkspaceError::UnknownPane(target));
+        }
+        self.layout.remove(pane)?;
+        self.layout.split_beside(target, pane, side)?;
+        self.focused_pane = pane;
+        self.zoomed_pane = None;
+        Ok(())
+    }
+
+    /// Trade places with the pane next to the focused one toward
+    /// `direction`; the focused pane keeps the keys in its new place.
+    /// Returns whether there was one to trade with.
+    pub fn swap_with_neighbor(&mut self, direction: Direction) -> Result<bool, WorkspaceError> {
+        let focused = self.focused_pane;
+        let mut probe = self.clone();
+        if !probe.focus_neighbor(direction)? || probe.focused_pane == focused {
+            return Ok(false);
+        }
+        let other = probe.focused_pane;
+        self.layout.swap(focused, other);
+        Ok(true)
     }
 
     pub fn focus_neighbor(&mut self, direction: Direction) -> Result<bool, WorkspaceError> {
@@ -451,9 +633,21 @@ impl Tab {
             .min_by(|left, right| left.1.total_cmp(&right.1));
         if let Some((pane, _)) = candidate {
             self.focused_pane = pane;
+            self.unzoom_for_focus();
             return Ok(true);
         }
         Ok(false)
+    }
+
+    /// The keys going to a pane the zoom hides would go where nothing
+    /// shows, so the zoom ends, as in Ghostty and iTerm.
+    fn unzoom_for_focus(&mut self) {
+        if self
+            .zoomed_pane
+            .is_some_and(|zoomed| zoomed != self.focused_pane)
+        {
+            self.zoomed_pane = None;
+        }
     }
 }
 
@@ -463,6 +657,10 @@ pub struct Session {
     pub name: String,
     pub tabs: Vec<Tab>,
     pub active_tab: TabId,
+    /// Names given to panes, which their heads show over what their shells
+    /// say. A pane keeps its name when it moves to another tab.
+    #[serde(default)]
+    pub pane_names: BTreeMap<PaneId, String>,
 }
 
 impl Session {
@@ -470,14 +668,45 @@ impl Session {
         name: impl Into<String>,
         pane_ids: &[PaneId],
     ) -> Result<Self, WorkspaceError> {
-        let tab = Tab::with_panes("1", pane_ids)?;
+        let mut tab = Tab::with_panes("1", pane_ids)?;
+        tab.ink = Some(0);
         let active_tab = tab.id;
         Ok(Self {
             id: SessionId::new(),
             name: name.into(),
             tabs: vec![tab],
             active_tab,
+            pane_names: BTreeMap::new(),
         })
+    }
+
+    /// The name given to a pane, if it has one.
+    #[must_use]
+    pub fn pane_name(&self, pane_id: PaneId) -> Option<&str> {
+        self.pane_names.get(&pane_id).map(String::as_str)
+    }
+
+    /// Name a pane, or with an empty name hand it back to what its shell
+    /// says. Names of panes that have closed are let go at the same time.
+    pub fn rename_pane(&mut self, pane_id: PaneId, name: &str) -> Result<(), WorkspaceError> {
+        let held = |pane: PaneId| self.tabs.iter().any(|tab| tab.layout.contains(pane));
+        if !held(pane_id) {
+            return Err(WorkspaceError::UnknownPane(pane_id));
+        }
+        let live = self
+            .pane_names
+            .keys()
+            .copied()
+            .filter(|pane| held(*pane))
+            .collect::<Vec<_>>();
+        self.pane_names.retain(|pane, _| live.contains(pane));
+        let name = name.trim();
+        if name.is_empty() {
+            self.pane_names.remove(&pane_id);
+        } else {
+            self.pane_names.insert(pane_id, name.to_owned());
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -515,31 +744,156 @@ impl Session {
         }
     }
 
+    /// The ink for a new tab: the one after the last tab's, so tabs made
+    /// one after another go round the colours as they always have.
+    fn fresh_ink(&self) -> u8 {
+        let count = u8::try_from(self.tabs.len() % usize::from(INK_COUNT)).unwrap_or(0);
+        self.tabs
+            .last()
+            .and_then(|tab| tab.ink)
+            .map_or(count, |ink| (ink + 1) % INK_COUNT)
+    }
+
+    /// Give the active tab another ink.
+    pub fn set_active_tab_ink(&mut self, ink: u8) -> Result<(), WorkspaceError> {
+        let tab_id = self.active_tab;
+        self.active_tab_mut()
+            .ok_or(WorkspaceError::UnknownTab(tab_id))?
+            .ink = Some(ink % INK_COUNT);
+        Ok(())
+    }
+
     pub fn add_tab(&mut self, pane_id: PaneId) -> Result<TabId, WorkspaceError> {
         self.normalize_numeric_tab_titles();
         let title = (self.tabs.len() + 1).to_string();
-        let tab = Tab::with_panes(title, &[pane_id])?;
+        let mut tab = Tab::with_panes(title, &[pane_id])?;
+        tab.ink = Some(self.fresh_ink());
         let id = tab.id;
         self.tabs.push(tab);
         self.active_tab = id;
         Ok(id)
     }
 
+    /// Open a new tab just after the active one, rather than at the end of
+    /// the strip, and show it.
+    pub fn add_tab_after_active(&mut self, pane_id: PaneId) -> Result<TabId, WorkspaceError> {
+        let at = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == self.active_tab)
+            .map_or(self.tabs.len(), |index| index + 1);
+        let id = self.add_tab(pane_id)?;
+        if let Some(tab) = self.tabs.pop() {
+            self.insert_tab(tab, at);
+        }
+        Ok(id)
+    }
+
+    /// Put a tab back at a place in the strip, or at its end when the strip
+    /// is shorter now, and show it. Numbered tabs take their places'
+    /// numbers.
+    pub fn insert_tab(&mut self, mut tab: Tab, at: usize) {
+        if tab.ink.is_none() {
+            tab.ink = Some(self.fresh_ink());
+        }
+        let at = at.min(self.tabs.len());
+        self.active_tab = tab.id;
+        self.tabs.insert(at, tab);
+        self.normalize_numeric_tab_titles();
+    }
+
     pub fn close_active_tab(&mut self) -> Result<Vec<PaneId>, WorkspaceError> {
+        self.close_tab(self.active_tab)
+    }
+
+    /// Close a tab, giving back its panes. Closing the tab on screen shows
+    /// the one before it; closing another leaves the one on screen there.
+    pub fn close_tab(&mut self, tab_id: TabId) -> Result<Vec<PaneId>, WorkspaceError> {
+        let index = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == tab_id)
+            .ok_or(WorkspaceError::UnknownTab(tab_id))?;
         if self.tabs.len() == 1 {
             return Err(WorkspaceError::CannotCloseLastTab);
         }
+        let tab = self.tabs.remove(index);
+        let mut panes = Vec::new();
+        tab.layout.pane_ids(&mut panes);
+        if self.active_tab == tab_id {
+            self.active_tab = self.tabs[index.saturating_sub(1)].id;
+        }
+        self.normalize_numeric_tab_titles();
+        Ok(panes)
+    }
+
+    /// Move a tab to another place in the strip, between 0 and the last
+    /// place. Numbered tabs take the numbers of their new places.
+    pub fn move_tab(&mut self, tab_id: TabId, to: usize) -> Result<(), WorkspaceError> {
+        let from = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == tab_id)
+            .ok_or(WorkspaceError::UnknownTab(tab_id))?;
+        let to = to.min(self.tabs.len() - 1);
+        if from != to {
+            let tab = self.tabs.remove(from);
+            self.tabs.insert(to, tab);
+            self.normalize_numeric_tab_titles();
+        }
+        Ok(())
+    }
+
+    /// Take the active tab's focused pane out into a tab of its own, just
+    /// after the one it left, and show it there. The pane keeps running; a
+    /// tab with only that pane has nothing to break it from.
+    pub fn break_focused_pane(&mut self) -> Result<TabId, WorkspaceError> {
         let index = self
             .tabs
             .iter()
             .position(|tab| tab.id == self.active_tab)
             .ok_or(WorkspaceError::UnknownTab(self.active_tab))?;
-        let tab = self.tabs.remove(index);
-        let mut panes = Vec::new();
-        tab.layout.pane_ids(&mut panes);
-        self.active_tab = self.tabs[index.saturating_sub(1)].id;
+        let pane_id = self.tabs[index].close_focused()?;
+        let mut tab = Tab::with_panes((self.tabs.len() + 1).to_string(), &[pane_id])?;
+        tab.ink = Some(self.fresh_ink());
+        let id = tab.id;
+        self.tabs.insert(index + 1, tab);
+        self.active_tab = id;
         self.normalize_numeric_tab_titles();
-        Ok(panes)
+        Ok(id)
+    }
+
+    /// Move a pane of the active tab into another tab, beside that tab's
+    /// focused pane, and show it there with the keys. A tab left with no
+    /// panes goes.
+    pub fn move_pane_to_tab(&mut self, pane_id: PaneId, to: TabId) -> Result<(), WorkspaceError> {
+        let from = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == self.active_tab)
+            .ok_or(WorkspaceError::UnknownTab(self.active_tab))?;
+        if self.tabs[from].id == to {
+            return Ok(());
+        }
+        if !self.tabs.iter().any(|tab| tab.id == to) {
+            return Err(WorkspaceError::UnknownTab(to));
+        }
+        let source = &mut self.tabs[from];
+        source.focus(pane_id)?;
+        if matches!(source.layout, PaneLayout::Leaf(_)) {
+            self.tabs.remove(from);
+        } else {
+            source.close_focused()?;
+        }
+        let target = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == to)
+            .ok_or(WorkspaceError::UnknownTab(to))?;
+        target.split_focused(pane_id, SplitAxis::Horizontal)?;
+        self.active_tab = to;
+        self.normalize_numeric_tab_titles();
+        Ok(())
     }
 
     pub fn select_tab(&mut self, tab_id: TabId) -> Result<(), WorkspaceError> {
@@ -589,6 +943,8 @@ pub enum InputMode {
     Tab,
     Session,
     Resize,
+    /// Every key goes to the program, Mux's own prefixes too, until Ctrl+g.
+    Locked,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -621,6 +977,23 @@ pub enum Action {
     OpenCommandPalette,
     OpenAgentSurface,
     OpenSettings,
+    /// Move the active tab one place along the strip.
+    MoveTab(Direction),
+    BreakPaneToTab,
+    /// Type into every pane of the tab on screen at once, or stop.
+    ToggleSyncTab,
+    /// Name the focused pane in its head.
+    RenamePane,
+    /// Bring back the tab closed last.
+    ReopenClosedTab,
+    /// Share the tab's room evenly between its panes.
+    EqualizePanes,
+    /// Trade places with the neighbouring pane that way.
+    SwapPane(Direction),
+    /// Split the focused pane across its longer side, as Ghostty's
+    /// `new_split:auto` does, so a wide pane splits side by side and a tall
+    /// one top and bottom.
+    SplitPaneAuto,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -648,7 +1021,55 @@ pub enum WorkspaceCommand {
         second: PaneId,
         ratio: SplitRatio,
     },
+    /// Put a tab at another place in the strip. See [`Session::move_tab`].
+    MoveTab {
+        tab: TabId,
+        to: usize,
+    },
+    /// Give the focused pane a tab of its own. See
+    /// [`Session::break_focused_pane`].
+    BreakPaneToTab,
+    /// Colour the active tab with one of the [`INK_COUNT`] inks.
+    SetTabInk(u8),
+    /// Close this tab, on screen or not. See [`Session::close_tab`].
+    CloseTabWithId(TabId),
+    /// Bring back the tab closed last, with fresh shells where its panes
+    /// were.
+    ReopenClosedTab,
+    /// Name a pane, or clear its name. See [`Session::rename_pane`].
+    RenamePane {
+        pane: PaneId,
+        name: String,
+    },
+    /// Share the active tab's room evenly between its panes. See
+    /// [`PaneLayout::equalize`].
+    EqualizePanes,
+    /// Trade places with a neighbouring pane. See
+    /// [`Tab::swap_with_neighbor`].
+    SwapPane(Direction),
+    /// Put the pane `moved` where `with` is, and `with` where it was, as a
+    /// dragged pane head does. `moved` takes the keys.
+    SwapPanes {
+        moved: PaneId,
+        with: PaneId,
+    },
+    /// Move a pane of the tab on screen into another tab. See
+    /// [`Session::move_pane_to_tab`].
+    MovePaneToTab {
+        pane: PaneId,
+        tab: TabId,
+    },
+    /// Put a pane of the tab on screen on one side of another. See
+    /// [`Tab::move_pane_beside`].
+    MovePaneBeside {
+        pane: PaneId,
+        target: PaneId,
+        side: Direction,
+    },
 }
+
+/// How many tab inks there are to choose from.
+pub const INK_COUNT: u8 = 4;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct Modifiers(u8);
@@ -799,6 +1220,20 @@ impl Keymap {
                 );
             }
         }
+        // Zellij's Locked mode, Ctrl+g from any mode, hands every key to the
+        // program until Ctrl+g again.
+        for mode in modes {
+            self.bind(
+                mode,
+                KeyChord::control('g'),
+                Action::EnterMode(InputMode::Locked),
+            );
+        }
+        self.bind(
+            InputMode::Locked,
+            KeyChord::control('g'),
+            Action::EnterMode(InputMode::Normal),
+        );
         for mode in modes.into_iter().filter(|mode| *mode != InputMode::Normal) {
             for key in [Key::Escape, Key::Enter] {
                 self.bind(
@@ -811,6 +1246,11 @@ impl Keymap {
     }
 
     fn bind_zellij_pane_mode(&mut self) {
+        self.bind(
+            InputMode::Pane,
+            KeyChord::plain(Key::Character('c')),
+            Action::RenamePane,
+        );
         // Keep Ctrl+n available to terminal applications in Normal mode, but
         // preserve the familiar Zellij resize prefix once the user has
         // explicitly entered Mux's Pane mode with Ctrl+p.
@@ -835,6 +1275,17 @@ impl Keymap {
                 KeyChord::plain(arrow),
                 Action::FocusPane(direction),
             );
+            // Shift moves the pane itself, as it moves a tab in Tab mode.
+            for key in [Key::Character(key), arrow] {
+                self.bind(
+                    InputMode::Pane,
+                    KeyChord {
+                        key,
+                        modifiers: Modifiers::SHIFT,
+                    },
+                    Action::SwapPane(direction),
+                );
+            }
         }
         self.bind(
             InputMode::Pane,
@@ -904,9 +1355,46 @@ impl Keymap {
                 Action::ResizePane(direction),
             );
         }
+        self.bind(
+            InputMode::Resize,
+            KeyChord::plain(Key::Character('=')),
+            Action::EqualizePanes,
+        );
     }
 
     fn bind_zellij_tab_mode(&mut self) {
+        self.bind(
+            InputMode::Tab,
+            KeyChord::plain(Key::Character('s')),
+            Action::Sequence(vec![
+                Action::ToggleSyncTab,
+                Action::EnterMode(InputMode::Normal),
+            ]),
+        );
+        self.bind(
+            InputMode::Tab,
+            KeyChord::plain(Key::Character('b')),
+            Action::Sequence(vec![
+                Action::BreakPaneToTab,
+                Action::EnterMode(InputMode::Normal),
+            ]),
+        );
+        // Shift moves the tab itself where h and l move between tabs.
+        for (key, arrow, direction) in [
+            ('h', Key::ArrowLeft, Direction::Left),
+            ('l', Key::ArrowRight, Direction::Right),
+        ] {
+            for key in [Key::Character(key), arrow] {
+                self.bind(
+                    InputMode::Tab,
+                    KeyChord {
+                        key,
+                        modifiers: Modifiers::SHIFT,
+                    },
+                    Action::MoveTab(direction),
+                );
+            }
+        }
         self.bind(
             InputMode::Tab,
             KeyChord::plain(Key::Character('r')),
@@ -1025,6 +1513,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn focusing_a_pane_the_zoom_hides_ends_the_zoom() {
+        let [left, right] = [PaneId::new(), PaneId::new()];
+        let mut tab = Tab::with_panes("1", &[left]).expect("tab");
+        tab.split_focused(right, SplitAxis::Horizontal)
+            .expect("split");
+        tab.toggle_zoom();
+        tab.focus(right).expect("focus");
+        assert_eq!(tab.zoomed_pane, Some(right), "the zoomed pane keeps it");
+        assert!(tab.focus_neighbor(Direction::Left).expect("focus"));
+        assert_eq!(tab.zoomed_pane, None);
+    }
+
+    #[test]
+    fn a_closed_pane_hands_the_keys_to_the_pane_that_takes_its_room() {
+        let [left, top, bottom] = [PaneId::new(), PaneId::new(), PaneId::new()];
+        let mut tab = Tab::with_panes("1", &[left]).expect("tab");
+        tab.split_focused(top, SplitAxis::Horizontal)
+            .expect("split");
+        tab.split_focused(bottom, SplitAxis::Vertical)
+            .expect("split");
+        assert_eq!(tab.close_focused().expect("close"), bottom);
+        assert_eq!(tab.focused_pane, top, "not the first pane, on the left");
+        tab.split_focused(bottom, SplitAxis::Vertical)
+            .expect("split");
+        tab.focus(left).expect("focus");
+        tab.close_focused().expect("close");
+        assert_eq!(tab.focused_pane, top, "the nearer of the two on the right");
+    }
+
+    #[test]
     fn two_panes_have_stable_order_and_focus() {
         let panes = [PaneId::new(), PaneId::new()];
         let session = Session::with_panes("daily", &panes).expect("valid session");
@@ -1034,6 +1552,26 @@ mod tests {
         tab.layout.pane_ids(&mut actual);
         assert_eq!(actual, panes);
         assert_eq!(tab.focused_pane, panes[0]);
+    }
+
+    #[test]
+    fn ctrl_g_locks_and_unlocks_and_pane_mode_n_splits_right() {
+        let keymap = Keymap::zellij_default();
+        assert_eq!(
+            keymap.resolve(InputMode::Normal, KeyChord::control('g')),
+            Some(&Action::EnterMode(InputMode::Locked)),
+        );
+        assert_eq!(
+            keymap.resolve(InputMode::Locked, KeyChord::control('g')),
+            Some(&Action::EnterMode(InputMode::Normal)),
+        );
+        assert_eq!(
+            keymap.resolve(InputMode::Pane, KeyChord::plain(Key::Character('n'))),
+            Some(&Action::Sequence(vec![
+                Action::SplitPane(SplitAxis::Horizontal),
+                Action::EnterMode(InputMode::Normal),
+            ])),
+        );
     }
 
     #[test]
@@ -1069,6 +1607,17 @@ mod tests {
         assert_eq!(
             keymap.resolve(InputMode::Tab, KeyChord::plain(Key::Character('r'))),
             Some(&Action::RenameTab),
+        );
+        assert_eq!(
+            keymap.resolve(InputMode::Pane, KeyChord::plain(Key::Character('c'))),
+            Some(&Action::RenamePane),
+        );
+        assert_eq!(
+            keymap.resolve(InputMode::Tab, KeyChord::plain(Key::Character('s'))),
+            Some(&Action::Sequence(vec![
+                Action::ToggleSyncTab,
+                Action::EnterMode(InputMode::Normal),
+            ])),
         );
         assert_eq!(
             keymap.resolve(InputMode::Normal, KeyChord::control('n')),
@@ -1168,6 +1717,124 @@ mod tests {
     }
 
     #[test]
+    fn a_moved_tab_takes_its_new_place_and_number() {
+        let mut session = Session::with_panes("daily", &[PaneId::new()]).expect("session");
+        let first = session.active_tab;
+        session.add_tab(PaneId::new()).expect("second tab");
+        let third = session.add_tab(PaneId::new()).expect("third tab");
+        session.tabs[1].title = "build".to_owned();
+
+        session.move_tab(third, 0).expect("move third to the front");
+        let order = session.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>();
+        assert_eq!(order[0], third);
+        assert_eq!(order[1], first);
+        let titles = session
+            .tabs
+            .iter()
+            .map(|tab| tab.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, vec!["1", "2", "build"]);
+
+        session
+            .move_tab(third, 99)
+            .expect("past the end lands last");
+        assert_eq!(session.tabs[2].id, third);
+        assert_eq!(
+            session.active_tab, third,
+            "moving a tab doesn't change which is shown"
+        );
+    }
+
+    #[test]
+    fn closing_a_tab_out_of_sight_leaves_the_one_on_screen() {
+        let first_pane = PaneId::new();
+        let mut session = Session::with_panes("daily", &[first_pane]).expect("session");
+        let first = session.active_tab;
+        let second = session.add_tab(PaneId::new()).expect("second tab");
+        let third_pane = PaneId::new();
+        let third = session.add_tab(third_pane).expect("third tab");
+        session.select_tab(first).expect("back to the first");
+
+        assert_eq!(session.close_tab(third).expect("close"), vec![third_pane]);
+        assert_eq!(session.active_tab, first, "the tab on screen stays");
+        session.select_tab(second).expect("show the second");
+        session.close_tab(second).expect("close the tab on screen");
+        assert_eq!(session.active_tab, first, "the one before it is shown");
+        assert!(matches!(
+            session.close_tab(first),
+            Err(WorkspaceError::CannotCloseLastTab)
+        ));
+    }
+
+    #[test]
+    fn a_tab_keeps_its_ink_when_it_moves() {
+        let mut session = Session::with_panes("daily", &[PaneId::new()]).expect("session");
+        session.add_tab(PaneId::new()).expect("second tab");
+        let third = session.add_tab(PaneId::new()).expect("third tab");
+        let inks = session.tabs.iter().map(|tab| tab.ink).collect::<Vec<_>>();
+        assert_eq!(inks, vec![Some(0), Some(1), Some(2)]);
+
+        session.set_active_tab_ink(7).expect("colour the third tab");
+        assert_eq!(session.tabs[2].ink, Some(3), "inks wrap round");
+        session.move_tab(third, 0).expect("move it to the front");
+        assert_eq!(session.tabs[0].ink, Some(3));
+
+        session.add_tab(PaneId::new()).expect("fourth tab");
+        assert_eq!(
+            session.tabs[3].ink,
+            Some(2),
+            "a new tab takes the ink after the last tab's"
+        );
+    }
+
+    #[test]
+    fn a_tab_saved_before_inks_were_kept_still_loads() {
+        let session = Session::with_panes("daily", &[PaneId::new()]).expect("session");
+        let mut saved = serde_json::to_value(&session.tabs[0]).expect("tab to json");
+        saved.as_object_mut().expect("an object").remove("ink");
+        let tab: Tab = serde_json::from_value(saved).expect("loads without an ink");
+        assert_eq!(tab.ink, None);
+    }
+
+    #[test]
+    fn a_broken_out_pane_gets_the_next_tab_and_the_focus() {
+        let left = PaneId::new();
+        let right = PaneId::new();
+        let mut session = Session::with_panes("daily", &[left, right]).expect("session");
+        let original = session.active_tab;
+        session.add_tab(PaneId::new()).expect("second tab");
+        session.select_tab(original).expect("back to the split tab");
+        session
+            .active_tab_mut()
+            .unwrap()
+            .focus(right)
+            .expect("focus right");
+
+        let broken = session.break_focused_pane().expect("break right out");
+
+        assert_eq!(session.active_tab, broken);
+        assert_eq!(session.tabs[1].id, broken);
+        assert_eq!(session.tabs[1].layout, PaneLayout::Leaf(right));
+        assert_eq!(session.tabs[0].layout, PaneLayout::Leaf(left));
+        assert_eq!(session.tabs[0].focused_pane, left);
+        let titles = session
+            .tabs
+            .iter()
+            .map(|tab| tab.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, vec!["1", "2", "3"]);
+
+        assert!(
+            matches!(
+                session.break_focused_pane(),
+                Err(WorkspaceError::CannotCloseLastPane)
+            ),
+            "a pane alone in its tab stays put"
+        );
+        assert_eq!(session.tabs.len(), 3);
+    }
+
+    #[test]
     fn numeric_title_repair_keeps_user_text_titles() {
         let mut session = Session::with_panes("daily", &[PaneId::new()]).expect("session");
         session.add_tab(PaneId::new()).expect("second tab");
@@ -1183,6 +1850,105 @@ mod tests {
             .map(|tab| tab.title.as_str())
             .collect::<Vec<_>>();
         assert_eq!(titles, vec!["1", "build", "3"]);
+    }
+
+    #[test]
+    fn a_pane_moves_beside_another() {
+        let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+        // a | b | c, then c goes above a.
+        let mut tab = Tab::with_panes("t", &[a, b, c]).expect("tab");
+        tab.move_pane_beside(c, a, Direction::Up).expect("move");
+        assert_eq!(tab.focused_pane, c);
+        let PaneLayout::Split { axis, first, .. } = &tab.layout else {
+            panic!("a split")
+        };
+        assert_eq!(*axis, SplitAxis::Horizontal);
+        let PaneLayout::Split {
+            axis,
+            first,
+            second,
+            ..
+        } = first.as_ref()
+        else {
+            panic!("a split")
+        };
+        assert_eq!(*axis, SplitAxis::Vertical);
+        assert_eq!(**first, PaneLayout::Leaf(c));
+        assert_eq!(**second, PaneLayout::Leaf(a));
+        let mut order = Vec::new();
+        tab.layout.pane_ids(&mut order);
+        assert_eq!(order, [c, a, b]);
+    }
+
+    #[test]
+    fn a_pane_moves_into_another_tab() {
+        let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+        let mut session = Session::with_panes("s", &[a, b]).expect("session");
+        let first = session.active_tab;
+        let second = session.add_tab(c).expect("tab");
+        session.select_tab(first).expect("select");
+        session.move_pane_to_tab(b, second).expect("move");
+        assert_eq!(session.active_tab, second);
+        let tab = session.active_tab().expect("tab");
+        assert!(tab.layout.contains(b) && tab.layout.contains(c));
+        assert_eq!(tab.focused_pane, b);
+        // The last pane of a tab takes the tab with it.
+        session.move_pane_to_tab(b, first).expect("back");
+        session.select_tab(second).expect("select");
+        session.move_pane_to_tab(c, first).expect("last");
+        assert_eq!(session.tabs.len(), 1);
+        let mut panes = Vec::new();
+        session.tabs[0].layout.pane_ids(&mut panes);
+        assert_eq!(panes.len(), 3);
+    }
+
+    #[test]
+    fn a_pane_trades_places_with_its_neighbour() {
+        let (left, right) = (PaneId::new(), PaneId::new());
+        let mut tab = Tab::with_panes("t", &[left, right]).expect("tab");
+        assert!(tab.swap_with_neighbor(Direction::Right).expect("swap"));
+        let mut order = Vec::new();
+        tab.layout.pane_ids(&mut order);
+        assert_eq!(order, [right, left]);
+        assert_eq!(tab.focused_pane, left, "the moved pane keeps the keys");
+        assert!(!tab.swap_with_neighbor(Direction::Right).expect("edge"));
+    }
+
+    #[test]
+    fn equalizing_gives_each_pane_in_a_row_the_same_room() {
+        let pane = || PaneLayout::Leaf(PaneId::new());
+        let split = |axis, ratio, first, second| PaneLayout::Split {
+            axis,
+            ratio: SplitRatio::new(ratio).unwrap(),
+            first: Box::new(first),
+            second: Box::new(second),
+        };
+        // a | (b | (c over d)): three across, the last of them split down.
+        let mut layout = split(
+            SplitAxis::Horizontal,
+            700,
+            pane(),
+            split(
+                SplitAxis::Horizontal,
+                200,
+                pane(),
+                split(SplitAxis::Vertical, 800, pane(), pane()),
+            ),
+        );
+        assert!(layout.equalize());
+        let PaneLayout::Split { ratio, second, .. } = &layout else {
+            panic!("a split")
+        };
+        assert_eq!(ratio.thousandths(), 333);
+        let PaneLayout::Split { ratio, second, .. } = second.as_ref() else {
+            panic!("a split")
+        };
+        assert_eq!(ratio.thousandths(), 500);
+        let PaneLayout::Split { ratio, .. } = second.as_ref() else {
+            panic!("a split")
+        };
+        assert_eq!(ratio.thousandths(), 500);
+        assert!(!layout.equalize(), "already even");
     }
 
     #[test]
@@ -1271,5 +2037,84 @@ mod tests {
         assert!(SplitRatio::new(500).is_ok());
         assert!(SplitRatio::new(0).is_err());
         assert!(SplitRatio::new(1_000).is_err());
+    }
+
+    #[test]
+    fn a_tab_comes_back_with_its_layout_under_new_panes() {
+        let [left, right] = [PaneId::new(), PaneId::new()];
+        let mut session = Session::with_panes("reopen", &[PaneId::new()]).expect("session");
+        let mut tab = Tab::with_panes("build", &[left]).expect("tab");
+        tab.split_focused(right, SplitAxis::Horizontal)
+            .expect("split");
+        let [new_left, new_right] = [PaneId::new(), PaneId::new()];
+        let renamed = tab
+            .layout
+            .renamed(&|pane| if pane == left { new_left } else { new_right });
+        let mut ids = Vec::new();
+        renamed.pane_ids(&mut ids);
+        assert_eq!(ids, vec![new_left, new_right]);
+        let back = Tab {
+            id: TabId::new(),
+            layout: renamed,
+            focused_pane: new_right,
+            ..tab
+        };
+        let id = back.id;
+        session.insert_tab(back, 9);
+        assert_eq!(session.active_tab, id);
+        assert_eq!(session.tabs.len(), 2);
+        assert_eq!(session.tabs[1].title, "build");
+    }
+
+    #[test]
+    fn a_named_pane_keeps_its_name_until_cleared_or_closed() {
+        let [left, right, stranger] = [PaneId::new(), PaneId::new(), PaneId::new()];
+        let mut session = Session::with_panes("names", &[left, right]).expect("session");
+        session.rename_pane(left, "  server ").expect("name left");
+        session.rename_pane(right, "logs").expect("name right");
+        assert_eq!(session.pane_name(left), Some("server"));
+        assert!(matches!(
+            session.rename_pane(stranger, "x"),
+            Err(WorkspaceError::UnknownPane(_))
+        ));
+
+        // Moved to a tab of its own, a pane is still called what it was.
+        session
+            .active_tab_mut()
+            .expect("tab")
+            .focus(right)
+            .expect("focus");
+        session.break_focused_pane().expect("break out");
+        assert_eq!(session.pane_name(right), Some("logs"));
+
+        session.rename_pane(right, "").expect("clear");
+        assert_eq!(session.pane_name(right), None);
+
+        // A closed pane's name is let go with the next rename.
+        session.rename_pane(right, "tail").expect("name again");
+        let tab = session.active_tab;
+        session.close_tab(tab).expect("close");
+        session.rename_pane(left, "api").expect("rename");
+        assert_eq!(session.pane_names.len(), 1);
+    }
+
+    #[test]
+    fn a_tab_can_open_just_after_the_active_one() {
+        let mut session = Session::with_panes("work", &[PaneId::new()]).expect("session");
+        let second = session.add_tab(PaneId::new()).expect("second tab");
+        session.add_tab(PaneId::new()).expect("third tab");
+        session.select_tab(second).expect("select second tab");
+        let new = session
+            .add_tab_after_active(PaneId::new())
+            .expect("new tab");
+        let order = session.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>();
+        assert_eq!(order[2], new);
+        assert_eq!(session.active_tab, new);
+        let titles = session
+            .tabs
+            .iter()
+            .map(|tab| tab.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, ["1", "2", "3", "4"]);
     }
 }

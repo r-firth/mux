@@ -69,7 +69,10 @@ does not require an Apple Developer account. Distribution builds can set
 enable Hardened Runtime and add a trusted timestamp for notarization.
 
 Mux discovers or starts its per-user daemon automatically. Closing the GUI
-does not stop its shells.
+does not stop its shells. The daemon also writes the workspace down, so when
+it starts again, after a restart of the Mac or an upgrade that replaces it,
+the sessions come back: their tabs and splits, names and colours, and each
+pane in the directory it was last in, with a fresh shell.
 
 ## Keyboard first
 

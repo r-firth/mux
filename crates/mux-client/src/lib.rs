@@ -7,8 +7,8 @@ use directories::ProjectDirs;
 use mux_acp::{AgentConfigValueSelection, AgentPrompt, AgentSessionSnapshot, AgentSpec};
 use mux_protocol::{
     ClientHello, ClientMessage, CodecError, CreateSession, FrameReader, PROTOCOL_VERSION,
-    RemoteError, Request, Response, ServerEvent, ServerMessage, SessionAttachment, SessionSelector,
-    SessionSummary, UNACKNOWLEDGED_REQUEST_ID, read_frame, write_frame,
+    RemoteError, Request, Response, RunningProgram, ServerEvent, ServerMessage, SessionAttachment,
+    SessionSelector, SessionSummary, UNACKNOWLEDGED_REQUEST_ID, read_frame, write_frame,
 };
 use mux_terminal::{TerminalError, TerminalSize};
 use mux_workspace::{AgentSessionId, PaneId, SessionId, WorkspaceCommand};
@@ -265,6 +265,32 @@ impl Client {
         }
     }
 
+    pub async fn clear_pane(&mut self, pane_id: PaneId) -> Result<(), ClientError> {
+        expect_acknowledgement(
+            self.request(Request::ClearPane { pane_id }).await?,
+            &Response::Ack,
+        )
+    }
+
+    pub async fn reset_pane(&mut self, pane_id: PaneId) -> Result<(), ClientError> {
+        expect_acknowledgement(
+            self.request(Request::ResetPane { pane_id }).await?,
+            &Response::Ack,
+        )
+    }
+
+    /// What these panes are running in front of their shells, for those
+    /// that are running something.
+    pub async fn running_programs(
+        &mut self,
+        pane_ids: Vec<PaneId>,
+    ) -> Result<Vec<RunningProgram>, ClientError> {
+        match self.request(Request::RunningPrograms { pane_ids }).await? {
+            Response::RunningPrograms(programs) => Ok(programs),
+            response => Err(ClientError::UnexpectedResponse(Box::new(response))),
+        }
+    }
+
     pub async fn prompt_agent(
         &mut self,
         session_id: AgentSessionId,
@@ -466,7 +492,10 @@ impl Client {
             event @ (ServerEvent::PaneExited { .. }
             | ServerEvent::WorkspaceChanged { .. }
             | ServerEvent::Agent(_)
-            | ServerEvent::AgentResyncRequired) => Some(event),
+            | ServerEvent::AgentResyncRequired
+            | ServerEvent::PaneCommandFinished { .. }
+            | ServerEvent::PaneCommandStarted { .. }
+            | ServerEvent::PaneSecretInput { .. }) => Some(event),
         }
     }
 
@@ -495,7 +524,13 @@ fn attachment_supersedes_event(event: &ServerEvent, session_id: SessionId) -> bo
         | ServerEvent::WorkspaceChanged {
             session_id: event_session,
         } => *event_session == session_id,
-        ServerEvent::Agent(_) | ServerEvent::AgentResyncRequired => false,
+        // An attachment says nothing of programs that finished, and a
+        // program's start is news to an attachment made just before it.
+        ServerEvent::Agent(_)
+        | ServerEvent::AgentResyncRequired
+        | ServerEvent::PaneCommandFinished { .. }
+        | ServerEvent::PaneCommandStarted { .. }
+        | ServerEvent::PaneSecretInput { .. } => false,
     }
 }
 
@@ -609,6 +644,8 @@ mod tests {
                 },
                 exit_status: None,
                 title: None,
+                program: None,
+                command_endings: Vec::new(),
             }],
         }
     }

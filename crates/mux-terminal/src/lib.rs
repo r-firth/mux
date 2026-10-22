@@ -10,7 +10,7 @@ use thiserror::Error;
 
 mod title;
 
-pub use title::{Attention, TitleScanner};
+pub use title::{Attention, CommandEnding, Progress, TitleScanner, clipboard_reply};
 
 /// Kitty progressive-keyboard flag requesting press/repeat/release event types.
 pub const KITTY_KEYBOARD_REPORT_EVENTS: u8 = 1 << 1;
@@ -512,6 +512,12 @@ pub trait TerminalEngine: Send {
     /// Engines without Kitty keyboard support remain in legacy mode.
     fn kitty_keyboard_flags(&self) -> Result<u8, TerminalError> {
         Ok(0)
+    }
+
+    /// What the terminal shows, history first, as plain text with one line
+    /// per row, to keep a copy of. Engines that cannot say give `None`.
+    fn screen_text(&self) -> Option<String> {
+        None
     }
 
     /// Return the emulator to legacy keyboard encoding without advancing the

@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use directories::BaseDirs;
-use mux_terminal::Rgb;
+use mux_terminal::{CursorStyle, Rgb};
 
 pub const GHOSTTY_REVISION: &str = "b2fa2931b6599f7e32a7c547b3f5520ac3333881";
 
@@ -16,6 +16,10 @@ pub struct GhosttyTheme {
     pub background: Option<Rgb>,
     pub foreground: Option<Rgb>,
     pub cursor: Option<Rgb>,
+    /// Ghostty's `selection-background` and `selection-foreground`, for
+    /// selected text in place of Mux's own warm wash.
+    pub selection_background: Option<Rgb>,
+    pub selection_foreground: Option<Rgb>,
     pub palette: [Option<Rgb>; 256],
 }
 
@@ -25,6 +29,8 @@ impl Default for GhosttyTheme {
             background: None,
             foreground: None,
             cursor: None,
+            selection_background: None,
+            selection_foreground: None,
             palette: [None; 256],
         }
     }
@@ -126,6 +132,1167 @@ pub fn user_history_limit() -> usize {
     limit
 }
 
+/// Whether Option types as Alt (Meta) rather than composing characters:
+/// `macos-option-as-alt` from the user's Ghostty config, off by default as
+/// in Ghostty. `left` and `right` turn it on for both keys, since the window
+/// is not told which Option key is down.
+#[must_use]
+pub fn user_option_as_alt() -> bool {
+    let mut enabled = false;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_option_as_alt(&contents, &mut enabled);
+            }
+        }
+    }
+    enabled
+}
+
+/// The cursor a pane shows until its program picks one: `cursor-style`
+/// from the user's Ghostty config, a block by default as in Ghostty.
+#[must_use]
+pub fn user_cursor_style() -> CursorStyle {
+    let mut style = CursorStyle::Block;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_cursor_style(&contents, &mut style);
+            }
+        }
+    }
+    style
+}
+
+fn parse_cursor_style(contents: &str, style: &mut CursorStyle) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "cursor-style" {
+            match value.as_str() {
+                "" | "block" => *style = CursorStyle::Block,
+                "bar" => *style = CursorStyle::Bar,
+                "underline" => *style = CursorStyle::Underline,
+                "block_hollow" => *style = CursorStyle::HollowBlock,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Whether the mouse pointer hides while typing: `mouse-hide-while-typing`
+/// from the user's Ghostty config, off by default as in Ghostty.
+#[must_use]
+pub fn user_mouse_hide_while_typing() -> bool {
+    let mut hide = false;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_mouse_hide(&contents, &mut hide);
+            }
+        }
+    }
+    hide
+}
+
+fn parse_mouse_hide(contents: &str, hide: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "mouse-hide-while-typing" {
+            match value.as_str() {
+                "true" => *hide = true,
+                "" | "false" => *hide = false,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Whether the cursor blinks: `cursor-style-blink` from the user's Ghostty
+/// config. `None` when it is not set, when a cursor blinks only if its
+/// program asks.
+#[must_use]
+pub fn user_cursor_blink() -> Option<bool> {
+    let mut blink = None;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_cursor_blink(&contents, &mut blink);
+            }
+        }
+    }
+    blink
+}
+
+fn parse_cursor_blink(contents: &str, blink: &mut Option<bool>) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "cursor-style-blink" {
+            match value.as_str() {
+                "" => *blink = None,
+                "true" => *blink = Some(true),
+                "false" => *blink = Some(false),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// How much of an unfocused split shows through: `unfocused-split-opacity`
+/// from the user's Ghostty config, kept between 0.15 and 1 as Ghostty keeps
+/// it, 0.7 by default as in Ghostty.
+#[must_use]
+pub fn user_unfocused_split_opacity() -> f32 {
+    let mut opacity = DEFAULT_UNFOCUSED_SPLIT_OPACITY;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_unfocused_split_opacity(&contents, &mut opacity);
+            }
+        }
+    }
+    opacity
+}
+
+const DEFAULT_UNFOCUSED_SPLIT_OPACITY: f32 = 0.7;
+
+fn parse_unfocused_split_opacity(contents: &str, opacity: &mut f32) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "unfocused-split-opacity" {
+            if value.is_empty() {
+                *opacity = DEFAULT_UNFOCUSED_SPLIT_OPACITY;
+            } else if let Ok(value) = value.parse::<f32>()
+                && value.is_finite()
+            {
+                *opacity = value.clamp(0.15, 1.0);
+            }
+        }
+    }
+}
+
+/// The space between a pane's edges and its text, in points:
+/// `window-padding-x` and `window-padding-y` from the user's Ghostty config,
+/// 2 each by default as in Ghostty. Mux pads both sides alike, so a
+/// `left,right` pair gives the larger of the two.
+#[must_use]
+pub fn user_window_padding() -> (f32, f32) {
+    let mut padding = (DEFAULT_WINDOW_PADDING, DEFAULT_WINDOW_PADDING);
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_window_padding(&contents, &mut padding);
+            }
+        }
+    }
+    padding
+}
+
+const DEFAULT_WINDOW_PADDING: f32 = 2.0;
+
+fn parse_window_padding(contents: &str, padding: &mut (f32, f32)) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        let axis = match key.as_str() {
+            "window-padding-x" => &mut padding.0,
+            "window-padding-y" => &mut padding.1,
+            _ => continue,
+        };
+        if value.is_empty() {
+            *axis = DEFAULT_WINDOW_PADDING;
+            continue;
+        }
+        let sides: Option<Vec<f32>> = value
+            .split(',')
+            .map(|side| {
+                side.trim()
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|side| side.is_finite())
+            })
+            .collect();
+        if let Some(widest) = sides
+            .filter(|sides| (1..=2).contains(&sides.len()))
+            .and_then(|sides| sides.into_iter().reduce(f32::max))
+        {
+            *axis = widest.clamp(0.0, 200.0);
+        }
+    }
+}
+
+/// OpenType features for the terminal font: `font-feature` from the user's
+/// Ghostty config, as tag and value, `-calt` turning ligatures off. Ghostty
+/// takes `tag`, `+tag`, `-tag`, `tag=value` and `tag on|off`, several to a
+/// line with commas between; an empty value forgets those before it.
+#[must_use]
+pub fn user_font_features() -> Vec<(String, u32)> {
+    let mut features = Vec::new();
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_font_features(&contents, &mut features);
+            }
+        }
+    }
+    features
+}
+
+fn parse_font_features(contents: &str, features: &mut Vec<(String, u32)>) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key != "font-feature" {
+            continue;
+        }
+        if value.is_empty() {
+            features.clear();
+            continue;
+        }
+        for feature in value.split(',').filter_map(parse_font_feature) {
+            features.retain(|(tag, _)| *tag != feature.0);
+            features.push(feature);
+        }
+    }
+}
+
+fn parse_font_feature(text: &str) -> Option<(String, u32)> {
+    let text = text.trim();
+    let (tag, value) = if let Some(tag) = text.strip_prefix('-') {
+        (tag, 0)
+    } else if let Some(tag) = text.strip_prefix('+') {
+        (tag, 1)
+    } else if let Some((tag, value)) = text.split_once('=') {
+        (tag, value.trim().parse().ok()?)
+    } else if let Some((tag, state)) = text.split_once(char::is_whitespace) {
+        match state.trim() {
+            "on" | "true" => (tag, 1),
+            "off" | "false" => (tag, 0),
+            _ => return None,
+        }
+    } else {
+        (text, 1)
+    };
+    let tag = tag.trim();
+    (tag.len() == 4 && tag.bytes().all(|byte| byte.is_ascii_graphic()))
+        .then(|| (tag.to_owned(), value))
+}
+
+/// Whether a program may copy to the clipboard with OSC 52:
+/// `clipboard-write` from the user's Ghostty config, allowed by default as in
+/// Ghostty. Mux has no prompt to ask with, so `ask` allows it, and the strip
+/// says what was copied either way.
+#[must_use]
+pub fn user_clipboard_write() -> bool {
+    let mut allowed = true;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_clipboard_write(&contents, &mut allowed);
+            }
+        }
+    }
+    allowed
+}
+
+fn parse_clipboard_write(contents: &str, allowed: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "clipboard-write" {
+            match value.as_str() {
+                "" | "allow" | "ask" => *allowed = true,
+                "deny" => *allowed = false,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// The cursor's colours the user's own Ghostty config sets with
+/// `cursor-color` and `cursor-text`. A theme's are left out, so the cursor
+/// keeps the tab's ink unless the user picked one themselves.
+/// `cursor-opacity` is kept in hundredths, unset meaning solid.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CursorColors {
+    pub cursor: Option<Rgb>,
+    pub text: Option<Rgb>,
+    pub opacity: Option<u8>,
+}
+
+#[must_use]
+pub fn user_cursor_colors() -> CursorColors {
+    let mut colors = CursorColors::default();
+    for config in user_config_files() {
+        if let Ok(contents) = read_config(&config) {
+            parse_cursor_colors(&contents, &mut colors);
+        }
+    }
+    colors
+}
+
+// The opacity is clamped to 0..=1 before it becomes hundredths.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn parse_cursor_colors(contents: &str, colors: &mut CursorColors) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        match key.as_str() {
+            "cursor-color" => colors.cursor = parse_rgb(&value),
+            "cursor-text" => colors.text = parse_rgb(&value),
+            "cursor-opacity" => {
+                colors.opacity = value
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|opacity| opacity.is_finite())
+                    .map(|opacity| (opacity.clamp(0.0, 1.0) * 100.0).round() as u8);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// What a program's OSC 52 read of the clipboard gets: Ghostty's
+/// `clipboard-read`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClipboardRead {
+    Allow,
+    /// Ask first, as Ghostty does by default.
+    #[default]
+    Ask,
+    Deny,
+}
+
+/// The user's `clipboard-read`, from their Ghostty config.
+#[must_use]
+pub fn user_clipboard_read() -> ClipboardRead {
+    let mut read = ClipboardRead::default();
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_clipboard_read(&contents, &mut read);
+            }
+        }
+    }
+    read
+}
+
+fn parse_clipboard_read(contents: &str, read: &mut ClipboardRead) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "clipboard-read" {
+            match value.as_str() {
+                "allow" => *read = ClipboardRead::Allow,
+                "" | "ask" => *read = ClipboardRead::Ask,
+                "deny" => *read = ClipboardRead::Deny,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Whether the pane under the pointer takes the keys: `focus-follows-mouse`
+/// from the user's Ghostty config, off by default as in Ghostty.
+#[must_use]
+pub fn user_focus_follows_mouse() -> bool {
+    let mut follows = false;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_focus_follows_mouse(&contents, &mut follows);
+            }
+        }
+    }
+    follows
+}
+
+fn parse_focus_follows_mouse(contents: &str, follows: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "focus-follows-mouse" {
+            match value.as_str() {
+                "true" => *follows = true,
+                "" | "false" => *follows = false,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Whether a new split, or a new tab, starts where the focused pane is:
+/// `split-inherit-working-directory` or `tab-inherit-working-directory`
+/// from the user's Ghostty config, else `window-inherit-working-directory`,
+/// on by default as in Ghostty.
+#[must_use]
+pub fn user_inherit_working_directory(split: bool) -> bool {
+    let mut inherit = Inherit::default();
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_inherit_working_directory(&contents, &mut inherit);
+            }
+        }
+    }
+    let own = if split { inherit.split } else { inherit.tab };
+    own.or(inherit.window).unwrap_or(true)
+}
+
+#[derive(Default)]
+struct Inherit {
+    window: Option<bool>,
+    tab: Option<bool>,
+    split: Option<bool>,
+}
+
+fn parse_inherit_working_directory(contents: &str, inherit: &mut Inherit) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        let slot = match key.as_str() {
+            "window-inherit-working-directory" => &mut inherit.window,
+            "tab-inherit-working-directory" => &mut inherit.tab,
+            "split-inherit-working-directory" => &mut inherit.split,
+            _ => continue,
+        };
+        match value.as_str() {
+            "" => *slot = None,
+            "true" => *slot = Some(true),
+            "false" => *slot = Some(false),
+            _ => {}
+        }
+    }
+}
+
+/// Whether URLs and paths written out in plain text are links: Ghostty's
+/// `link-url`, on by default. A program's OSC 8 hyperlinks are links
+/// whatever it says.
+#[must_use]
+pub fn user_link_url() -> bool {
+    let mut links = true;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_link_url(&contents, &mut links);
+            }
+        }
+    }
+    links
+}
+
+fn parse_link_url(contents: &str, links: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "link-url" {
+            match value.as_str() {
+                "" | "true" => *links = true,
+                "false" => *links = false,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Whether typing into a pane lets go of its selection: Ghostty's
+/// `selection-clear-on-typing`, on by default.
+#[must_use]
+pub fn user_selection_clear_on_typing() -> bool {
+    let mut clear = true;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_selection_clear_on_typing(&contents, &mut clear);
+            }
+        }
+    }
+    clear
+}
+
+fn parse_selection_clear_on_typing(contents: &str, clear: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "selection-clear-on-typing" {
+            match value.as_str() {
+                "" | "true" => *clear = true,
+                "false" => *clear = false,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Whether copied text loses the spaces at the ends of its lines: Ghostty's
+/// `clipboard-trim-trailing-spaces`, on by default.
+#[must_use]
+pub fn user_clipboard_trim_trailing_spaces() -> bool {
+    let mut trim = true;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_clipboard_trim(&contents, &mut trim);
+            }
+        }
+    }
+    trim
+}
+
+fn parse_clipboard_trim(contents: &str, trim: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "clipboard-trim-trailing-spaces" {
+            match value.as_str() {
+                "" | "true" => *trim = true,
+                "false" => *trim = false,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Whether a new tab opens just after the current one: Ghostty's
+/// `window-new-tab-position = current`. Mux puts new tabs at the end unless
+/// the user's config asks for that.
+#[must_use]
+pub fn user_new_tab_after_current() -> bool {
+    let mut after = false;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_new_tab_position(&contents, &mut after);
+            }
+        }
+    }
+    after
+}
+
+fn parse_new_tab_position(contents: &str, after: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "window-new-tab-position" {
+            match value.as_str() {
+                "current" => *after = true,
+                "" | "end" => *after = false,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// The least contrast text keeps against its background: Ghostty's
+/// `minimum-contrast`, from 1 (none asked, the default) to 21 (black on
+/// white).
+#[must_use]
+pub fn user_minimum_contrast() -> f32 {
+    let mut minimum = 1.0;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_minimum_contrast(&contents, &mut minimum);
+            }
+        }
+    }
+    minimum
+}
+
+fn parse_minimum_contrast(contents: &str, minimum: &mut f32) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key != "minimum-contrast" {
+            continue;
+        }
+        if value.is_empty() {
+            *minimum = 1.0;
+        } else if let Some(ratio) = value.parse::<f32>().ok().filter(|ratio| ratio.is_finite()) {
+            *minimum = ratio.clamp(1.0, 21.0);
+        }
+    }
+}
+
+/// Whether programs' desktop notifications (OSC 9, OSC 777) are heeded:
+/// `desktop-notifications` from the user's Ghostty config, on by default
+/// as in Ghostty.
+#[must_use]
+pub fn user_desktop_notifications() -> bool {
+    let mut heeded = true;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_desktop_notifications(&contents, &mut heeded);
+            }
+        }
+    }
+    heeded
+}
+
+fn parse_desktop_notifications(contents: &str, heeded: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "desktop-notifications" {
+            match value.as_str() {
+                "" | "true" => *heeded = true,
+                "false" => *heeded = false,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Whether the shell's prompt shows a blinking bar cursor, as Ghostty's
+/// shell integration does unless `shell-integration-features` says
+/// `no-cursor` (or `shell-integration = none` turns it all off).
+#[must_use]
+pub fn user_prompt_cursor() -> bool {
+    user_shell_feature("cursor")
+}
+
+/// Whether the prompt's bar holds still: `cursor:steady` in Ghostty's
+/// `shell-integration-features`.
+#[must_use]
+pub fn user_prompt_cursor_steady() -> bool {
+    let mut steady = false;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_cursor_steady(&contents, &mut steady);
+            }
+        }
+    }
+    steady
+}
+
+fn parse_cursor_steady(contents: &str, steady: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "shell-integration-features" {
+            for named in value.split(',').map(str::trim) {
+                match named {
+                    "cursor:steady" => *steady = true,
+                    "cursor" | "cursor:blink" => *steady = false,
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// Whether the shell titles its pane with where it is and what it runs, as
+/// Ghostty's shell integration does unless `shell-integration-features`
+/// says `no-title`.
+#[must_use]
+pub fn user_shell_title() -> bool {
+    user_shell_feature("title")
+}
+
+fn user_shell_feature(feature: &str) -> bool {
+    let mut on = true;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_shell_feature(&contents, feature, &mut on);
+            }
+        }
+    }
+    on
+}
+
+/// One of Ghostty's shell integration features, on by default: `feature`
+/// or `no-feature` in `shell-integration-features`, `true` or `false` for
+/// them all, and `shell-integration = none` for none.
+fn parse_shell_feature(contents: &str, feature: &str, on: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        match key.as_str() {
+            "shell-integration" if value == "none" => *on = false,
+            "shell-integration-features" => {
+                for named in value.split(',').map(str::trim) {
+                    let named = named.split(':').next().unwrap_or(named);
+                    if named == feature || named == "true" {
+                        *on = true;
+                    } else if named.strip_prefix("no-") == Some(feature) || named == "false" {
+                        *on = false;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether a plain click on the line being typed at a shell's prompt moves
+/// the cursor there: `cursor-click-to-move` from the user's Ghostty config,
+/// on by default as in Ghostty.
+#[must_use]
+pub fn user_cursor_click_to_move() -> bool {
+    let mut moves = true;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_cursor_click_to_move(&contents, &mut moves);
+            }
+        }
+    }
+    moves
+}
+
+fn parse_cursor_click_to_move(contents: &str, moves: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "cursor-click-to-move" {
+            match value.as_str() {
+                "" | "true" => *moves = true,
+                "false" => *moves = false,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Where a selection goes as it is made: `copy-on-select` in the user's
+/// Ghostty config.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CopyOnSelect {
+    /// `false`: nowhere.
+    Off,
+    /// `true`, Ghostty's default: to the selection clipboard, which
+    /// ⌘⇧V pastes from, leaving the clipboard alone.
+    #[default]
+    Selection,
+    /// `clipboard`: to the clipboard as well.
+    Clipboard,
+}
+
+#[must_use]
+pub fn user_copy_on_select() -> CopyOnSelect {
+    let mut copies = CopyOnSelect::default();
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_copy_on_select(&contents, &mut copies);
+            }
+        }
+    }
+    copies
+}
+
+fn parse_copy_on_select(contents: &str, copies: &mut CopyOnSelect) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "copy-on-select" {
+            *copies = match value.as_str() {
+                "clipboard" => CopyOnSelect::Clipboard,
+                "false" => CopyOnSelect::Off,
+                _ => CopyOnSelect::Selection,
+            };
+        }
+    }
+}
+
+/// When a long command finishing calls for attention:
+/// `notify-on-command-finish` and `notify-on-command-finish-after` from the
+/// user's Ghostty config. Mux calls by default, for a command of ten
+/// seconds or more that ends out of sight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommandFinishNotice {
+    /// Whether to call at all (`never` turns it off).
+    pub enabled: bool,
+    /// Whether to call even for the pane you are looking at (`always`).
+    pub watched_too: bool,
+    /// How long a command must run to be worth calling about.
+    pub after: std::time::Duration,
+    /// Whether it also posts a desktop notification:
+    /// `notify-on-command-finish-action` with `notify`.
+    pub desktop: bool,
+}
+
+impl Default for CommandFinishNotice {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            watched_too: false,
+            after: std::time::Duration::from_secs(10),
+            desktop: false,
+        }
+    }
+}
+
+#[must_use]
+pub fn user_command_finish_notice() -> CommandFinishNotice {
+    let mut notice = CommandFinishNotice::default();
+    for config in user_config_files() {
+        if let Ok(contents) = read_config(&config) {
+            parse_command_finish_notice(&contents, &mut notice);
+        }
+    }
+    notice
+}
+
+fn parse_command_finish_notice(contents: &str, notice: &mut CommandFinishNotice) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        match (key.as_str(), value.as_str()) {
+            ("notify-on-command-finish", "never") => notice.enabled = false,
+            ("notify-on-command-finish", "unfocused" | "") => {
+                notice.enabled = true;
+                notice.watched_too = false;
+            }
+            ("notify-on-command-finish", "always") => {
+                notice.enabled = true;
+                notice.watched_too = true;
+            }
+            ("notify-on-command-finish-after", value) => {
+                if let Some(after) = parse_duration(value) {
+                    notice.after = after;
+                }
+            }
+            ("notify-on-command-finish-action", value) => {
+                for action in value.split(',').map(str::trim) {
+                    match action {
+                        "notify" => notice.desktop = true,
+                        "no-notify" => notice.desktop = false,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A Ghostty duration: whole numbers with units, run together or spaced,
+/// as in `5s`, `1m30s` or `1h 15m`.
+fn parse_duration(value: &str) -> Option<std::time::Duration> {
+    let mut total = std::time::Duration::ZERO;
+    let mut rest = value.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    while !rest.is_empty() {
+        let digits = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let number: u64 = rest[..digits].parse().ok()?;
+        rest = &rest[digits..];
+        let unit_end = rest
+            .find(|c: char| c.is_ascii_digit() || c.is_whitespace())
+            .unwrap_or(rest.len());
+        let nanos_per = match &rest[..unit_end] {
+            "ns" => 1,
+            "us" | "µs" => 1_000,
+            "ms" => 1_000_000,
+            "s" => 1_000_000_000,
+            "m" => 60_000_000_000,
+            "h" => 3_600_000_000_000,
+            "d" => 86_400_000_000_000,
+            "w" => 604_800_000_000_000,
+            "y" => 31_536_000_000_000_000,
+            _ => return None,
+        };
+        total += std::time::Duration::from_nanos(number.checked_mul(nanos_per)?);
+        rest = rest[unit_end..].trim_start();
+    }
+    Some(total)
+}
+
+/// How much taller a cell is than the font makes it: `adjust-cell-height`
+/// from the user's Ghostty config, in points (`2`) or as a share of the
+/// height (`10%`), either of which may be negative.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum CellAdjust {
+    #[default]
+    None,
+    Points(f32),
+    Percent(f32),
+}
+
+impl CellAdjust {
+    /// `height` with the adjustment made, never shorter than half of it.
+    #[must_use]
+    pub fn apply(self, height: f32) -> f32 {
+        let adjusted = match self {
+            Self::None => height,
+            Self::Points(points) => height + points,
+            Self::Percent(percent) => height * (1.0 + percent / 100.0),
+        };
+        ((adjusted * 2.0).round() / 2.0).max(height / 2.0)
+    }
+}
+
+/// The user's `adjust-cell-height`, if their Ghostty config sets one.
+#[must_use]
+pub fn user_cell_height_adjust() -> CellAdjust {
+    let mut adjust = CellAdjust::None;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_cell_height_adjust(&contents, &mut adjust);
+            }
+        }
+    }
+    adjust
+}
+
+fn parse_cell_height_adjust(contents: &str, adjust: &mut CellAdjust) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key != "adjust-cell-height" {
+            continue;
+        }
+        let value = value.trim();
+        if value.is_empty() {
+            *adjust = CellAdjust::None;
+        } else if let Some(percent) = value.strip_suffix('%') {
+            if let Ok(percent) = percent.trim().parse::<f32>()
+                && percent.is_finite()
+            {
+                *adjust = CellAdjust::Percent(percent);
+            }
+        } else if let Ok(points) = value.parse::<f32>()
+            && points.is_finite()
+        {
+            *adjust = CellAdjust::Points(points);
+        }
+    }
+}
+
+/// How far the wheel scrolls: `mouse-scroll-multiplier` from the user's
+/// Ghostty config, for trackpads (`precision`) and for wheels that click
+/// (`discrete`). A bare number sets both, as in Ghostty, which scrolls three
+/// rows a click and a trackpad's own distance by default.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollMultiplier {
+    pub precision: f32,
+    pub discrete: f32,
+}
+
+impl Default for ScrollMultiplier {
+    fn default() -> Self {
+        Self {
+            precision: 1.0,
+            discrete: 3.0,
+        }
+    }
+}
+
+/// The user's `mouse-scroll-multiplier`.
+#[must_use]
+pub fn user_scroll_multiplier() -> ScrollMultiplier {
+    let mut multiplier = ScrollMultiplier::default();
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_scroll_multiplier(&contents, &mut multiplier);
+            }
+        }
+    }
+    multiplier
+}
+
+fn parse_scroll_multiplier(contents: &str, multiplier: &mut ScrollMultiplier) {
+    let number = |value: &str| {
+        value
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(|value| value.clamp(0.01, 10_000.0))
+    };
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key != "mouse-scroll-multiplier" {
+            continue;
+        }
+        if value.trim().is_empty() {
+            *multiplier = ScrollMultiplier::default();
+        } else if let Some(both) = number(&value) {
+            *multiplier = ScrollMultiplier {
+                precision: both,
+                discrete: both,
+            };
+        } else {
+            for part in value.split(',') {
+                match part.split_once(':') {
+                    Some((name, value)) if name.trim() == "precision" => {
+                        if let Some(value) = number(value) {
+                            multiplier.precision = value;
+                        }
+                    }
+                    Some((name, value)) if name.trim() == "discrete" => {
+                        if let Some(value) = number(value) {
+                            multiplier.discrete = value;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// What a right-click in a pane does: `right-click-action` from the user's
+/// Ghostty config.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RightClick {
+    /// Open the pane's menu, as in Ghostty by default.
+    #[default]
+    Menu,
+    Paste,
+    Copy,
+    /// Copy what is selected, or paste when nothing is.
+    CopyOrPaste,
+    Ignore,
+}
+
+/// The user's `right-click-action`.
+#[must_use]
+pub fn user_right_click() -> RightClick {
+    let mut action = RightClick::Menu;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_right_click(&contents, &mut action);
+            }
+        }
+    }
+    action
+}
+
+fn parse_right_click(contents: &str, action: &mut RightClick) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "right-click-action" {
+            *action = match value.as_str() {
+                "" | "context-menu" => RightClick::Menu,
+                "paste" => RightClick::Paste,
+                "copy" => RightClick::Copy,
+                "copy-or-paste" => RightClick::CopyOrPaste,
+                "ignore" => RightClick::Ignore,
+                _ => continue,
+            };
+        }
+    }
+}
+
+/// When closing a pane or tab asks first: `confirm-close-surface` from the
+/// user's Ghostty config.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CloseConfirm {
+    /// Only when a program besides the shell is running, as in Ghostty by
+    /// default.
+    #[default]
+    Running,
+    /// Never.
+    Never,
+    /// Every time.
+    Always,
+}
+
+/// The user's `confirm-close-surface`.
+#[must_use]
+pub fn user_close_confirm() -> CloseConfirm {
+    let mut confirm = CloseConfirm::Running;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_close_confirm(&contents, &mut confirm);
+            }
+        }
+    }
+    confirm
+}
+
+fn parse_close_confirm(contents: &str, confirm: &mut CloseConfirm) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "confirm-close-surface" {
+            match value.as_str() {
+                "" | "true" => *confirm = CloseConfirm::Running,
+                "false" => *confirm = CloseConfirm::Never,
+                "always" => *confirm = CloseConfirm::Always,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Whether a paste that would run commands is held for a second ⌘V:
+/// `clipboard-paste-protection` from the user's Ghostty config, on by
+/// default as in Ghostty.
+#[must_use]
+pub fn user_paste_protection() -> bool {
+    let mut enabled = true;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_paste_protection(&contents, &mut enabled);
+            }
+        }
+    }
+    enabled
+}
+
+fn parse_paste_protection(contents: &str, enabled: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "clipboard-paste-protection" {
+            match value.as_str() {
+                "" | "true" => *enabled = true,
+                "false" => *enabled = false,
+                _ => {}
+            }
+        }
+    }
+}
+
+fn parse_option_as_alt(contents: &str, enabled: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "macos-option-as-alt" {
+            match value.as_str() {
+                "true" | "left" | "right" => *enabled = true,
+                "" | "false" => *enabled = false,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// The Ghostty config files Mux reads, in the order it reads them.
+#[must_use]
+pub fn user_config_files() -> Vec<PathBuf> {
+    user_config_paths()
+        .map(|(_, configs)| configs)
+        .unwrap_or_default()
+}
+
+/// The user's `keybind` lines from their Ghostty config, in order, each
+/// as `trigger=action`. `keybind = clear` drops those before it.
+#[must_use]
+pub fn user_keybinds() -> Vec<String> {
+    let mut binds = Vec::new();
+    for config in user_config_files() {
+        if let Ok(contents) = read_config(&config) {
+            parse_keybinds(&contents, &mut binds);
+        }
+    }
+    binds
+}
+
+fn parse_keybinds(contents: &str, binds: &mut Vec<String>) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key != "keybind" {
+            continue;
+        }
+        if value == "clear" {
+            binds.clear();
+        } else if !value.is_empty() {
+            binds.push(value);
+        }
+    }
+}
+
+/// The window title the user's Ghostty config fixes with `title`, in place
+/// of the one programs and tabs set.
+#[must_use]
+pub fn user_window_title() -> Option<String> {
+    let mut title = None;
+    for config in user_config_files() {
+        if let Ok(contents) = read_config(&config) {
+            parse_window_title(&contents, &mut title);
+        }
+    }
+    title
+}
+
+fn parse_window_title(contents: &str, title: &mut Option<String>) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "title" {
+            *title = Some(value).filter(|value| !value.is_empty());
+        }
+    }
+}
+
+/// The theme the user's Ghostty config names, its dark one when it names a
+/// light and a dark.
+#[must_use]
+pub fn user_theme_name() -> Option<String> {
+    let mut name = None;
+    for config in user_config_files() {
+        if let Ok(contents) = read_config(&config) {
+            for (key, value) in contents.lines().filter_map(parse_config_entry) {
+                if key == "theme" {
+                    name = dark_theme_name(&value);
+                }
+            }
+        }
+    }
+    name
+}
+
 fn user_config_paths() -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
     let base = BaseDirs::new()?;
     let home = base.home_dir();
@@ -139,16 +1306,64 @@ fn user_config_paths() -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
     let roots = vec![macos_root.clone(), xdg_root.clone()];
     // Ghostty loads XDG first and macOS-specific files afterwards. Support
     // both the current and pre-1.2.3 filenames.
-    let configs = [
+    let mut configs = Vec::new();
+    let mut visited = HashSet::new();
+    for path in [
         xdg_root.join("config.ghostty"),
         xdg_root.join("config"),
         macos_root.join("config.ghostty"),
         macos_root.join("config"),
-    ]
-    .into_iter()
-    .filter(|path| path.is_file())
-    .collect();
+    ] {
+        if path.is_file() {
+            with_included(path, home, &mut visited, &mut configs);
+        }
+    }
     Some((roots, configs))
+}
+
+/// A config file and, after it, those its `config-file` lines include, as
+/// Ghostty loads them: relative to the including file, `~/` from home, a
+/// leading `?` for one that may be missing, each file once.
+fn with_included(
+    path: PathBuf,
+    home: &Path,
+    visited: &mut HashSet<PathBuf>,
+    configs: &mut Vec<PathBuf>,
+) {
+    let identity = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+    if !visited.insert(identity) {
+        return;
+    }
+    let included = fs::read_to_string(&path)
+        .map(|contents| included_files(&contents))
+        .unwrap_or_default();
+    let directory = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    configs.push(path);
+    for include in included {
+        let include = match include.strip_prefix("~/") {
+            Some(rest) => home.join(rest),
+            None => directory.join(include),
+        };
+        if include.is_file() {
+            with_included(include, home, visited, configs);
+        }
+    }
+}
+
+/// The files a config's `config-file` lines name, in order; `config-file =`
+/// with nothing clears those named before it.
+fn included_files(contents: &str) -> Vec<String> {
+    let mut files = Vec::new();
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "config-file" {
+            if value.is_empty() {
+                files.clear();
+            } else {
+                files.push(value.strip_prefix('?').unwrap_or(&value).to_owned());
+            }
+        }
+    }
+    files
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -192,6 +1407,8 @@ fn parse_theme_file(
             "background" => theme.background = parse_rgb(&value),
             "foreground" => theme.foreground = parse_rgb(&value),
             "cursor-color" => theme.cursor = parse_rgb(&value),
+            "selection-background" => theme.selection_background = parse_rgb(&value),
+            "selection-foreground" => theme.selection_foreground = parse_rgb(&value),
             "palette" => {
                 if let Some((index, color)) = parse_palette_entry(&value) {
                     theme.palette[usize::from(index)] = Some(color);
@@ -463,6 +1680,7 @@ mod linked {
             rectangular: bool,
         ) -> i32;
         fn mux_ghostty_terminal_clear_selection(terminal: *mut c_void) -> i32;
+        fn mux_ghostty_terminal_select_rows(terminal: *mut c_void, first: u32, last: u32) -> i32;
         fn mux_ghostty_selection_gesture_new(out_gesture: *mut *mut c_void) -> i32;
         fn mux_ghostty_selection_gesture_free(gesture: *mut c_void, terminal: *mut c_void);
         fn mux_ghostty_selection_gesture_reset(gesture: *mut c_void, terminal: *mut c_void) -> i32;
@@ -519,8 +1737,11 @@ mod linked {
             out_bytes: *mut *mut u8,
             out_len: *mut usize,
             out_has_selection: *mut bool,
+            trim: bool,
         ) -> i32;
         fn mux_ghostty_terminal_set_history_limit(terminal: *mut c_void, max_bytes: usize) -> i32;
+        fn mux_ghostty_terminal_set_default_cursor_style(terminal: *mut c_void, style: u8) -> i32;
+        fn mux_ghostty_terminal_set_default_cursor_blink(terminal: *mut c_void, blink: u8) -> i32;
         fn mux_ghostty_terminal_screen_text(
             terminal: *mut c_void,
             out_bytes: *mut *mut u8,
@@ -534,6 +1755,17 @@ mod linked {
             out_len: *mut usize,
         ) -> i32;
         fn mux_ghostty_buffer_free(bytes: *mut u8);
+        fn mux_ghostty_terminal_row_text(
+            terminal: *mut c_void,
+            y: u32,
+            out_bytes: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32;
+        fn mux_ghostty_terminal_prompt_rows(
+            terminal: *mut c_void,
+            out_rows: *mut *mut u32,
+            out_len: *mut usize,
+        ) -> i32;
         fn mux_ghostty_terminal_scroll_viewport(terminal: *mut c_void, tag: u8, value: i64);
         fn mux_ghostty_key_encoder_new(out_encoder: *mut *mut c_void) -> i32;
         fn mux_ghostty_key_encoder_free(encoder: *mut c_void);
@@ -658,6 +1890,32 @@ mod linked {
     unsafe impl Send for GhosttyEngine {}
 
     impl GhosttyEngine {
+        /// Select everything the terminal holds, its history and the screen,
+        /// as Cmd+A does in a Mac terminal.
+        pub fn select_all(&mut self) -> Result<(), TerminalError> {
+            self.select_rows(0, usize::MAX)
+        }
+
+        /// Select whole rows, `first` to `last`, counted from the top of the
+        /// history as `screen_text`'s lines are.
+        pub fn select_rows(&mut self, first: usize, last: usize) -> Result<(), TerminalError> {
+            // SAFETY: both handles are exclusively borrowed; resetting first
+            // keeps a later click from continuing an earlier click sequence.
+            let reset = unsafe {
+                mux_ghostty_selection_gesture_reset(
+                    self.selection_gesture.as_ptr(),
+                    self.terminal.as_ptr(),
+                )
+            };
+            check(reset).map_err(|error| TerminalError::Engine(error.to_string()))?;
+            let row = |row: usize| u32::try_from(row).unwrap_or(u32::MAX);
+            // SAFETY: the terminal is exclusively borrowed for this call.
+            let result = unsafe {
+                mux_ghostty_terminal_select_rows(self.terminal.as_ptr(), row(first), row(last))
+            };
+            check(result).map_err(|error| TerminalError::Engine(error.to_string()))
+        }
+
         pub fn new(size: TerminalSize) -> Result<Self, GhosttyError> {
             let size = size.validate()?;
             let mut terminal = ptr::null_mut();
@@ -874,6 +2132,33 @@ mod linked {
             })
         }
 
+        /// Show `style` until the program picks a cursor, and go back to it
+        /// when the program resets its choice.
+        pub fn set_default_cursor_style(&mut self, style: CursorStyle) -> Result<(), GhosttyError> {
+            let style = match style {
+                CursorStyle::Bar => 0,
+                CursorStyle::Block => 1,
+                CursorStyle::Underline => 2,
+                CursorStyle::HollowBlock => 3,
+            };
+            // SAFETY: the terminal is owned and the style is passed by value.
+            check(unsafe {
+                mux_ghostty_terminal_set_default_cursor_style(self.terminal.as_ptr(), style)
+            })
+        }
+
+        /// Whether the cursor blinks until the program says otherwise, and
+        /// again when it resets its choice.
+        pub fn set_default_cursor_blink(&mut self, blink: bool) -> Result<(), GhosttyError> {
+            // SAFETY: the terminal is owned and the flag is passed by value.
+            check(unsafe {
+                mux_ghostty_terminal_set_default_cursor_blink(
+                    self.terminal.as_ptr(),
+                    u8::from(blink),
+                )
+            })
+        }
+
         /// The whole screen as plain text, history first: one line per row,
         /// so a line's index is its row counted from the top of the history.
         /// Rows past the last one with text may be left out.
@@ -897,6 +2182,63 @@ mod linked {
             // freeing null for an empty screen is supported.
             unsafe { mux_ghostty_buffer_free(bytes) };
             Ok(text)
+        }
+
+        /// One row's text, counted from the top of the history as
+        /// `screen_text`'s lines are, its trailing blanks left off.
+        pub fn row_text(&self, row: usize) -> Result<String, GhosttyError> {
+            let mut bytes = ptr::null_mut();
+            let mut length = 0_usize;
+            let row = u32::try_from(row).unwrap_or(u32::MAX);
+            // SAFETY: output pointers are valid; the returned allocation is
+            // copied before it is released with the matching shim function.
+            let result = unsafe {
+                mux_ghostty_terminal_row_text(
+                    self.terminal.as_ptr(),
+                    row,
+                    &raw mut bytes,
+                    &raw mut length,
+                )
+            };
+            check(result)?;
+            let text =
+                String::from_utf8_lossy(borrowed_slice(bytes.cast_const(), length, "row text")?)
+                    .trim_end()
+                    .to_owned();
+            // SAFETY: the pointer is the allocation returned by the shim.
+            unsafe { mux_ghostty_buffer_free(bytes) };
+            Ok(text)
+        }
+
+        /// The rows where the shell's prompts begin, as it marked them with
+        /// OSC 133, counted from the top of the history as `screen_text`'s
+        /// lines are. Empty when the shell marks none.
+        pub fn prompt_rows(&self) -> Result<Vec<usize>, GhosttyError> {
+            let mut rows = ptr::null_mut();
+            let mut length = 0_usize;
+            // SAFETY: output pointers are valid; the returned allocation is
+            // copied before it is released with the matching shim function.
+            let result = unsafe {
+                mux_ghostty_terminal_prompt_rows(
+                    self.terminal.as_ptr(),
+                    &raw mut rows,
+                    &raw mut length,
+                )
+            };
+            check(result)?;
+            let found = if rows.is_null() || length == 0 {
+                Vec::new()
+            } else {
+                // SAFETY: the shim returned `length` initialised rows.
+                unsafe { std::slice::from_raw_parts(rows, length) }
+                    .iter()
+                    .map(|&row| row as usize)
+                    .collect()
+            };
+            // SAFETY: the pointer is the allocation returned by the shim, and
+            // freeing null is supported.
+            unsafe { mux_ghostty_buffer_free(rows.cast()) };
+            Ok(found)
         }
 
         fn checkpoint(&self) -> Result<TerminalCheckpoint, GhosttyError> {
@@ -935,6 +2277,10 @@ mod linked {
     impl TerminalEngine for GhosttyEngine {
         fn descriptor(&self) -> &EngineDescriptor {
             &self.descriptor
+        }
+
+        fn screen_text(&self) -> Option<String> {
+            Self::screen_text(self).ok()
         }
 
         fn next_output_sequence(&self) -> u64 {
@@ -1236,6 +2582,7 @@ mod linked {
                     &raw mut bytes,
                     &raw mut length,
                     &raw mut has_selection,
+                    crate::user_clipboard_trim_trailing_spaces(),
                 )
             };
             check(result).map_err(|error| TerminalError::Engine(error.to_string()))?;
@@ -2028,7 +3375,7 @@ mod linked {
                     b: 0xf4,
                 }),
                 cursor: None,
-                palette: [None; 256],
+                ..GhosttyTheme::default()
             };
             let red = Rgb {
                 r: 0xf3,
@@ -2088,6 +3435,27 @@ mod linked {
                     .any(|window| window == env!("CARGO_PKG_VERSION").as_bytes())
             );
             assert!(engine.take_pty_responses().expect("drained").is_empty());
+        }
+
+        #[test]
+        fn prompts_the_shell_marks_are_found_by_row_history_included() {
+            let mut engine = GhosttyEngine::new(TerminalSize {
+                cols: 20,
+                rows: 4,
+                ..TerminalSize::default()
+            })
+            .expect("new terminal");
+            engine
+                .apply_output(
+                    1,
+                    b"\x1b]133;A\x07$ ls\r\n\x1b]133;C\x07a\r\nb\r\nc\r\n\
+                      \x1b]133;D;0\x07\x1b]133;A\x07$ pwd\r\n/\r\n\
+                      \x1b]133;A\x07$ ",
+                )
+                .expect("terminal output");
+            assert_eq!(engine.prompt_rows().expect("prompt rows"), vec![0, 4, 6]);
+            assert_eq!(engine.row_text(4).expect("row text"), "$ pwd");
+            assert_eq!(engine.row_text(1).expect("row text"), "a");
         }
 
         #[test]
@@ -2611,13 +3979,15 @@ mod theme_tests {
         fs::create_dir(&themes).expect("themes directory");
         fs::write(
             themes.join("calm.conf"),
-            "background = 101020\nforeground = #c0c0d0\npalette = 4=#1122ee\n",
+            "background = 101020\nforeground = #c0c0d0\npalette = 4=#1122ee\n\
+             selection-background = 334455\n",
         )
         .expect("theme");
         let config = directory.path().join("config");
         fs::write(
             &config,
-            "foreground = ffffff\ntheme = calm.conf\npalette = 4=#abcdef\n",
+            "foreground = ffffff\ntheme = calm.conf\npalette = 4=#abcdef\n\
+             selection-foreground = #eeeeee\n",
         )
         .expect("config");
 
@@ -2626,6 +3996,459 @@ mod theme_tests {
         assert_eq!(theme.background, parse_rgb("101020"));
         assert_eq!(theme.foreground, parse_rgb("ffffff"));
         assert_eq!(theme.palette[4], parse_rgb("abcdef"));
+        assert_eq!(theme.selection_background, parse_rgb("334455"));
+        assert_eq!(theme.selection_foreground, parse_rgb("eeeeee"));
+    }
+
+    #[test]
+    fn paste_protection_is_on_unless_turned_off() {
+        let mut enabled = true;
+        parse_paste_protection("clipboard-paste-protection = false\n", &mut enabled);
+        assert!(!enabled);
+        parse_paste_protection("clipboard-paste-protection =\n", &mut enabled);
+        assert!(enabled);
+    }
+
+    #[test]
+    fn cursor_style_follows_the_last_setting() {
+        let mut style = CursorStyle::Block;
+        parse_cursor_style("cursor-style = bar\n", &mut style);
+        assert_eq!(style, CursorStyle::Bar);
+        parse_cursor_style("cursor-style = block_hollow\n", &mut style);
+        assert_eq!(style, CursorStyle::HollowBlock);
+        parse_cursor_style("cursor-style = wavy\n", &mut style);
+        assert_eq!(style, CursorStyle::HollowBlock);
+        parse_cursor_style("cursor-style = underline\ncursor-style =\n", &mut style);
+        assert_eq!(style, CursorStyle::Block);
+    }
+
+    #[test]
+    fn window_padding_takes_the_wider_side_of_a_pair() {
+        let mut padding = (DEFAULT_WINDOW_PADDING, DEFAULT_WINDOW_PADDING);
+        parse_window_padding(
+            "window-padding-x = 10\nwindow-padding-y = 4,12\n",
+            &mut padding,
+        );
+        assert_eq!(padding, (10.0, 12.0));
+        parse_window_padding(
+            "window-padding-x = wide\nwindow-padding-y = 1,2,3\n",
+            &mut padding,
+        );
+        assert_eq!(padding, (10.0, 12.0), "what is not a padding is ignored");
+        parse_window_padding("window-padding-x = -5\nwindow-padding-y =\n", &mut padding);
+        assert_eq!(padding, (0.0, DEFAULT_WINDOW_PADDING));
+    }
+
+    #[test]
+    fn font_features_read_as_ghostty_writes_them() {
+        let mut features = Vec::new();
+        parse_font_features(
+            "font-feature = -calt\nfont-feature = +ss01, zero=1\nfont-feature = liga off\n\
+             font-feature = toolong\n",
+            &mut features,
+        );
+        let tag = |tag: &str, value| (tag.to_owned(), value);
+        assert_eq!(
+            features,
+            vec![
+                tag("calt", 0),
+                tag("ss01", 1),
+                tag("zero", 1),
+                tag("liga", 0)
+            ]
+        );
+        parse_font_features("font-feature = calt\n", &mut features);
+        assert_eq!(features.last(), Some(&tag("calt", 1)), "a later value wins");
+        assert_eq!(features.len(), 4);
+        parse_font_features("font-feature =\n", &mut features);
+        assert!(features.is_empty());
+    }
+
+    #[test]
+    fn right_click_does_what_ghostty_is_told() {
+        let mut action = RightClick::Menu;
+        parse_right_click("right-click-action = copy-or-paste\n", &mut action);
+        assert_eq!(action, RightClick::CopyOrPaste);
+        parse_right_click("right-click-action = sideways\n", &mut action);
+        assert_eq!(
+            action,
+            RightClick::CopyOrPaste,
+            "an unknown action is ignored"
+        );
+        parse_right_click("right-click-action = ignore\n", &mut action);
+        assert_eq!(action, RightClick::Ignore);
+        parse_right_click("right-click-action =\n", &mut action);
+        assert_eq!(action, RightClick::Menu);
+    }
+
+    #[test]
+    fn cursor_blink_is_set_unset_or_left_to_the_program() {
+        let mut blink = None;
+        parse_cursor_blink("cursor-style-blink = true\n", &mut blink);
+        assert_eq!(blink, Some(true));
+        parse_cursor_blink("cursor-style-blink = maybe\n", &mut blink);
+        assert_eq!(blink, Some(true));
+        parse_cursor_blink("cursor-style-blink = false\n", &mut blink);
+        assert_eq!(blink, Some(false));
+        parse_cursor_blink("cursor-style-blink =\n", &mut blink);
+        assert_eq!(blink, None);
+    }
+
+    #[test]
+    fn the_pointer_hides_while_typing_only_when_asked() {
+        let mut hide = false;
+        parse_mouse_hide("mouse-hide-while-typing = true\n", &mut hide);
+        assert!(hide);
+        parse_mouse_hide("mouse-hide-while-typing = sometimes\n", &mut hide);
+        assert!(hide);
+        parse_mouse_hide("mouse-hide-while-typing =\n", &mut hide);
+        assert!(!hide);
+    }
+
+    #[test]
+    fn keybinds_are_kept_in_order_and_clear_drops_those_before() {
+        let mut binds = Vec::new();
+        parse_keybinds(
+            "keybind = cmd+d=new_split:right\nkeybind = clear\n\
+             keybind = shift+enter=text:\\x1b\\r\nkeybind = \"ctrl+==ignore\"\n",
+            &mut binds,
+        );
+        assert_eq!(binds, ["shift+enter=text:\\x1b\\r", "ctrl+==ignore"]);
+    }
+
+    #[test]
+    fn command_finish_notices_follow_ghostty() {
+        let mut notice = CommandFinishNotice::default();
+        parse_command_finish_notice(
+            "notify-on-command-finish = always\nnotify-on-command-finish-after = 1m30s\n",
+            &mut notice,
+        );
+        assert!(notice.enabled && notice.watched_too);
+        assert_eq!(notice.after, std::time::Duration::from_secs(90));
+        parse_command_finish_notice(
+            "notify-on-command-finish = never\nnotify-on-command-finish-after = soon\n",
+            &mut notice,
+        );
+        assert!(!notice.enabled);
+        assert_eq!(notice.after, std::time::Duration::from_secs(90));
+        assert!(!notice.desktop);
+        parse_command_finish_notice(
+            "notify-on-command-finish-action = bell,notify\n",
+            &mut notice,
+        );
+        assert!(notice.desktop);
+        assert_eq!(
+            parse_duration("1h 15m"),
+            Some(std::time::Duration::from_mins(75))
+        );
+        assert_eq!(
+            parse_duration("500ms"),
+            Some(std::time::Duration::from_millis(500))
+        );
+        assert_eq!(parse_duration("5"), None);
+    }
+
+    #[test]
+    fn unfocused_split_opacity_is_kept_in_range() {
+        let mut opacity = 0.7;
+        parse_unfocused_split_opacity("unfocused-split-opacity = 0.9\n", &mut opacity);
+        assert!((opacity - 0.9).abs() < f32::EPSILON);
+        parse_unfocused_split_opacity("unfocused-split-opacity = 0\n", &mut opacity);
+        assert!((opacity - 0.15).abs() < f32::EPSILON);
+        parse_unfocused_split_opacity("unfocused-split-opacity = 3\n", &mut opacity);
+        assert!((opacity - 1.0).abs() < f32::EPSILON);
+        parse_unfocused_split_opacity("unfocused-split-opacity = half\n", &mut opacity);
+        assert!((opacity - 1.0).abs() < f32::EPSILON);
+        parse_unfocused_split_opacity("unfocused-split-opacity =\n", &mut opacity);
+        assert!((opacity - 0.7).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn clipboard_write_is_allowed_unless_denied() {
+        let mut allowed = true;
+        parse_clipboard_write("clipboard-write = deny\n", &mut allowed);
+        assert!(!allowed);
+        parse_clipboard_write("clipboard-write = maybe\n", &mut allowed);
+        assert!(!allowed);
+        parse_clipboard_write("clipboard-write = ask\n", &mut allowed);
+        assert!(allowed);
+    }
+
+    #[test]
+    fn a_title_fixes_the_window_title_until_emptied() {
+        let mut title = None;
+        parse_window_title("title = \"Work\"\n", &mut title);
+        assert_eq!(title.as_deref(), Some("Work"));
+        parse_window_title("title =\n", &mut title);
+        assert_eq!(title, None);
+    }
+
+    #[test]
+    fn new_panes_inherit_the_directory_unless_told_not_to() {
+        let mut inherit = Inherit::default();
+        parse_inherit_working_directory(
+            "window-inherit-working-directory = false\nsplit-inherit-working-directory = true\n",
+            &mut inherit,
+        );
+        assert_eq!(inherit.window, Some(false));
+        assert_eq!(inherit.split, Some(true));
+        assert_eq!(inherit.tab, None);
+        parse_inherit_working_directory("window-inherit-working-directory =\n", &mut inherit);
+        assert_eq!(inherit.window, None);
+    }
+
+    #[test]
+    fn written_urls_are_links_unless_told_not_to() {
+        let mut links = true;
+        parse_link_url("link-url = false\n", &mut links);
+        assert!(!links);
+        parse_link_url("link-url = true\n", &mut links);
+        assert!(links);
+    }
+
+    #[test]
+    fn typing_lets_go_of_a_selection_unless_told_not_to() {
+        let mut clear = true;
+        parse_selection_clear_on_typing("selection-clear-on-typing = false\n", &mut clear);
+        assert!(!clear);
+        parse_selection_clear_on_typing("selection-clear-on-typing =\n", &mut clear);
+        assert!(clear);
+    }
+
+    #[test]
+    fn copies_are_trimmed_unless_told_not_to() {
+        let mut trim = true;
+        parse_clipboard_trim("clipboard-trim-trailing-spaces = false\n", &mut trim);
+        assert!(!trim);
+        parse_clipboard_trim("clipboard-trim-trailing-spaces =\n", &mut trim);
+        assert!(trim);
+    }
+
+    #[test]
+    fn new_tabs_open_after_the_current_one_only_when_asked() {
+        let mut after = false;
+        parse_new_tab_position("window-new-tab-position = current\n", &mut after);
+        assert!(after);
+        parse_new_tab_position("window-new-tab-position = sideways\n", &mut after);
+        assert!(after);
+        parse_new_tab_position("window-new-tab-position = end\n", &mut after);
+        assert!(!after);
+    }
+
+    #[test]
+    fn minimum_contrast_stays_between_one_and_twenty_one() {
+        let mut minimum = 1.0;
+        parse_minimum_contrast("minimum-contrast = 3.5\n", &mut minimum);
+        assert!((minimum - 3.5).abs() < f32::EPSILON);
+        parse_minimum_contrast("minimum-contrast = 40\n", &mut minimum);
+        assert!((minimum - 21.0).abs() < f32::EPSILON);
+        parse_minimum_contrast("minimum-contrast =\n", &mut minimum);
+        assert!((minimum - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn clipboard_reads_ask_unless_allowed_or_denied() {
+        let mut read = ClipboardRead::default();
+        assert_eq!(read, ClipboardRead::Ask);
+        parse_clipboard_read("clipboard-read = allow\n", &mut read);
+        assert_eq!(read, ClipboardRead::Allow);
+        parse_clipboard_read("clipboard-read = deny\n", &mut read);
+        assert_eq!(read, ClipboardRead::Deny);
+        parse_clipboard_read("clipboard-read =\n", &mut read);
+        assert_eq!(read, ClipboardRead::Ask);
+    }
+
+    #[test]
+    fn cursor_colours_come_from_the_users_own_lines() {
+        let mut colors = CursorColors::default();
+        parse_cursor_colors(
+            "cursor-color = #ff8800\ncursor-text = 101010\n",
+            &mut colors,
+        );
+        assert_eq!(
+            colors.cursor,
+            Some(Rgb {
+                r: 0xff,
+                g: 0x88,
+                b: 0
+            })
+        );
+        assert_eq!(
+            colors.text,
+            Some(Rgb {
+                r: 0x10,
+                g: 0x10,
+                b: 0x10
+            })
+        );
+        parse_cursor_colors("cursor-color =\n", &mut colors);
+        assert_eq!(colors.cursor, None);
+        parse_cursor_colors("cursor-opacity = 0.4\n", &mut colors);
+        assert_eq!(colors.opacity, Some(40));
+        parse_cursor_colors("cursor-opacity = 7\n", &mut colors);
+        assert_eq!(colors.opacity, Some(100));
+        parse_cursor_colors("cursor-opacity =\n", &mut colors);
+        assert_eq!(colors.opacity, None);
+    }
+
+    #[test]
+    fn included_config_files_load_after_their_includer() {
+        let root = std::env::temp_dir().join(format!("mux-includes-{}", std::process::id()));
+        fs::create_dir_all(root.join("parts")).expect("dir");
+        fs::write(
+            root.join("config"),
+            "config-file = parts/keys\nconfig-file = ?missing\nconfig-file = config\n",
+        )
+        .expect("config");
+        fs::write(root.join("parts/keys"), "keybind = ctrl+t=new_tab\n").expect("keys");
+        let mut configs = Vec::new();
+        with_included(
+            root.join("config"),
+            &root,
+            &mut HashSet::new(),
+            &mut configs,
+        );
+        assert_eq!(configs, [root.join("config"), root.join("parts/keys")]);
+        assert_eq!(
+            included_files("config-file = a\nconfig-file =\nconfig-file = ?b\n"),
+            ["b"]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn desktop_notifications_until_turned_off() {
+        let mut heeded = true;
+        parse_desktop_notifications("desktop-notifications = false\n", &mut heeded);
+        assert!(!heeded);
+        parse_desktop_notifications("desktop-notifications =\n", &mut heeded);
+        assert!(heeded);
+    }
+
+    #[test]
+    fn focus_follows_mouse_only_when_asked() {
+        let mut follows = false;
+        parse_focus_follows_mouse("focus-follows-mouse = true\n", &mut follows);
+        assert!(follows);
+        parse_focus_follows_mouse("focus-follows-mouse =\n", &mut follows);
+        assert!(!follows);
+    }
+
+    #[test]
+    fn shell_features_unless_turned_off() {
+        let mut bar = true;
+        let features = "shell-integration-features = sudo,no-cursor\n";
+        parse_shell_feature(features, "cursor", &mut bar);
+        assert!(!bar);
+        let mut title = true;
+        parse_shell_feature(features, "title", &mut title);
+        assert!(title, "only the features named change");
+        parse_shell_feature("shell-integration-features = cursor\n", "cursor", &mut bar);
+        assert!(bar);
+        parse_shell_feature("shell-integration-features = false\n", "title", &mut title);
+        assert!(!title);
+        parse_shell_feature("shell-integration = none\n", "cursor", &mut bar);
+        assert!(!bar);
+        parse_shell_feature(
+            "shell-integration-features = cursor:steady\n",
+            "cursor",
+            &mut bar,
+        );
+        assert!(bar);
+        let mut steady = false;
+        parse_cursor_steady("shell-integration-features = cursor:steady\n", &mut steady);
+        assert!(steady);
+        parse_cursor_steady("shell-integration-features = cursor\n", &mut steady);
+        assert!(!steady);
+    }
+
+    #[test]
+    fn cursor_click_to_move_unless_turned_off() {
+        let mut moves = true;
+        parse_cursor_click_to_move("cursor-click-to-move = false\n", &mut moves);
+        assert!(!moves);
+        parse_cursor_click_to_move("cursor-click-to-move =\n", &mut moves);
+        assert!(moves);
+    }
+
+    #[test]
+    fn copy_on_select_to_the_selection_or_the_clipboard() {
+        let mut copies = CopyOnSelect::default();
+        assert_eq!(copies, CopyOnSelect::Selection);
+        parse_copy_on_select("copy-on-select = clipboard\n", &mut copies);
+        assert_eq!(copies, CopyOnSelect::Clipboard);
+        parse_copy_on_select("copy-on-select = false\n", &mut copies);
+        assert_eq!(copies, CopyOnSelect::Off);
+        parse_copy_on_select("copy-on-select = true\n", &mut copies);
+        assert_eq!(copies, CopyOnSelect::Selection);
+    }
+
+    #[test]
+    fn cell_height_takes_points_or_a_share() {
+        let mut adjust = CellAdjust::None;
+        parse_cell_height_adjust("adjust-cell-height = 10%\n", &mut adjust);
+        assert_eq!(adjust, CellAdjust::Percent(10.0));
+        assert!((adjust.apply(20.0) - 22.0).abs() < f32::EPSILON);
+        parse_cell_height_adjust("adjust-cell-height = -3\n", &mut adjust);
+        assert_eq!(adjust, CellAdjust::Points(-3.0));
+        assert!((adjust.apply(20.0) - 17.0).abs() < f32::EPSILON);
+        parse_cell_height_adjust("adjust-cell-height = tall\n", &mut adjust);
+        assert_eq!(adjust, CellAdjust::Points(-3.0));
+        assert!((CellAdjust::Points(-50.0).apply(20.0) - 10.0).abs() < f32::EPSILON);
+        parse_cell_height_adjust("adjust-cell-height =\n", &mut adjust);
+        assert_eq!(adjust, CellAdjust::None);
+    }
+
+    #[test]
+    fn scroll_multiplier_takes_one_number_or_each_kind() {
+        let mut multiplier = ScrollMultiplier::default();
+        parse_scroll_multiplier("mouse-scroll-multiplier = 2\n", &mut multiplier);
+        assert_eq!(
+            multiplier,
+            ScrollMultiplier {
+                precision: 2.0,
+                discrete: 2.0
+            }
+        );
+        parse_scroll_multiplier(
+            "mouse-scroll-multiplier = precision:0.5,discrete:5\n",
+            &mut multiplier,
+        );
+        assert_eq!(
+            multiplier,
+            ScrollMultiplier {
+                precision: 0.5,
+                discrete: 5.0
+            }
+        );
+        parse_scroll_multiplier("mouse-scroll-multiplier =\n", &mut multiplier);
+        assert_eq!(multiplier, ScrollMultiplier::default());
+    }
+
+    #[test]
+    fn close_confirm_follows_the_last_setting() {
+        let mut confirm = CloseConfirm::Running;
+        parse_close_confirm("confirm-close-surface = false\n", &mut confirm);
+        assert_eq!(confirm, CloseConfirm::Never);
+        parse_close_confirm("confirm-close-surface = always\n", &mut confirm);
+        assert_eq!(confirm, CloseConfirm::Always);
+        parse_close_confirm("confirm-close-surface =\n", &mut confirm);
+        assert_eq!(confirm, CloseConfirm::Running);
+    }
+
+    #[test]
+    fn option_as_alt_follows_the_last_setting() {
+        let mut enabled = false;
+        parse_option_as_alt("macos-option-as-alt = true\n", &mut enabled);
+        assert!(enabled);
+        parse_option_as_alt("macos-option-as-alt = false\n", &mut enabled);
+        assert!(!enabled);
+        parse_option_as_alt("macos-option-as-alt = left\n# x = 1\n", &mut enabled);
+        assert!(enabled);
+        parse_option_as_alt("macos-option-as-alt = maybe\n", &mut enabled);
+        assert!(enabled);
+        parse_option_as_alt("macos-option-as-alt =\n", &mut enabled);
+        assert!(!enabled);
     }
 
     #[test]

@@ -11,7 +11,9 @@ use mux_protocol::{
     CreateSession, ErrorCode, ServerEvent, SessionAttachment, SessionSelector, SpawnCommand,
 };
 use mux_terminal::TerminalSize;
-use mux_workspace::{AgentSessionId, Direction, PaneId, Session, SessionId, WorkspaceCommand};
+use mux_workspace::{
+    AgentSessionId, Direction, PaneId, Session, SessionId, TabId, WorkspaceCommand,
+};
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -82,6 +84,33 @@ pub enum CommandMessage {
     RefreshAgentFiles {
         pane_id: PaneId,
     },
+    /// Find a path written in a pane's output from the pane's working
+    /// directory and show it in Finder.
+    RevealPath {
+        pane_id: PaneId,
+        written: String,
+    },
+    /// Clear a pane's screen and history, as the palette's clear does.
+    ClearPane {
+        pane_id: PaneId,
+    },
+    /// Reset a pane's terminal.
+    ResetPane {
+        pane_id: PaneId,
+    },
+    /// Ask what these panes are running before closing `target`.
+    CheckRunning {
+        target: CloseTarget,
+        pane_ids: Vec<PaneId>,
+    },
+}
+
+/// What a close is for: the focused pane, a tab, or every tab but one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CloseTarget {
+    Pane(PaneId),
+    Tab(TabId),
+    OtherTabs(TabId),
 }
 
 #[derive(Clone)]
@@ -303,6 +332,78 @@ impl BackendConnection {
         self.publish_sessions(events).await
     }
 
+    /// Index the files under a pane's working directory for an agent's `@`.
+    async fn refresh_agent_files(&mut self, events: &EventSender, pane_id: PaneId) -> Result<()> {
+        match self.client.pane_working_directory(pane_id).await {
+            Ok(cwd) => {
+                let scan_root = cwd.clone();
+                let files = tokio::task::spawn_blocking(move || {
+                    crate::agent_completion::index_files(&scan_root)
+                })
+                .await
+                .context("index agent reference files")?;
+                send_event(
+                    events,
+                    UserEvent::AgentFiles {
+                        pane_id,
+                        cwd,
+                        files,
+                    },
+                )
+            }
+            Err(error) => {
+                report_backend_error(events, error);
+                Ok(())
+            }
+        }
+    }
+
+    /// Show a path written in a pane's output, found from where its shell
+    /// is now, or say there is nothing there.
+    async fn reveal_path(&mut self, events: &EventSender, pane_id: PaneId, written: &str) {
+        let cwd = match self.client.pane_working_directory(pane_id).await {
+            Ok(cwd) => cwd,
+            Err(error) => {
+                report_backend_error(events, error);
+                return;
+            }
+        };
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let path = crate::links::resolve_written_path(written, &cwd, home.as_deref());
+        let said = if !path.exists() {
+            Some(format!("nothing at {written}"))
+        } else if let Err(error) = crate::links::reveal_path(&path) {
+            Some(format!("couldn't show {written}: {error}"))
+        } else {
+            None
+        };
+        if let Some(said) = said {
+            let _ = events.send_blocking(UserEvent::StripProblem(said));
+        }
+    }
+
+    /// Ask what a close's panes are running and hand the answer back.
+    async fn check_running(
+        &mut self,
+        events: &EventSender,
+        target: CloseTarget,
+        pane_ids: Vec<PaneId>,
+    ) -> Result<()> {
+        match self.client.running_programs(pane_ids).await {
+            Ok(running) => send_event(
+                events,
+                UserEvent::RunningChecked {
+                    target,
+                    running: running.into_iter().map(|program| program.name).collect(),
+                },
+            ),
+            Err(error) => {
+                report_backend_error(events, error);
+                Ok(())
+            }
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn handle_command(
         &mut self,
@@ -427,27 +528,41 @@ impl BackendConnection {
                         .await,
                 );
             }
-            CommandMessage::RefreshAgentFiles { pane_id } => {
-                match self.client.pane_working_directory(pane_id).await {
-                    Ok(cwd) => {
-                        let scan_root = cwd.clone();
-                        let files = tokio::task::spawn_blocking(move || {
-                            crate::agent_completion::index_files(&scan_root)
-                        })
-                        .await
-                        .context("index agent reference files")?;
-                        send_event(
-                            events,
-                            UserEvent::AgentFiles {
-                                pane_id,
-                                cwd,
-                                files,
-                            },
-                        )?;
-                    }
-                    Err(error) => report_backend_error(events, error),
-                }
+            command @ (CommandMessage::RefreshAgentFiles { .. }
+            | CommandMessage::RevealPath { .. }
+            | CommandMessage::ClearPane { .. }
+            | CommandMessage::ResetPane { .. }
+            | CommandMessage::CheckRunning { .. }) => {
+                self.handle_pane_question(command, events).await?;
             }
+        }
+        Ok(())
+    }
+
+    /// The commands that ask the daemon about a pane, or ask it to act on
+    /// one, outside its input and size.
+    async fn handle_pane_question(
+        &mut self,
+        command: CommandMessage,
+        events: &EventSender,
+    ) -> Result<()> {
+        match command {
+            CommandMessage::RefreshAgentFiles { pane_id } => {
+                self.refresh_agent_files(events, pane_id).await?;
+            }
+            CommandMessage::RevealPath { pane_id, written } => {
+                self.reveal_path(events, pane_id, &written).await;
+            }
+            CommandMessage::ClearPane { pane_id } => {
+                report_client_result(events, self.client.clear_pane(pane_id).await);
+            }
+            CommandMessage::ResetPane { pane_id } => {
+                report_client_result(events, self.client.reset_pane(pane_id).await);
+            }
+            CommandMessage::CheckRunning { target, pane_ids } => {
+                self.check_running(events, target, pane_ids).await?;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -458,9 +573,11 @@ impl BackendConnection {
         events: &EventSender,
     ) -> Result<()> {
         match event {
-            event @ (ServerEvent::PaneOutput { .. } | ServerEvent::PaneExited { .. }) => {
-                send_event(events, UserEvent::Server(event))
-            }
+            event @ (ServerEvent::PaneOutput { .. }
+            | ServerEvent::PaneExited { .. }
+            | ServerEvent::PaneCommandFinished { .. }
+            | ServerEvent::PaneCommandStarted { .. }
+            | ServerEvent::PaneSecretInput { .. }) => send_event(events, UserEvent::Server(event)),
             ServerEvent::ResyncRequired { session_id } => {
                 let attachment = self.client.attach(SessionSelector::Id(session_id)).await?;
                 self.publish_attachment(events, attachment)

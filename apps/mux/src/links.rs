@@ -4,14 +4,22 @@
 //! text, even one the terminal wrapped across rows) underlines it in the
 //! tab's ink and shows where it goes in the strip, as a browser's status line
 //! would; ⌘-click opens it. A file link is shown in Finder rather than
-//! opened, so a link can never start a program.
+//! opened, so a link can never start a program. A path written in the
+//! output, such as a compiler's `src/main.rs:12:5`, is a link too: found
+//! from the pane's working directory and shown in Finder. Ghostty's
+//! `link-url = false` leaves written URLs and paths as text, OSC 8 links
+//! still working.
 
 use super::*;
 use mux_terminal::RenderCell;
+use std::path::Path;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Link {
     pub(super) url: String,
+    /// Whether `url` is a path as written in the output, to be found from
+    /// the pane's working directory, rather than a URL.
+    pub(super) path: bool,
     /// Each grid row the link covers, with its first column and the column
     /// after its last.
     pub(super) spans: Vec<(u16, u16, u16)>,
@@ -19,9 +27,21 @@ pub(super) struct Link {
 
 const SCHEMES: [&str; 3] = ["https://", "http://", "file://"];
 
+/// Whether links written out in plain text are found, as the user's
+/// Ghostty `link-url` has it.
+fn written_links() -> bool {
+    static LINKS: ghostty_config::Reloadable<bool> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_link_url);
+    LINKS.get()
+}
+
 /// The link under a cell, if there is one.
 pub(super) fn link_at(frame: &RenderFrame, point: TerminalPoint) -> Option<Link> {
-    hyperlink_at(frame, point).or_else(|| written_url_at(frame, point))
+    hyperlink_at(frame, point).or_else(|| {
+        written_links()
+            .then(|| written_url_at(frame, point))
+            .flatten()
+    })
 }
 
 fn cell(frame: &RenderFrame, row: u16, column: u16) -> Option<&RenderCell> {
@@ -47,6 +67,7 @@ fn hyperlink_at(frame: &RenderFrame, point: TerminalPoint) -> Option<Link> {
     let cells = (first..=last).map(|index| ((index / columns) as u16, (index % columns) as u16));
     Some(Link {
         url,
+        path: false,
         spans: spans_of(cells),
     })
 }
@@ -95,11 +116,17 @@ fn written_url_at(frame: &RenderFrame, point: TerminalPoint) -> Option<Link> {
         .iter()
         .map(|(character, ..)| *character)
         .collect::<Vec<_>>();
-    let (start, end) = url_spans(&text)
-        .into_iter()
-        .find(|(start, end)| (*start..*end).contains(&hit))?;
+    let under = |spans: Vec<(usize, usize)>| {
+        spans
+            .into_iter()
+            .find(|(start, end)| (*start..*end).contains(&hit))
+    };
+    let (path, (start, end)) = under(url_spans(&text))
+        .map(|span| (false, span))
+        .or_else(|| under(quick_select::path_spans(&text)).map(|span| (true, span)))?;
     Some(Link {
         url: text[start..end].iter().collect(),
+        path,
         spans: spans_of(
             characters[start..end]
                 .iter()
@@ -167,6 +194,43 @@ fn trimmed_url_length(url: &[char]) -> usize {
 }
 
 /// Cells in reading order, gathered into one span per row.
+/// Where a path written in a pane's output is: from the home directory for
+/// `~/`, else from the pane's working directory, without the line and column
+/// a compiler or grep put after it.
+pub(super) fn resolve_written_path(written: &str, cwd: &Path, home: Option<&Path>) -> PathBuf {
+    let path = quick_select::without_line_and_column(written);
+    match (path.strip_prefix("~/"), home) {
+        (Some(rest), Some(home)) => home.join(rest),
+        _ if path == "~" => home.map_or_else(|| cwd.join(path), Path::to_path_buf),
+        _ => cwd.join(path),
+    }
+}
+
+/// Show a path written in a pane's output in Finder, or a folder's
+/// contents; a file is never opened, so a click can't start a program.
+pub(super) fn reveal_path(path: &Path) -> std::io::Result<()> {
+    let mut command = if cfg!(target_os = "macos") {
+        Command::new("/usr/bin/open")
+    } else {
+        Command::new("xdg-open")
+    };
+    if path.is_dir() {
+        command.arg(path);
+    } else if cfg!(target_os = "macos") {
+        command.arg("-R").arg(path);
+    } else {
+        command.arg(path.parent().unwrap_or(Path::new("/")));
+    }
+    command.spawn().map(|_| ())
+}
+
+/// What copying a link puts on the clipboard: a file's path, or the URL.
+pub(super) fn link_text(url: &str) -> &str {
+    url.strip_prefix("file://").map_or(url, |path| {
+        path.find('/').map_or(path, |slash| &path[slash..])
+    })
+}
+
 pub(super) fn spans_of(cells: impl Iterator<Item = (u16, u16)>) -> Vec<(u16, u16, u16)> {
     let mut spans: Vec<(u16, u16, u16)> = Vec::new();
     for (row, column) in cells {
@@ -179,7 +243,7 @@ pub(super) fn spans_of(cells: impl Iterator<Item = (u16, u16)>) -> Vec<(u16, u16
 }
 
 /// Open a link the way the system opens it. Files are shown, not opened.
-fn open_link(url: &str) -> std::io::Result<()> {
+pub(super) fn open_link(url: &str) -> std::io::Result<()> {
     let mut command = if cfg!(target_os = "macos") {
         Command::new("/usr/bin/open")
     } else {
@@ -204,7 +268,7 @@ fn open_link(url: &str) -> std::io::Result<()> {
 }
 
 impl MuxApp {
-    fn link_under(
+    pub(super) fn link_under(
         &self,
         pane_id: PaneId,
         rect: layout::Rect,
@@ -270,6 +334,31 @@ impl MuxApp {
         }
     }
 
+    /// Put a link, or a path's text, on the clipboard.
+    pub(super) fn copy_link(&mut self, link: &Link, cx: &mut Context<Self>) {
+        if let Some(clipboard) = &mut self.clipboard
+            && clipboard.set_text(link_text(&link.url).to_owned()).is_ok()
+        {
+            let what = if link.path || link.url.starts_with("file://") {
+                "copied the path"
+            } else {
+                "copied the link"
+            };
+            self.say_in_strip(what, false, cx);
+        }
+    }
+
+    /// Ghostty's `copy_url_to_clipboard`: the link under the pointer, ⌘
+    /// held or not.
+    pub(super) fn copy_link_under_pointer(&mut self, cx: &mut Context<Self>) {
+        let link = self
+            .link_pointer
+            .and_then(|(pane_id, rect, position)| self.link_under(pane_id, rect, position));
+        if let Some(link) = link {
+            self.copy_link(&link, cx);
+        }
+    }
+
     /// ⌘-click on a link opens it. Returns whether the click was a link's.
     pub(super) fn open_link_under(
         &mut self,
@@ -284,10 +373,29 @@ impl MuxApp {
         let Some(link) = self.link_under(pane_id, rect, event.position) else {
             return false;
         };
-        if let Err(error) = open_link(&link.url) {
+        self.follow_link(pane_id, &link, cx);
+        true
+    }
+
+    /// Open a link, or have the daemon find a written path from where the
+    /// pane's shell is and show it.
+    pub(super) fn follow_link(&mut self, pane_id: PaneId, link: &Link, cx: &mut Context<Self>) {
+        if link.path {
+            self.backend.send(CommandMessage::RevealPath {
+                pane_id,
+                written: link.url.clone(),
+            });
+        } else if let Err(error) = open_link(&link.url) {
             self.say_in_strip(format!("couldn't open {}: {error}", link.url), true, cx);
         }
-        true
+    }
+
+    /// Open the directory a pane's shell is in now, in Finder.
+    pub(super) fn reveal_directory(&self, pane_id: PaneId) {
+        self.backend.send(CommandMessage::RevealPath {
+            pane_id,
+            written: ".".to_owned(),
+        });
     }
 
     pub(super) fn pane_link_hovered(&self, pane_id: PaneId) -> bool {
@@ -339,7 +447,7 @@ impl MuxApp {
     /// Where the hovered link goes, said in the strip.
     pub(super) fn render_link_target(&self) -> Option<gpui::AnyElement> {
         let (_, link) = self.link_hover.as_ref()?;
-        let verb = if link.url.starts_with("file://") {
+        let verb = if link.path || link.url.starts_with("file://") {
             "show"
         } else {
             "open"
@@ -409,6 +517,47 @@ mod tests {
 
     fn at(column: u16, row: u16) -> TerminalPoint {
         TerminalPoint { column, row }
+    }
+
+    #[test]
+    fn a_written_path_is_a_link_found_from_the_working_directory() {
+        let output = frame(
+            &["error at src/main.rs:12:5, see ~/notes.md."],
+            60,
+            &[false],
+        );
+        let link = link_at(&output, at(12, 0)).expect("path link");
+        assert!(link.path);
+        assert_eq!(link.url, "src/main.rs:12:5");
+        assert_eq!(link.spans, vec![(0, 9, 25)]);
+        let notes = link_at(&output, at(34, 0)).expect("home path link");
+        assert_eq!(notes.url, "~/notes.md");
+        assert!(link_at(&output, at(2, 0)).is_none());
+
+        let cwd = Path::new("/work/mux");
+        let home = Some(Path::new("/Users/r"));
+        assert_eq!(
+            resolve_written_path("src/main.rs:12:5", cwd, home),
+            Path::new("/work/mux/src/main.rs")
+        );
+        assert_eq!(
+            resolve_written_path("~/notes.md", cwd, home),
+            Path::new("/Users/r/notes.md")
+        );
+        assert_eq!(
+            resolve_written_path("/etc/hosts", cwd, home),
+            Path::new("/etc/hosts")
+        );
+    }
+
+    #[test]
+    fn a_copied_file_link_is_its_path() {
+        assert_eq!(
+            link_text("file://mac.local/Users/r/a b.txt"),
+            "/Users/r/a b.txt"
+        );
+        assert_eq!(link_text("file:///tmp/x"), "/tmp/x");
+        assert_eq!(link_text("https://example.com/a"), "https://example.com/a");
     }
 
     #[test]

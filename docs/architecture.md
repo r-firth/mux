@@ -86,6 +86,28 @@ Closing the GUI does not terminate the daemon or its shells. A daemon crash
 remains distinct from closing the GUI and currently ends the live processes it
 owns.
 
+The daemon writes its workspace to `workspace.json` in the state directory
+(mode 0600): each session's layout, tab names and inks, spawn command, and
+the live working directory of every pane. It writes on each workspace change
+and every five seconds if anything, such as a pane's directory, has moved.
+A daemon that starts finds the file before it accepts clients and spawns a
+fresh shell for every saved pane, keeping the pane, tab and session ids, so a
+restart or a protocol upgrade loses the running programs but not the shape of
+the workspace. A file it cannot read, or one from another format version, is
+left alone.
+
+What each pane showed is kept beside it, as plain text, in
+`pane-text/<pane id>.txt` (mode 0600): the last thousand lines of its history
+and screen, written every five seconds when they have changed, and removed
+with the pane. A restored pane shows that text above a faint rule before its
+new shell's prompt. A pane with only its prompt on it keeps nothing, and one
+untouched since it was itself restored keeps what it came back with, so an
+idle pane does not gather a rule at every restart.
+
+The window keeps its own frame beside it, in `window.json`: where it was
+last left and at what size, and whether it was zoomed. The app opens there
+when a display still shows that frame, and centred otherwise.
+
 Workspace mutations and focused terminal input share one ordered backend
 queue. This prevents keystrokes immediately following a pane, tab, or session
 change from being routed to the formerly focused PTY. A GUI can also select an
@@ -97,6 +119,17 @@ the daemon clears that orphaned mode when the shell regains the terminal and
 publishes the reset in the same ordered output stream consumed by GUI replicas.
 This keeps durable checkpoints and every attached client in agreement while
 preserving enhanced keyboard input for live TUIs.
+
+Panes find the shell's prompts by the OSC 133 marks it prints. The daemon
+writes a `.zshenv` to `shell-integration/zsh` in the state directory and
+starts zsh with `ZDOTDIR` there; it restores the user's `ZDOTDIR` (passed in
+`MUX_USER_ZDOTDIR`), sources their own `.zshenv`, and adds precmd and preexec
+hooks that print the marks, so the rest of their startup files load as
+usual. bash is given a `PROMPT_COMMAND` that prints the prompt mark, and how the
+last command ended, ahead of any the user exported, keeping `$?` for it,
+and a `PS0` that marks where each command starts (bash 4.4 and later). The
+GUI keeps how each prompt's command ended and how long it ran, from the
+start and end marks, and lines them up with the prompts from the newest.
 
 The daemon also owns ACP processes. Closing the native agent surface only
 detaches that view; explicit `/end` closes the selected process and the GUI

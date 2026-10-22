@@ -421,6 +421,34 @@ int32_t mux_ghostty_terminal_set_history_limit(
       &max_bytes);
 }
 
+/* The cursor a pane shows until its program picks one, and goes back to on
+ * a DECSCUSR reset: 0 bar, 1 block, 2 underline, 3 hollow block. */
+int32_t mux_ghostty_terminal_set_default_cursor_style(
+    mux_ghostty_terminal_t terminal,
+    uint8_t style) {
+  GhosttyTerminalCursorStyle value;
+  switch (style) {
+    case 0: value = GHOSTTY_TERMINAL_CURSOR_STYLE_BAR; break;
+    case 2: value = GHOSTTY_TERMINAL_CURSOR_STYLE_UNDERLINE; break;
+    case 3: value = GHOSTTY_TERMINAL_CURSOR_STYLE_BLOCK_HOLLOW; break;
+    default: value = GHOSTTY_TERMINAL_CURSOR_STYLE_BLOCK; break;
+  }
+  return (int32_t)ghostty_terminal_set(
+      (GhosttyTerminal)terminal,
+      GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_STYLE,
+      &value);
+}
+
+int32_t mux_ghostty_terminal_set_default_cursor_blink(
+    mux_ghostty_terminal_t terminal,
+    uint8_t blink) {
+  bool value = blink != 0;
+  return (int32_t)ghostty_terminal_set(
+      (GhosttyTerminal)terminal,
+      GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_BLINK,
+      &value);
+}
+
 int32_t mux_ghostty_terminal_apply_theme(
     mux_ghostty_terminal_t raw_terminal,
     const mux_ghostty_rgb_t *background,
@@ -564,6 +592,55 @@ int32_t mux_ghostty_terminal_set_selection(
   selection.rectangle = rectangular;
   return (int32_t)ghostty_terminal_set(
       terminal, GHOSTTY_TERMINAL_OPT_SELECTION, &selection);
+}
+
+// Selects whole rows of the screen, history included, from the first cell
+// of `first` to the last cell of `last`, counted from the top of the history.
+// Rows past the end are taken as the last row.
+int32_t mux_ghostty_terminal_select_rows(
+    mux_ghostty_terminal_t raw_terminal, uint32_t first, uint32_t last) {
+  GhosttyTerminal terminal = (GhosttyTerminal)raw_terminal;
+  uint16_t cols = 0;
+  GhosttyResult result =
+      ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_COLS, &cols);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+  GhosttyTerminalScrollbar scrollbar = {0};
+  result = ghostty_terminal_get(
+      terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &scrollbar);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+  if (cols == 0 || scrollbar.total == 0 || scrollbar.total > UINT32_MAX ||
+      first > last) {
+    return (int32_t)GHOSTTY_INVALID_VALUE;
+  }
+  uint32_t end = (uint32_t)(scrollbar.total - 1);
+  if (last > end) last = end;
+  if (first > last) first = last;
+  GhosttyPoint first_point = {
+      .tag = GHOSTTY_POINT_TAG_SCREEN,
+      .value = {.coordinate = {.x = 0, .y = first}},
+  };
+  GhosttyPoint last_point = {
+      .tag = GHOSTTY_POINT_TAG_SCREEN,
+      .value = {.coordinate = {.x = (uint16_t)(cols - 1), .y = last}},
+  };
+  GhosttyGridRef first_ref = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+  GhosttyGridRef last_ref = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+  result = ghostty_terminal_grid_ref(terminal, first_point, &first_ref);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+  result = ghostty_terminal_grid_ref(terminal, last_point, &last_ref);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+  GhosttySelection selection = GHOSTTY_INIT_SIZED(GhosttySelection);
+  selection.start = first_ref;
+  selection.end = last_ref;
+  selection.rectangle = false;
+  return (int32_t)ghostty_terminal_set(
+      terminal, GHOSTTY_TERMINAL_OPT_SELECTION, &selection);
+}
+
+// Selects the whole screen, history included, from its first cell to the
+// last cell of its last row.
+int32_t mux_ghostty_terminal_select_all(mux_ghostty_terminal_t raw_terminal) {
+  return mux_ghostty_terminal_select_rows(raw_terminal, 0, UINT32_MAX);
 }
 
 int32_t mux_ghostty_terminal_clear_selection(
@@ -916,7 +993,8 @@ int32_t mux_ghostty_terminal_selected_text(
     mux_ghostty_terminal_t raw_terminal,
     uint8_t **out_bytes,
     size_t *out_len,
-    bool *out_has_selection) {
+    bool *out_has_selection,
+    bool trim) {
   if (out_bytes == NULL || out_len == NULL || out_has_selection == NULL) {
     return (int32_t)GHOSTTY_INVALID_VALUE;
   }
@@ -934,7 +1012,7 @@ int32_t mux_ghostty_terminal_selected_text(
       GHOSTTY_INIT_SIZED(GhosttyTerminalSelectionFormatOptions);
   options.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN;
   options.unwrap = true;
-  options.trim = true;
+  options.trim = trim;
   options.selection = &selection;
   uint8_t *ghostty_bytes = NULL;
   size_t ghostty_len = 0;
@@ -1043,6 +1121,145 @@ int32_t mux_ghostty_terminal_encode_paste(
   }
   *out_bytes = encoded;
   *out_len = written;
+  return (int32_t)GHOSTTY_SUCCESS;
+}
+
+/* The rows that begin a shell prompt, counted from the top of the history,
+ * as the shell marked them with OSC 133. The caller frees *out_rows with
+ * mux_ghostty_buffer_free. */
+int32_t mux_ghostty_terminal_prompt_rows(
+    mux_ghostty_terminal_t raw_terminal,
+    uint32_t **out_rows,
+    size_t *out_len) {
+  if (out_rows == NULL || out_len == NULL) {
+    return (int32_t)GHOSTTY_INVALID_VALUE;
+  }
+  *out_rows = NULL;
+  *out_len = 0;
+  GhosttyTerminal terminal = (GhosttyTerminal)raw_terminal;
+  GhosttyTerminalScrollbar scrollbar = {0};
+  GhosttyResult result = ghostty_terminal_get(
+      terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &scrollbar);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+  if (scrollbar.total == 0 || scrollbar.total > UINT32_MAX) {
+    return (int32_t)GHOSTTY_SUCCESS;
+  }
+  uint32_t *rows = NULL;
+  size_t len = 0;
+  size_t capacity = 0;
+  for (uint32_t y = 0; y < (uint32_t)scrollbar.total; y++) {
+    GhosttyPoint point = {
+        .tag = GHOSTTY_POINT_TAG_SCREEN,
+        .value = {.coordinate = {.x = 0, .y = y}},
+    };
+    GhosttyGridRef ref = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+    if (ghostty_terminal_grid_ref(terminal, point, &ref) != GHOSTTY_SUCCESS) {
+      continue;
+    }
+    GhosttyRow row = 0;
+    if (ghostty_grid_ref_row(&ref, &row) != GHOSTTY_SUCCESS) continue;
+    GhosttyRowSemanticPrompt prompt = GHOSTTY_ROW_SEMANTIC_NONE;
+    if (ghostty_row_get(row, GHOSTTY_ROW_DATA_SEMANTIC_PROMPT, &prompt) !=
+            GHOSTTY_SUCCESS ||
+        prompt != GHOSTTY_ROW_SEMANTIC_PROMPT) {
+      continue;
+    }
+    if (len == capacity) {
+      size_t grown = capacity == 0 ? 64 : capacity * 2;
+      uint32_t *bigger = realloc(rows, grown * sizeof(uint32_t));
+      if (bigger == NULL) {
+        free(rows);
+        return (int32_t)GHOSTTY_OUT_OF_MEMORY;
+      }
+      rows = bigger;
+      capacity = grown;
+    }
+    rows[len++] = y;
+  }
+  *out_rows = rows;
+  *out_len = len;
+  return (int32_t)GHOSTTY_SUCCESS;
+}
+
+static size_t mux_utf8_encode(uint32_t codepoint, uint8_t *out) {
+  if (codepoint < 0x80) {
+    out[0] = (uint8_t)codepoint;
+    return 1;
+  }
+  if (codepoint < 0x800) {
+    out[0] = (uint8_t)(0xC0 | (codepoint >> 6));
+    out[1] = (uint8_t)(0x80 | (codepoint & 0x3F));
+    return 2;
+  }
+  if (codepoint < 0x10000) {
+    out[0] = (uint8_t)(0xE0 | (codepoint >> 12));
+    out[1] = (uint8_t)(0x80 | ((codepoint >> 6) & 0x3F));
+    out[2] = (uint8_t)(0x80 | (codepoint & 0x3F));
+    return 3;
+  }
+  out[0] = (uint8_t)(0xF0 | (codepoint >> 18));
+  out[1] = (uint8_t)(0x80 | ((codepoint >> 12) & 0x3F));
+  out[2] = (uint8_t)(0x80 | ((codepoint >> 6) & 0x3F));
+  out[3] = (uint8_t)(0x80 | (codepoint & 0x3F));
+  return 4;
+}
+
+/* One row of the screen as UTF-8 text, counted from the top of the history:
+ * a space for each empty cell, nothing for the tail of a wide character,
+ * trailing spaces left on. The caller frees *out_bytes with
+ * mux_ghostty_buffer_free. */
+int32_t mux_ghostty_terminal_row_text(
+    mux_ghostty_terminal_t raw_terminal,
+    uint32_t y,
+    uint8_t **out_bytes,
+    size_t *out_len) {
+  if (out_bytes == NULL || out_len == NULL) {
+    return (int32_t)GHOSTTY_INVALID_VALUE;
+  }
+  *out_bytes = NULL;
+  *out_len = 0;
+  GhosttyTerminal terminal = (GhosttyTerminal)raw_terminal;
+  uint16_t cols = 0;
+  GhosttyResult result =
+      ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_COLS, &cols);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+  size_t capacity = (size_t)cols * 4 * 16 + 1;
+  uint8_t *text = malloc(capacity);
+  if (text == NULL) return (int32_t)GHOSTTY_OUT_OF_MEMORY;
+  size_t len = 0;
+  uint32_t graphemes[16];
+  for (uint16_t x = 0; x < cols; x++) {
+    GhosttyPoint point = {
+        .tag = GHOSTTY_POINT_TAG_SCREEN,
+        .value = {.coordinate = {.x = x, .y = y}},
+    };
+    GhosttyGridRef ref = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+    result = ghostty_terminal_grid_ref(terminal, point, &ref);
+    if (result != GHOSTTY_SUCCESS) {
+      free(text);
+      return (int32_t)result;
+    }
+    GhosttyCell cell = 0;
+    GhosttyCellWide wide = GHOSTTY_CELL_WIDE_NARROW;
+    if (ghostty_grid_ref_cell(&ref, &cell) == GHOSTTY_SUCCESS &&
+        ghostty_cell_get(cell, GHOSTTY_CELL_DATA_WIDE, &wide) == GHOSTTY_SUCCESS &&
+        (wide == GHOSTTY_CELL_WIDE_SPACER_TAIL ||
+         wide == GHOSTTY_CELL_WIDE_SPACER_HEAD)) {
+      continue;
+    }
+    size_t count = 0;
+    if (ghostty_grid_ref_graphemes(&ref, graphemes, 16, &count) !=
+            GHOSTTY_SUCCESS ||
+        count == 0) {
+      text[len++] = ' ';
+      continue;
+    }
+    for (size_t i = 0; i < count && len + 4 < capacity; i++) {
+      len += mux_utf8_encode(graphemes[i], text + len);
+    }
+  }
+  *out_bytes = text;
+  *out_len = len;
   return (int32_t)GHOSTTY_SUCCESS;
 }
 

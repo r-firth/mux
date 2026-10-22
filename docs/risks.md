@@ -34,11 +34,12 @@ The pinned engine is exercised end-to-end through the native GPUI renderer:
 Unicode fallback, wide-cell placement, styled cells, cursor, colors,
 checkpoints, resize, reattachment, selection/copy/paste, mode-aware keyboard and
 mouse encoding, and scrollback have automated or native-window coverage. OSC 8
-URIs are carried through the adapter per cell, but activation UI is not yet wired.
+URIs are carried through the adapter per cell and open with Cmd+click.
 Ghostty's gesture engine owns cell/word/line selection, repeat-click
 thresholds, and direction-aware and rectangular dragging; the GUI translates
 native pane geometry. The primary
-remaining terminal risks are IME, hyperlink interaction, cursor-blink scheduling,
+remaining terminal risks are IME (composition is wired through GPUI's input
+handler at the cursor, but only dead keys under X11 have been exercised),
 search, accessibility, and broader compatibility testing. The pinned C API exposes viewport and history cells but not Ghostty's
 synchronous screen-search engine, so search is deliberately held behind the
 terminal boundary instead of duplicating VT-aware matching with an O(history)
@@ -57,7 +58,8 @@ and resolves the requested local face in GPUI's shaping database. The same cell 
 drive rendering, cursor placement, pane sizing, PTY resize, mouse reporting,
 and selection. An unavailable configured face falls back to the
 bundled JetBrains Mono Nerd Font, while the shaping stack retains system glyph
-fallback. Broader Ghostty font features such as per-style family overrides,
+fallback. OpenType features follow Ghostty's `font-feature`. Broader Ghostty font
+settings such as per-style family overrides,
 variation axes, synthetic-style controls, and explicit fallback lists remain
 outside the supported configuration subset and should be added at this boundary
 rather than leaking font assumptions into workspace code.

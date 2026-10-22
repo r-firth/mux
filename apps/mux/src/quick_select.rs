@@ -135,6 +135,30 @@ fn logical_lines(frame: &RenderFrame) -> Vec<Vec<(char, u16, u16)>> {
 /// any word that reads as a path, an address, a UUID or a hash.
 fn matches_in(text: &[char]) -> Vec<(usize, usize)> {
     let mut found = url_spans(text);
+    for (start, last) in words(text) {
+        let word = text[start..last].iter().collect::<String>();
+        let free = !found
+            .iter()
+            .any(|&(taken_start, taken_end)| start < taken_end && taken_start < last);
+        if free && is_target(&word) {
+            found.push((start, last));
+        }
+    }
+    found.sort_unstable();
+    found
+}
+
+/// Where words that read as paths start and end in a line.
+pub(super) fn path_spans(text: &[char]) -> Vec<(usize, usize)> {
+    words(text)
+        .into_iter()
+        .filter(|&(start, last)| is_path(&text[start..last].iter().collect::<String>()))
+        .collect()
+}
+
+/// Each word of a line, without the punctuation of a sentence it ends.
+fn words(text: &[char]) -> Vec<(usize, usize)> {
+    let mut words = Vec::new();
     let mut start = 0;
     while start < text.len() {
         if !is_word_character(text[start]) {
@@ -145,22 +169,16 @@ fn matches_in(text: &[char]) -> Vec<(usize, usize)> {
         while end < text.len() && is_word_character(text[end]) {
             end += 1;
         }
-        // Without the punctuation of the sentence it ends.
         let mut last = end;
         while last > start && matches!(text[last - 1], '.' | ':' | '!' | '?') {
             last -= 1;
         }
-        let word = text[start..last].iter().collect::<String>();
-        let free = !found
-            .iter()
-            .any(|&(taken_start, taken_end)| start < taken_end && taken_start < last);
-        if free && last > start && is_target(&word) {
-            found.push((start, last));
+        if last > start {
+            words.push((start, last));
         }
         start = end;
     }
-    found.sort_unstable();
-    found
+    words
 }
 
 fn is_word_character(character: char) -> bool {
@@ -217,7 +235,7 @@ fn is_path(word: &str) -> bool {
 }
 
 /// A path without the line and column a compiler or grep put after it.
-fn without_line_and_column(word: &str) -> &str {
+pub(super) fn without_line_and_column(word: &str) -> &str {
     let mut path = word;
     for _ in 0..2 {
         match path.rsplit_once(':') {

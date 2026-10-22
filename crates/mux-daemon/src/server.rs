@@ -1,6 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use mux_protocol::{
     ClientHello, ClientMessage, CodecError, FrameReader, PROTOCOL_VERSION, Request, Response,
@@ -11,6 +12,14 @@ use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
 use crate::state::DaemonState;
+
+/// How often panes are looked at for programs that have finished.
+const FINISHED_COMMAND_POLL: Duration = Duration::from_secs(1);
+const SECRET_INPUT_POLL: Duration = Duration::from_millis(200);
+
+/// How many of those looks go by between writing the workspace down, to
+/// catch panes that have changed directory.
+const SAVE_EVERY_POLLS: u32 = 5;
 
 #[derive(Clone, Debug)]
 pub struct DaemonConfig {
@@ -55,7 +64,37 @@ impl DaemonServer {
         reject_live_or_remove_stale_socket(&self.config.socket_path).await?;
         let listener = UnixListener::bind(&self.config.socket_path)?;
         set_private_socket_permissions(&self.config.socket_path)?;
+        crate::shell_integration::install(&self.config.state_dir);
+        self.state.restore_workspace();
         info!(socket = %self.config.socket_path.display(), "workspace daemon listening");
+
+        // Programs finishing in a pane are noticed by looking, once a second:
+        // one that prints nothing as it ends says nothing to the output.
+        let watched = Arc::clone(&self.state);
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(FINISHED_COMMAND_POLL);
+            let mut polls = 0_u32;
+            loop {
+                ticks.tick().await;
+                watched.announce_finished_commands();
+                polls = (polls + 1) % SAVE_EVERY_POLLS;
+                if polls == 0 {
+                    watched.save_workspace();
+                    watched.save_pane_text();
+                }
+            }
+        });
+
+        // A password prompt is looked for more often, so the pane says so
+        // before the first key of the password.
+        let watched = Arc::clone(&self.state);
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(SECRET_INPUT_POLL);
+            loop {
+                ticks.tick().await;
+                watched.announce_secret_input();
+            }
+        });
 
         loop {
             let (stream, _) = listener.accept().await?;
@@ -183,6 +222,8 @@ async fn handle_connection(
     }
 }
 
+// One arm per request; splitting the dispatch would only scatter it.
+#[allow(clippy::too_many_lines)]
 async fn process_message<W>(
     message: ClientMessage,
     state: &DaemonState,
@@ -286,6 +327,11 @@ where
         Request::PaneWorkingDirectory { pane_id } => state
             .pane_working_directory(pane_id)
             .map(Response::WorkingDirectory),
+        Request::RunningPrograms { pane_ids } => {
+            Ok(Response::RunningPrograms(state.running_programs(&pane_ids)))
+        }
+        Request::ClearPane { pane_id } => state.clear_pane(pane_id).map(|()| Response::Ack),
+        Request::ResetPane { pane_id } => state.reset_pane(pane_id).map(|()| Response::Ack),
     };
 
     if unacknowledged_input && response == Ok(Response::Ack) {

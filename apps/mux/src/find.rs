@@ -31,7 +31,7 @@ struct Found {
 
 pub(super) struct PaneFind {
     pub(super) pane_id: PaneId,
-    input: Entity<InputState>,
+    pub(super) input: Entity<InputState>,
     query: String,
     found: Vec<Found>,
     current: Option<usize>,
@@ -44,8 +44,15 @@ pub(super) struct PaneFind {
     /// When the places were last found, and whether a look is already due.
     searched_when: Instant,
     refresh_due: bool,
+    /// When it opened: letters typed before its field has the keys are
+    /// its, not the pane's.
+    pub(super) opened: Instant,
     _subscription: gpui::Subscription,
 }
+
+/// How long after opening find catches letters typed before its field has
+/// the keys; after that, a pane given the keys back keeps them.
+pub(super) const FIND_CATCHES_TYPING: Duration = Duration::from_millis(600);
 
 impl PaneFind {
     fn current(&self) -> Option<Found> {
@@ -113,9 +120,38 @@ impl MuxApp {
             searched: (0, 0, 0),
             searched_when: Instant::now(),
             refresh_due: false,
+            opened: Instant::now(),
             _subscription: subscription,
         });
         self.mode = InputMode::Normal;
+        cx.notify();
+    }
+
+    /// Find what is selected, its first line, in the
+    /// pane with the keys, starting from the newest.
+    pub(super) fn find_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(query) = self.selected_text().and_then(|text| {
+            let line = text.lines().find(|line| !line.trim().is_empty())?.trim();
+            (!line.is_empty()).then(|| line.to_owned())
+        }) else {
+            self.say_in_strip("select some text to find it", false, cx);
+            return;
+        };
+        self.find_text(query, window, cx);
+    }
+
+    /// Open find with this text in it, found.
+    pub(super) fn find_text(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_find(window, cx);
+        let Some(find) = &self.find else {
+            return;
+        };
+        let input = find.input.clone();
+        input.update(cx, |input, cx| {
+            input.set_value(query.clone(), window, cx);
+            input.select_all(window, cx);
+        });
+        self.find_typed(query, cx);
         cx.notify();
     }
 
@@ -133,7 +169,7 @@ impl MuxApp {
         })
     }
 
-    fn find_typed(&mut self, query: String, cx: &mut Context<Self>) {
+    pub(super) fn find_typed(&mut self, query: String, cx: &mut Context<Self>) {
         let Some(find) = self.find.as_mut() else {
             return;
         };

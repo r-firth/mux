@@ -24,7 +24,11 @@ use tokio::task::JoinHandle;
 /// Version 8 adds daemon-stamped times, file diffs, tool locations, turn ends
 /// and queued prompts to agent snapshots and events, a remembered title on
 /// each pane attachment, and a workspace command that sets a split's ratio.
-pub const PROTOCOL_VERSION: u16 = 8;
+/// Version 9 adds workspace commands that move a tab along the strip and
+/// break a pane out into a tab of its own, a request for what is running in
+/// a pane besides its shell, an event when such a program finishes, and a
+/// request to clear a pane.
+pub const PROTOCOL_VERSION: u16 = 10;
 /// Request id zero is reserved for latency-sensitive messages whose successful
 /// completion does not require a response.
 pub const UNACKNOWLEDGED_REQUEST_ID: u64 = 0;
@@ -136,6 +140,20 @@ pub enum Request {
     PaneWorkingDirectory {
         pane_id: PaneId,
     },
+    /// What each of these panes is running in front of its shell, for panes
+    /// that are running something.
+    RunningPrograms {
+        pane_ids: Vec<PaneId>,
+    },
+    /// Clear a pane's screen and history, as Cmd+K does.
+    ClearPane {
+        pane_id: PaneId,
+    },
+    /// Reset a pane's terminal, as Ghostty's `reset` does, for a program
+    /// that left it in a broken state.
+    ResetPane {
+        pane_id: PaneId,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -170,6 +188,14 @@ pub enum Response {
     AgentStarted(Box<AgentSessionSnapshot>),
     WorkingDirectory(PathBuf),
     Ack,
+    RunningPrograms(Vec<RunningProgram>),
+}
+
+/// A program a pane is running in front of its shell, by its process name.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RunningProgram {
+    pub pane_id: PaneId,
+    pub name: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -192,6 +218,12 @@ pub struct PaneAttachment {
     pub exit_status: Option<ProcessExit>,
     /// The last window title the pane's program set, if any.
     pub title: Option<String>,
+    /// The program in front of the pane's shell, if one is.
+    pub program: Option<String>,
+    /// How the commands run at the pane's prompts ended, oldest first, as
+    /// far back as the daemon has seen; a window opened later can't learn
+    /// them from the output it is sent.
+    pub command_endings: Vec<mux_terminal::CommandEnding>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -216,6 +248,27 @@ pub enum ServerEvent {
     },
     Agent(AgentEvent),
     AgentResyncRequired,
+    /// A program a pane's shell ran has finished and given the terminal
+    /// back to the shell, after running for `seconds`.
+    PaneCommandFinished {
+        session_id: SessionId,
+        pane_id: PaneId,
+        program: String,
+        seconds: u64,
+    },
+    /// A pane's shell has handed the terminal to a program.
+    PaneCommandStarted {
+        session_id: SessionId,
+        pane_id: PaneId,
+        program: String,
+    },
+    /// A pane's terminal has stopped or started showing what is typed, as
+    /// a password prompt does while it reads a password.
+    PaneSecretInput {
+        session_id: SessionId,
+        pane_id: PaneId,
+        secret: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

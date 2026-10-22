@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 #[cfg(feature = "ghostty")]
 use std::sync::OnceLock;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, sync_channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -31,6 +31,17 @@ const OUTPUT_STREAM_GAP: Duration = Duration::from_millis(2);
 /// How long output after a lull waits for more: long enough that a screen
 /// drawn in one go is sent whole, short enough not to hold up a key's echo.
 const OUTPUT_LULL_IDLE: Duration = Duration::from_micros(150);
+/// Home, erase the screen, erase the history.
+const CLEAR_SCREEN_AND_HISTORY: &[u8] = b"\x1b[H\x1b[2J\x1b[3J";
+const CLEAR_HISTORY: &[u8] = b"\x1b[3J";
+/// RIS: the terminal back as it started, modes, colours and screen.
+const FULL_RESET: &[u8] = b"\x1bc";
+/// Form feed, Ctrl+L: a shell at its prompt draws the prompt again.
+const REDRAW_PROMPT: &[u8] = b"\x0c";
+
+/// A way into the pane's output stream, behind what the PTY has said, for
+/// bytes Mux itself has for the terminal. It closes with the PTY.
+type OutputInjector = Arc<Mutex<Option<SyncSender<Vec<u8>>>>>;
 
 #[derive(Debug)]
 struct ForegroundProcessTracker {
@@ -105,7 +116,13 @@ impl PaneOutputWorker {
             if !responses.is_empty() && !self.write_responses(&responses) {
                 break;
             }
-            self.title.lock().scan(&bytes);
+            {
+                let mut title = self.title.lock();
+                title.scan(&bytes);
+                // The windows put copies on the clipboard; the daemon has
+                // nothing to keep them for.
+                let _ = title.take_copied();
+            }
             if reset_keyboard {
                 warn!(
                     session_id = %self.session_id,
@@ -193,6 +210,75 @@ pub struct PaneRuntime {
     /// The window title from the pane's output, for clients that attach
     /// after the program set it.
     title: Arc<Mutex<TitleScanner>>,
+    /// The program in front of the shell when last looked, and since when.
+    foreground_command: Mutex<Option<ForegroundCommand>>,
+    /// Whether the terminal was reading a password when last looked.
+    secret_input: Mutex<bool>,
+    /// A process in front that still bears the shell's own name: either a
+    /// fork that has not yet become the program it will run, or a nested
+    /// shell. It is named only once seen twice.
+    shell_named_pending: Mutex<Option<u32>>,
+    output_injector: OutputInjector,
+}
+
+struct ForegroundCommand {
+    since: Instant,
+    name: String,
+}
+
+/// What changed in front of a pane's shell between two looks.
+#[derive(Debug, Eq, PartialEq)]
+pub enum ForegroundChange {
+    /// This program has taken the terminal.
+    Started(String),
+    /// This program has given the terminal back after running this long.
+    Finished(String, Duration),
+}
+
+/// The rule under the text a pane showed before a restart.
+pub const HISTORY_RULE: &str = "── before Mux restarted ──";
+/// The rule under the text a pane of a reopened tab showed before the tab
+/// was closed.
+pub const CLOSED_RULE: &str = "── before the tab was closed ──";
+/// The rule under the text a reopened pane showed before it was closed.
+pub const CLOSED_PANE_RULE: &str = "── before the pane was closed ──";
+
+/// Text a pane showed before a restart, as output for a new terminal: each
+/// line as it was, without anything that would act as a control, then a
+/// faint rule saying where the past ends.
+fn history_output(history: &str, rule: &str) -> Vec<u8> {
+    let mut output = Vec::with_capacity(history.len() + 64);
+    for line in history.trim_end().lines() {
+        let line = line
+            .chars()
+            .filter(|character| !character.is_control())
+            .collect::<String>();
+        output.extend_from_slice(line.trim_end().as_bytes());
+        output.extend_from_slice(b"\r\n");
+    }
+    output.extend_from_slice(format!("\x1b[2m{rule}\x1b[0m\r\n").as_bytes());
+    output
+}
+
+/// Whether an inherited variable belongs to the terminal the daemon was
+/// started from rather than to Mux.
+fn names_another_terminal(key: &str) -> bool {
+    const PREFIXES: [&str; 6] = [
+        "GHOSTTY_",
+        "ITERM_",
+        "KITTY_",
+        "WEZTERM_",
+        "ALACRITTY_",
+        "KONSOLE_",
+    ];
+    const NAMES: [&str; 5] = [
+        "TERMINFO",
+        "TERM_SESSION_ID",
+        "LC_TERMINAL",
+        "LC_TERMINAL_VERSION",
+        "WT_SESSION",
+    ];
+    PREFIXES.iter().any(|prefix| key.starts_with(prefix)) || NAMES.contains(&key)
 }
 
 impl PaneRuntime {
@@ -205,6 +291,32 @@ impl PaneRuntime {
         replay_bytes: usize,
         events: broadcast::Sender<ServerEvent>,
     ) -> Result<Arc<Self>, PaneError> {
+        Self::spawn_with_history(
+            session_id,
+            id,
+            cwd,
+            command,
+            size,
+            replay_bytes,
+            events,
+            None,
+        )
+    }
+
+    /// Start a pane that first shows `history`: the text a pane in its
+    /// place showed before, then the rule that says when that was, so it
+    /// reads as the past before the new shell's prompt comes up under it.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub fn spawn_with_history(
+        session_id: SessionId,
+        id: PaneId,
+        cwd: &std::path::Path,
+        command: &SpawnCommand,
+        size: TerminalSize,
+        replay_bytes: usize,
+        events: broadcast::Sender<ServerEvent>,
+        history: Option<(&str, &str)>,
+    ) -> Result<Arc<Self>, PaneError> {
         let size = size.validate()?;
         let pair = native_pty_system().openpty(to_pty_size(size))?;
 
@@ -213,6 +325,20 @@ impl PaneRuntime {
         builder.cwd(cwd);
         builder.env("TERM", "xterm-256color");
         builder.env("COLORTERM", "truecolor");
+        // Programs ask TERM_PROGRAM which terminal they are in. A daemon
+        // started from inside another terminal, as one run from Ghostty is,
+        // would otherwise hand its shells that terminal's name and the
+        // variables that go with it, and they would take Mux for it.
+        builder.env("TERM_PROGRAM", "mux");
+        builder.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+        for (key, _) in std::env::vars_os() {
+            if key.to_str().is_some_and(names_another_terminal) {
+                builder.env_remove(key);
+            }
+        }
+        for (key, value) in crate::shell_integration::environment(&command.program) {
+            builder.env(key, value);
+        }
         for (key, value) in &command.environment {
             builder.env(key, value);
         }
@@ -224,12 +350,18 @@ impl PaneRuntime {
         let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
         drop(pair.slave);
 
-        let terminal: Arc<Mutex<Box<dyn TerminalEngine>>> =
-            Arc::new(Mutex::new(create_terminal_engine(size, replay_bytes)?));
+        let mut engine = create_terminal_engine(size, replay_bytes)?;
+        if let Some((text, rule)) = history.filter(|(text, _)| !text.trim().is_empty()) {
+            // Before the reader starts, so it lands ahead of the shell's
+            // first output.
+            let sequence = engine.next_output_sequence();
+            engine.apply_output(sequence, &history_output(text, rule))?;
+        }
+        let terminal: Arc<Mutex<Box<dyn TerminalEngine>>> = Arc::new(Mutex::new(engine));
         let exit_status = Arc::new(Mutex::new(None));
         let master = Arc::new(Mutex::new(pair.master));
         let title = Arc::new(Mutex::new(TitleScanner::default()));
-        spawn_reader(
+        let output_injector = spawn_reader(
             reader,
             PaneOutputWorker {
                 session_id,
@@ -274,6 +406,10 @@ impl PaneRuntime {
             exit_status,
             process_id,
             title,
+            foreground_command: Mutex::new(None),
+            secret_input: Mutex::new(false),
+            shell_named_pending: Mutex::new(None),
+            output_injector,
         }))
     }
 
@@ -305,17 +441,136 @@ impl PaneRuntime {
     pub fn attachment(&self) -> Result<mux_protocol::PaneAttachment, PaneError> {
         let terminal = self.terminal.lock().attachment()?;
         terminal.validate_sequence_contract()?;
+        // Asked apart: the exit status is held while the attachment is built.
+        let program = self.running_program();
+        let (title, command_endings) = {
+            let scanner = self.title.lock();
+            let endings = scanner.command_endings().iter().copied().collect();
+            (scanner.title().map(str::to_owned), endings)
+        };
         Ok(mux_protocol::PaneAttachment {
             pane_id: self.id,
             terminal,
             exit_status: *self.exit_status.lock(),
-            title: self.title.lock().title().map(str::to_owned),
+            title,
+            program,
+            command_endings,
         })
     }
 
     pub fn kill(&self) -> Result<(), PaneError> {
         self.killer.lock().kill()?;
         Ok(())
+    }
+
+    /// The name of the program in the terminal's foreground, when it isn't
+    /// the pane's own shell: what closing the pane would cut off.
+    #[must_use]
+    pub fn running_program(&self) -> Option<String> {
+        if self.exit_status.lock().is_some() {
+            return None;
+        }
+        let foreground = foreground_process_id(&self.master)?;
+        if Some(foreground) == self.process_id {
+            return None;
+        }
+        Some(process_name(foreground))
+    }
+
+    /// What the pane shows, history first, as plain text.
+    #[must_use]
+    pub fn screen_text(&self) -> Option<String> {
+        self.terminal.lock().screen_text()
+    }
+
+    /// Clear the pane, as Cmd+K does in a Mac terminal. At the shell's
+    /// prompt the screen and its history are wiped and the shell draws its
+    /// prompt again at the top. With a program in front, only the history
+    /// goes: an editor or a pager keeps the screen it drew.
+    pub fn clear(&self) -> Result<(), PaneError> {
+        if self.exit_status.lock().is_some() {
+            return Ok(());
+        }
+        let at_prompt = foreground_process_id(&self.master)
+            .is_none_or(|foreground| Some(foreground) == self.process_id);
+        let clear = if at_prompt {
+            CLEAR_SCREEN_AND_HISTORY
+        } else {
+            CLEAR_HISTORY
+        };
+        if let Some(injector) = self.output_injector.lock().as_ref() {
+            // Behind the output already read, so the clear lands in order
+            // for this terminal and every attached client's.
+            let _ = injector.send(clear.to_vec());
+        }
+        if at_prompt {
+            self.write(REDRAW_PROMPT)?;
+        }
+        Ok(())
+    }
+
+    /// Put the terminal back as it started, for a program that left it
+    /// garbled or stuck in a mode; a shell at its prompt draws it again.
+    pub fn reset(&self) -> Result<(), PaneError> {
+        if self.exit_status.lock().is_some() {
+            return Ok(());
+        }
+        if let Some(injector) = self.output_injector.lock().as_ref() {
+            let _ = injector.send(FULL_RESET.to_vec());
+        }
+        let at_prompt = foreground_process_id(&self.master)
+            .is_none_or(|foreground| Some(foreground) == self.process_id);
+        if at_prompt {
+            self.write(REDRAW_PROMPT)?;
+        }
+        Ok(())
+    }
+
+    /// Look at what is in front of the shell, and say what has changed since
+    /// the last look: a program the shell ran has taken the terminal, or has
+    /// handed it back, and how long it ran. A pipeline or a program that
+    /// starts others counts as the one it started with.
+    pub fn look_at_foreground(&self) -> Option<ForegroundChange> {
+        let shell = self.process_id?;
+        let foreground = if self.exit_status.lock().is_some() {
+            None
+        } else {
+            foreground_process_id(&self.master)
+        };
+        let mut command = self.foreground_command.lock();
+        match foreground {
+            Some(process_id) if process_id != shell => {
+                if command.is_some() {
+                    return None;
+                }
+                let name = process_name(process_id);
+                let mut pending = self.shell_named_pending.lock();
+                if name == process_name(shell) && *pending != Some(process_id) {
+                    *pending = Some(process_id);
+                    return None;
+                }
+                *pending = None;
+                *command = Some(ForegroundCommand {
+                    since: Instant::now(),
+                    name: name.clone(),
+                });
+                Some(ForegroundChange::Started(name))
+            }
+            _ => command.take().map(|finished| {
+                ForegroundChange::Finished(finished.name, finished.since.elapsed())
+            }),
+        }
+    }
+
+    /// Whether the terminal has started or stopped reading a password since
+    /// the last look: the new answer, if it changed.
+    pub fn look_at_secret_input(&self) -> Option<bool> {
+        let secret = self.exit_status.lock().is_none() && reads_secret(&self.master);
+        let mut was = self.secret_input.lock();
+        (*was != secret).then(|| {
+            *was = secret;
+            secret
+        })
     }
 
     /// Ask the operating system for the shell process's live working
@@ -370,8 +625,10 @@ fn create_terminal_engine(
 fn spawn_reader(
     mut reader: Box<dyn Read + Send>,
     output: PaneOutputWorker,
-) -> Result<(), PaneError> {
+) -> Result<OutputInjector, PaneError> {
     let (output_sender, output_receiver) = sync_channel::<Vec<u8>>(256);
+    let injector: OutputInjector = Arc::new(Mutex::new(Some(output_sender.clone())));
+    let closing = Arc::clone(&injector);
     let session_id = output.session_id;
     let pane_id = output.pane_id;
     thread::Builder::new()
@@ -397,12 +654,30 @@ fn spawn_reader(
                     }
                 }
             }
+            // The output stream ends with the PTY's.
+            closing.lock().take();
         })?;
 
     thread::Builder::new()
         .name(format!("mux-pane-output-{pane_id}"))
         .spawn(move || output.run(&output_receiver))?;
-    Ok(())
+    Ok(injector)
+}
+
+/// A process's name as the system knows it, or a stand-in when it has none.
+fn process_name(process_id: u32) -> String {
+    let pid = Pid::from_u32(process_id);
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    system
+        .process(pid)
+        .map(|process| process.name().to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "a program".to_owned())
 }
 
 #[cfg(unix)]
@@ -411,6 +686,23 @@ fn foreground_process_id(master: &Mutex<Box<dyn MasterPty + Send>>) -> Option<u3
         .lock()
         .process_group_leader()
         .and_then(|process_id| u32::try_from(process_id).ok())
+}
+
+/// Whether the terminal reads whole lines without showing them, as `sudo`
+/// and `ssh` do while they read a password. A shell at its prompt, or an
+/// editor, reads key by key, so is never taken for one.
+#[cfg(unix)]
+fn reads_secret(master: &Mutex<Box<dyn MasterPty + Send>>) -> bool {
+    use nix::sys::termios::LocalFlags;
+    master.lock().get_termios().is_some_and(|termios| {
+        let flags = termios.local_flags;
+        flags.contains(LocalFlags::ICANON) && !flags.contains(LocalFlags::ECHO)
+    })
+}
+
+#[cfg(not(unix))]
+fn reads_secret(_: &Mutex<Box<dyn MasterPty + Send>>) -> bool {
+    false
 }
 
 #[cfg(not(unix))]
@@ -445,7 +737,35 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use super::{ForegroundProcessTracker, OUTPUT_BATCH_SIZE, collect_output_batch};
+    use super::{
+        ForegroundProcessTracker, HISTORY_RULE, OUTPUT_BATCH_SIZE, collect_output_batch,
+        history_output, names_another_terminal,
+    };
+
+    #[test]
+    fn history_comes_back_as_plain_lines_under_a_rule() {
+        let output = history_output("$ ls\nsrc  \x1b[31mtarget\n\n\n", HISTORY_RULE);
+        let output = String::from_utf8(output).expect("text");
+        assert_eq!(
+            output,
+            "$ ls\r\nsrc  [31mtarget\r\n\x1b[2m── before Mux restarted ──\x1b[0m\r\n"
+        );
+    }
+
+    #[test]
+    fn the_terminal_mux_was_started_from_is_not_passed_on() {
+        for key in [
+            "GHOSTTY_RESOURCES_DIR",
+            "ITERM_SESSION_ID",
+            "TERMINFO",
+            "WT_SESSION",
+        ] {
+            assert!(names_another_terminal(key), "{key}");
+        }
+        for key in ["PATH", "TERM", "HOME", "TERM_PROGRAM", "GHOSTTY"] {
+            assert!(!names_another_terminal(key), "{key}");
+        }
+    }
 
     #[test]
     fn queued_output_joins_the_batch_without_a_wait() {

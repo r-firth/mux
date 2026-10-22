@@ -8,22 +8,41 @@ mod agent_completion;
 mod agent_view;
 mod backend;
 mod chrome;
+mod cursor_blink;
+mod cursor_click;
+mod desktop_notice;
+mod early_typing;
+mod file_drop;
 mod find;
+mod ghostty_config;
 mod gpui_terminal;
 mod ground;
+mod ime;
+mod keybind;
 mod layout;
 mod links;
 mod motion;
 mod palette;
 mod pane_calls;
+mod pane_drag;
 mod pane_exit;
+mod pane_menu;
+mod pane_names;
 mod pane_parser;
+mod progress;
+mod prompt_flash;
 mod quick_select;
+mod run_clock;
 mod scrollback;
 mod seams;
+mod select_extend;
+mod select_keys;
+mod select_scroll;
 mod session_sheet;
 mod settings;
 mod settings_sheet;
+mod sync_input;
+mod window_frame;
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -31,15 +50,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use agent_completion::{
     AgentCommandArgument, AgentCompletionKind, AgentCompletionMenu, AgentCompletionProvider,
 };
 use anyhow::{Context as _, Result, anyhow};
-use backend::{BackendHandle, CommandMessage};
+use backend::{BackendHandle, CloseTarget, CommandMessage};
 use bezel::{
     theme::{self as bezel_theme, Appearance as BezelAppearance, Theme as BezelTheme},
     ui::{self as bezel_ui, icons as bezel_icons},
@@ -51,8 +70,7 @@ use gpui::{
     FocusHandle, FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
     KeyUpEvent, Menu, MenuItem, ObjectFit, ParentElement as _, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled, StyledImage as _, SystemMenuType, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, div, img, linear_color_stop, linear_gradient, point, px,
-    rgb, size,
+    Window, WindowOptions, div, img, linear_color_stop, linear_gradient, point, px, rgb, size,
 };
 use gpui_component::{
     InteractiveElementExt as _, Sizable as _, Theme as ComponentTheme, ThemeMode, TitleBar,
@@ -156,30 +174,75 @@ gpui::actions!(
         AcceptAgentCompletion,
         CancelAgentTurn,
         ChoosePaletteRow,
+        ClearMuxPane,
         CloseFind,
+        CloseMuxPane,
+        CloseMuxTab,
         ClosePalette,
         DismissAgentCompletion,
         FindNewer,
         FindOlder,
         ForwardTerminalBacktab,
+        GrowMuxText,
         ForwardTerminalTab,
         InsertAgentCompletion,
         NavigateAgentDown,
         NavigateAgentLeft,
         NavigateAgentRight,
         NavigateAgentUp,
+        NewMuxSession,
+        NewMuxTab,
+        ReopenMuxTab,
         NextAgentChoice,
+        NextMuxTab,
         NextPaletteRow,
         OpenFind,
+        FindSelection,
+        GoToMuxCall,
         OpenMuxPalette,
         OpenMuxSettings,
+        ReloadMuxConfig,
         OpenQuickSelect,
+        PastePaletteRow,
         PreviousAgentChoice,
+        PreviousMuxTab,
         PreviousPaletteRow,
         QuitMux,
+        ResetMuxText,
+        SelectMuxTab1,
+        SelectMuxTab2,
+        SelectMuxTab3,
+        SelectMuxTab4,
+        SelectMuxTab5,
+        SelectMuxTab6,
+        SelectMuxTab7,
+        SelectMuxTab8,
+        SelectLastMuxTab,
         SelectNextAgentCompletion,
         SelectPreviousAgentCompletion,
-        ToggleAgentPane
+        ShrinkMuxText,
+        SplitMuxDown,
+        SplitMuxRight,
+        SplitMuxAuto,
+        FocusMuxPaneLeft,
+        FocusMuxPaneRight,
+        FocusMuxPaneUp,
+        FocusMuxPaneDown,
+        NextMuxPane,
+        PreviousMuxPane,
+        ResizeMuxPaneLeft,
+        ResizeMuxPaneRight,
+        ResizeMuxPaneUp,
+        ResizeMuxPaneDown,
+        EqualizeMuxPanes,
+        HideMux,
+        HideOtherApps,
+        ShowAllApps,
+        MinimizeMuxWindow,
+        ZoomMuxWindow,
+        ToggleMuxFullScreen,
+        ToggleAgentPane,
+        ZoomMuxPane
     ]
 );
 
@@ -202,6 +265,14 @@ enum UserEvent {
         files: agent_completion::AgentFileIndex,
     },
     BackendError(String),
+    /// Something to say in the strip that went wrong.
+    StripProblem(String),
+    /// What the panes of a close are running, by name; empty when nothing
+    /// but their shells.
+    RunningChecked {
+        target: CloseTarget,
+        running: Vec<String>,
+    },
     /// A pane's parser has taken in output, or failed to.
     PaneParsed {
         pane_id: PaneId,
@@ -222,6 +293,12 @@ struct PaneReplica {
     frame_serial: u64,
     render_cache: Rc<RefCell<TerminalRenderCache>>,
     title: TitleScanner,
+    /// The program in front of the pane's shell, as the daemon last said.
+    program: Option<String>,
+    /// When that program started, as far as this window saw.
+    program_since: Option<Instant>,
+    /// Whether the pane is reading a password, which it does not show.
+    secret_input: bool,
 }
 
 fn next_frame_serial() -> u64 {
@@ -258,6 +335,48 @@ impl PaneReplica {
             frame_serial: next_frame_serial(),
             render_cache: Rc::new(RefCell::new(TerminalRenderCache::default())),
             title: TitleScanner::default(),
+            program: None,
+            program_since: None,
+            secret_input: false,
+        }
+    }
+
+    /// The program in front of the shell, when the pane's title doesn't
+    /// already name it. Shells that don't set a title while a program runs,
+    /// as macOS's zsh doesn't, would otherwise leave the pane named for its
+    /// directory; a program that sets its own title, as an editor does, is
+    /// left to say it.
+    fn untitled_program(&self) -> Option<&str> {
+        let program = self.program.as_deref()?;
+        let named = self.title.title().is_some_and(|title| {
+            title
+                .to_lowercase()
+                .contains(program.to_lowercase().as_str())
+        });
+        (!named).then_some(program)
+    }
+
+    /// What the pane's head says: its place, after the program running
+    /// there if the title doesn't name it.
+    fn head_title(&self) -> Option<String> {
+        let place = self.title.title().map(chrome::terminal_place);
+        match (self.untitled_program(), place) {
+            (Some(program), Some(place)) => Some(format!("{program} · {place}")),
+            (Some(program), None) => Some(program.to_owned()),
+            // A shell that titles the pane with the command it runs, as
+            // Mux's zsh does, still has the directory it ran it in.
+            (None, Some(command)) if self.program.is_some() && !chrome::is_path(command) => {
+                let ran_in = self
+                    .title
+                    .previous_title()
+                    .map(chrome::terminal_place)
+                    .filter(|place| chrome::is_path(place));
+                Some(ran_in.map_or_else(
+                    || command.to_owned(),
+                    |place| format!("{command} · {place}"),
+                ))
+            }
+            (None, place) => place.map(str::to_owned),
         }
     }
 
@@ -328,8 +447,94 @@ impl PaneReplica {
 /// Ghostty does. The daemon keeps less, so a pane restored from it starts
 /// with the daemon's share and grows from there while the window has it.
 fn pane_history_bytes() -> usize {
-    static LIMIT: OnceLock<usize> = OnceLock::new();
-    *LIMIT.get_or_init(mux_terminal_ghostty::user_history_limit)
+    static LIMIT: ghostty_config::Reloadable<usize> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_history_limit);
+    LIMIT.get()
+}
+
+/// The cursor a pane shows until its program picks one, as in the user's
+/// Ghostty.
+fn pane_cursor_style() -> mux_terminal::CursorStyle {
+    static STYLE: ghostty_config::Reloadable<mux_terminal::CursorStyle> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_cursor_style);
+    STYLE.get()
+}
+
+/// How much of an unfocused split shows through, as in the user's Ghostty.
+fn unfocused_split_opacity() -> f32 {
+    static OPACITY: ghostty_config::Reloadable<f32> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_unfocused_split_opacity);
+    OPACITY.get()
+}
+
+/// Whether programs may copy to the clipboard, as in the user's Ghostty.
+fn clipboard_write_allowed() -> bool {
+    static ALLOWED: ghostty_config::Reloadable<bool> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_clipboard_write);
+    ALLOWED.get()
+}
+
+/// Whether programs' desktop notifications call, as in the user's Ghostty.
+fn desktop_notifications() -> bool {
+    static HEEDED: ghostty_config::Reloadable<bool> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_desktop_notifications);
+    HEEDED.get()
+}
+
+/// What programs' clipboard reads get, as in the user's Ghostty.
+fn clipboard_read() -> mux_terminal_ghostty::ClipboardRead {
+    static READ: ghostty_config::Reloadable<mux_terminal_ghostty::ClipboardRead> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_clipboard_read);
+    READ.get()
+}
+
+/// Whether the pane under the pointer takes the keys, as in the user's
+/// Ghostty.
+fn focus_follows_mouse() -> bool {
+    static FOLLOWS: ghostty_config::Reloadable<bool> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_focus_follows_mouse);
+    FOLLOWS.get()
+}
+
+/// Whether typing lets go of a selection, as in the user's Ghostty.
+fn selection_clear_on_typing() -> bool {
+    static CLEARS: ghostty_config::Reloadable<bool> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_selection_clear_on_typing);
+    CLEARS.get()
+}
+
+/// Where a selection goes as it is made, as in the user's Ghostty.
+fn copy_on_select() -> mux_terminal_ghostty::CopyOnSelect {
+    static COPIES: ghostty_config::Reloadable<mux_terminal_ghostty::CopyOnSelect> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_copy_on_select);
+    COPIES.get()
+}
+
+/// The grid for `font_family` at `size`, its rows as tall as the user's
+/// Ghostty makes them with `adjust-cell-height`.
+fn terminal_metrics(font_family: &str, size: f32, cx: &App) -> GridMetrics {
+    static ADJUST: ghostty_config::Reloadable<mux_terminal_ghostty::CellAdjust> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_cell_height_adjust);
+    static PADDING: ghostty_config::Reloadable<(f32, f32)> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_window_padding);
+    let mut metrics = GridMetrics::from_font(font_family, size, cx.text_system());
+    metrics.cell_height = ADJUST.get().apply(metrics.cell_height);
+    (metrics.padding_x, metrics.padding_y) = PADDING.get();
+    metrics
+}
+
+/// How far the wheel scrolls, as in the user's Ghostty.
+fn scroll_multiplier() -> mux_terminal_ghostty::ScrollMultiplier {
+    static MULTIPLIER: ghostty_config::Reloadable<mux_terminal_ghostty::ScrollMultiplier> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_scroll_multiplier);
+    MULTIPLIER.get()
+}
+
+/// When closing asks first, as in the user's Ghostty.
+fn close_confirm() -> mux_terminal_ghostty::CloseConfirm {
+    static CONFIRM: ghostty_config::Reloadable<mux_terminal_ghostty::CloseConfirm> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_close_confirm);
+    CONFIRM.get()
 }
 
 fn restore_pane_replica(
@@ -349,6 +554,14 @@ fn restore_pane_replica(
     engine
         .set_history_limit(pane_history_bytes())
         .with_context(|| format!("set the history of terminal pane {}", pane.pane_id))?;
+    engine
+        .set_default_cursor_style(pane_cursor_style())
+        .with_context(|| format!("set the cursor of terminal pane {}", pane.pane_id))?;
+    if cursor_blink::cursor_blink_setting() == Some(true) {
+        engine
+            .set_default_cursor_blink(true)
+            .with_context(|| format!("set the cursor of terminal pane {}", pane.pane_id))?;
+    }
     // The daemon remembers the title; the sequence that set it may predate
     // the checkpoint, so the replay alone cannot be trusted to carry it.
     let mut title = TitleScanner::seeded(pane.title.clone());
@@ -361,8 +574,14 @@ fn restore_pane_replica(
         engine.apply_output(chunk.sequence, &chunk.bytes)?;
         title.scan(&chunk.bytes);
     }
-    // A bell in the replayed history rang long ago.
+    // The daemon has seen every command end, those before the checkpoint
+    // too, and the replay's among them.
+    title.seed_command_endings(pane.command_endings.clone());
+    // A bell in the replayed history rang long ago, what it copied has
+    // likely been copied over since, and its progress is long out of date.
     let _ = title.take_attention();
+    let _ = title.take_copied();
+    let _ = title.take_progress();
     let restored_next_sequence = engine.next_output_sequence();
     if restored_next_sequence != pane.terminal.next_sequence {
         return Err(anyhow!(
@@ -377,6 +596,7 @@ fn restore_pane_replica(
     }
     let mut replica = PaneReplica::new(engine, frame);
     replica.title = title;
+    replica.program.clone_from(&pane.program);
     Ok(replica)
 }
 
@@ -425,6 +645,8 @@ fn reconcile_pane_replicas(
                     || (output_continues
                         && replica.next_sequence < pane.terminal.next_sequence) =>
             {
+                let mut replica = replica;
+                replica.program.clone_from(&pane.program);
                 replica
             }
             Some(_) | None => restore_pane_replica(pane, ghostty_theme)?,
@@ -513,11 +735,23 @@ enum MotionPreference {
 
 struct MuxApp {
     focus_handle: FocusHandle,
+    /// Where each pane's prompts are, as of the frame it last drew.
+    prompt_rows: scrollback::PromptRows,
+    /// What a dead key or an input method has composed so far.
+    ime_marked: Option<String>,
+    /// When the cursor's blink last started over, and since when a timer
+    /// has kept it blinking.
+    blink_since: Instant,
+    blink_timer: Option<Instant>,
+    /// Since when the clock in long-running programs' heads has ticked.
+    run_clock: Option<Instant>,
     backend: BackendHandle,
     /// Where the window's events arrive, for the panes' parsers to say they
     /// have taken in output.
     events: async_channel::Sender<UserEvent>,
     state_dir: Option<PathBuf>,
+    /// Counts the window's moves, so only the last of a run is kept.
+    window_frame_serial: u64,
     settings: AppSettings,
     profiles: Vec<AgentProfile>,
     session: Option<Session>,
@@ -563,8 +797,8 @@ struct MuxApp {
     agent_unseen: HashSet<AgentSessionId>,
     /// GUI-local tab colours. New tabs take the next ink by position and keep
     /// it, so closing a tab never repaints its neighbours.
-    tab_inks: HashMap<TabId, Ink>,
     tab_rename: Option<TabRename>,
+    pane_rename: Option<pane_names::PaneRename>,
     /// The chips scroll sideways when there are more than fit. They keep the
     /// active tab in view until scrolled by hand, and take it up again when
     /// the tab, or the mode (which widens chips with jump numbers), changes.
@@ -573,16 +807,35 @@ struct MuxApp {
     tab_strip_follow: Cell<bool>,
     strip_message: Option<StripMessage>,
     strip_serial: u64,
+    /// The pane on screen whose bell just rang, flashing its edge, and
+    /// which ring it was.
+    bell_flash: Option<(PaneId, u64)>,
+    bell_serial: u64,
+    pane_menu: Option<pane_menu::PaneMenu>,
+    /// A close that found something running, and when: closing the same
+    /// thing again soon after goes ahead.
+    close_armed: Option<(CloseTarget, Instant)>,
+    /// A paste that would run lines, and when: pasting it again soon after
+    /// goes ahead.
+    paste_armed: Option<(u64, Instant)>,
+    /// A program's clipboard read waiting on a ⌘V: the pane, the clipboard
+    /// it named, and the strip message that asks.
+    clipboard_read_asked: Option<(PaneId, String, u64)>,
+    /// What was last selected, for Ghostty's `paste_from_selection`.
+    selection_clipboard: Option<String>,
     /// The focused pane's size shows in its head while sizes are changing
     /// (and in resize mode), then gets out of the way.
     size_readout: bool,
     size_readout_pending: bool,
     size_readout_serial: u64,
+    /// Tabs whose panes all take what is typed into any one of them.
+    synced_tabs: HashSet<TabId>,
     session_sheet: Option<session_sheet::SessionSheet>,
     settings_sheet: Option<settings_sheet::SettingsSheet>,
     palette: Option<palette::Palette>,
     find: Option<find::PaneFind>,
     seam_drag: Option<seams::SeamDrag>,
+    thumb_drag: Option<scrollback::ThumbDrag>,
     seam_pointer: Option<seams::SeamPointer>,
     seam_settle: Option<seams::SeamSettle>,
     layout_motion: motion::LayoutMotion,
@@ -607,12 +860,34 @@ struct MuxApp {
     pane_restart: Option<pane_exit::PaneRestart>,
     /// Panes out of sight that rang or sent a notification, until seen.
     pane_calls: HashMap<PaneId, mux_terminal::Attention>,
+    /// The panes that have called, the latest last.
+    call_order: Vec<PaneId>,
+    /// The prompt row gone to last, washed for a moment.
+    prompt_flash: Option<prompt_flash::PromptFlash>,
+    keyed_selection: select_keys::KeyedSelection,
+    /// How far along each pane's program last said it was, and when.
+    pane_progress: HashMap<PaneId, (mux_terminal::Progress, Instant)>,
+    /// When stale progress reports will next be looked for, if they will.
+    progress_sweep: Option<Instant>,
+    /// Long programs that have finished since the calls were last gathered,
+    /// with what to say about each.
+    finished_commands: Vec<(PaneId, String)>,
     /// The link under the pointer while ⌘ is held, and where the pointer is.
     link_hover: Option<(PaneId, links::Link)>,
     link_pointer: Option<(PaneId, layout::Rect, gpui::Point<gpui::Pixels>)>,
     selected_pane: Option<PaneId>,
     pending_focused_pane: Option<PaneId>,
     selection_drag: Option<TerminalPointerCapture>,
+    /// A selection drag held past its pane's edge, scrolling it.
+    selection_edge: Option<select_scroll::SelectionEdge>,
+    /// Since when the held pane has been scrolling under a selection.
+    selection_scrolling: Option<Instant>,
+    /// What was typed into a field before it had the keys, by the field.
+    early_typed: Option<(gpui::EntityId, String)>,
+    /// An Option-click that will move the cursor if it comes up in place.
+    cursor_click: Option<cursor_click::CursorClick>,
+    /// The title last given to the window.
+    window_title: String,
     mouse_reporting: Option<TerminalPointerCapture>,
     terminal_key_presses: HashMap<String, PaneId>,
     terminal_resync_pending: Option<SessionId>,
@@ -621,6 +896,8 @@ struct MuxApp {
     mode: InputMode,
     motion: MotionPreference,
     metrics: GridMetrics,
+    /// The size Ghostty's config asks for, which actual size goes back to.
+    configured_font_size: f32,
     terminal_font: String,
     ghostty_theme: GhosttyTheme,
     clipboard: Option<arboard::Clipboard>,
@@ -695,6 +972,7 @@ impl MuxApp {
         // what it shows depends on whether the window is in front.
         cx.observe_window_activation(window, |_, _, cx| cx.notify())
             .detach();
+        Self::keep_window_frame(window, cx);
         let ground = ground::SharedGround::default();
         let ground_view = cx.new(|cx| ground::GroundView::new(Rc::clone(&ground), window, cx));
 
@@ -702,9 +980,15 @@ impl MuxApp {
         Self::check_agent_availability(&profiles, window, cx);
         let mut app = Self {
             focus_handle,
+            prompt_rows: RefCell::default(),
+            ime_marked: None,
+            blink_since: Instant::now(),
+            blink_timer: None,
+            run_clock: None,
             backend,
             events,
             state_dir,
+            window_frame_serial: 0,
             settings,
             profiles,
             session: None,
@@ -737,21 +1021,30 @@ impl MuxApp {
             permission_choice: None,
             agent_placeholder: String::new(),
             agent_unseen: HashSet::new(),
-            tab_inks: HashMap::new(),
             tab_rename: None,
+            pane_rename: None,
             tab_strip_scroll: ScrollHandle::new(),
             tab_strip_active: Cell::new(None),
             tab_strip_follow: Cell::new(true),
             strip_message: None,
             strip_serial: 0,
+            bell_flash: None,
+            bell_serial: 0,
+            close_armed: None,
+            paste_armed: None,
+            clipboard_read_asked: None,
+            selection_clipboard: None,
+            pane_menu: None,
             size_readout: false,
             size_readout_pending: false,
             size_readout_serial: 0,
+            synced_tabs: HashSet::new(),
             session_sheet: None,
             settings_sheet: None,
             palette: None,
             find: None,
             seam_drag: None,
+            thumb_drag: None,
             seam_pointer: None,
             seam_settle: None,
             layout_motion: motion::LayoutMotion::default(),
@@ -767,11 +1060,22 @@ impl MuxApp {
             pane_exits: HashMap::new(),
             pane_restart: None,
             pane_calls: HashMap::new(),
+            call_order: Vec::new(),
+            prompt_flash: None,
+            keyed_selection: None,
+            pane_progress: HashMap::new(),
+            progress_sweep: None,
+            finished_commands: Vec::new(),
             link_hover: None,
             link_pointer: None,
             selected_pane: None,
             pending_focused_pane: None,
             selection_drag: None,
+            selection_edge: None,
+            selection_scrolling: None,
+            early_typed: None,
+            cursor_click: None,
+            window_title: String::new(),
             mouse_reporting: None,
             terminal_key_presses: HashMap::new(),
             terminal_resync_pending: None,
@@ -780,6 +1084,7 @@ impl MuxApp {
             mode: InputMode::Normal,
             motion,
             metrics,
+            configured_font_size: metrics.font_size,
             terminal_font,
             ghostty_theme: GhosttyTheme::load_user().unwrap_or_default(),
             clipboard: arboard::Clipboard::new().ok(),
@@ -794,7 +1099,10 @@ impl MuxApp {
     /// and the grid it measures out to.
     fn resolve_terminal_font(cx: &mut Context<Self>) -> (String, GridMetrics) {
         let font_config = GhosttyFont::load_user().unwrap_or_default();
-        let font_size = font_config.size.unwrap_or(14.0).clamp(8.0, 36.0);
+        let font_size = font_config
+            .size
+            .unwrap_or(14.0)
+            .clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
         let requested_font = font_config.family.as_deref().unwrap_or_default().trim();
         let available_fonts = cx.text_system().all_font_names();
         let terminal_font = available_fonts
@@ -808,13 +1116,44 @@ impl MuxApp {
             font_size,
             "resolved GPUI terminal font"
         );
-        let metrics = GridMetrics::from_font(&terminal_font, font_size, cx.text_system());
+        let metrics = terminal_metrics(&terminal_font, font_size, cx);
         info!(
             cell_width = metrics.cell_width,
             cell_height = metrics.cell_height,
             "measured terminal grid"
         );
         (terminal_font, metrics)
+    }
+
+    /// Set the terminal text's size for every pane in the window, within
+    /// the range Ghostty's config is held to. The panes take their new grids
+    /// at the next frame, and the strip says the size.
+    fn set_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
+        let size = size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+        if (size - self.metrics.font_size).abs() < f32::EPSILON {
+            let edge = if size >= MAX_FONT_SIZE {
+                "text is as large as it goes"
+            } else if size <= MIN_FONT_SIZE {
+                "text is as small as it goes"
+            } else {
+                return;
+            };
+            self.say_in_strip(edge, false, cx);
+            return;
+        }
+        self.metrics = terminal_metrics(&self.terminal_font, size, cx);
+        let said = if (size - self.configured_font_size).abs() < f32::EPSILON {
+            format!("text back to {}", font_size_words(size))
+        } else {
+            format!("text {}", font_size_words(size))
+        };
+        self.say_in_strip(said, false, cx);
+        cx.notify();
+    }
+
+    fn step_font_size(&mut self, steps: f32, cx: &mut Context<Self>) {
+        let size = (self.metrics.font_size + steps).round();
+        self.set_font_size(size, cx);
     }
 
     /// Look for each agent's launcher off the UI thread: finding it can mean
@@ -849,6 +1188,15 @@ impl MuxApp {
     /// Keep the slow pulse ticking while anything shows it: a live agent
     /// pane, or a tab chip whose agent is at work behind the scenes. It stops
     /// by itself once nothing is working, so an idle window never redraws.
+    /// Keep the timers going that draw what moves on its own: an agent's
+    /// pulse and a blinking cursor.
+    fn ensure_animations(&mut self, cx: &mut Context<Self>) {
+        self.ensure_agent_pulse(cx);
+        self.ensure_cursor_blink(cx);
+        self.ensure_run_clock(cx);
+        self.ensure_selection_scroll(cx);
+    }
+
     fn ensure_agent_pulse(&mut self, cx: &mut Context<Self>) {
         if self.agent_pulse_running || !self.agent_pulse_wanted() {
             return;
@@ -1056,7 +1404,9 @@ impl MuxApp {
         }
         self.publish_terminal_frames(&mut dirty_panes, cx);
         self.refresh_link_hover(cx);
-        self.collect_pane_calls(window) || needs_render
+        self.collect_pane_copies(cx);
+        let progressed = self.collect_pane_progress(cx);
+        self.collect_pane_calls(window, cx) || progressed || needs_render
     }
 
     fn publish_terminal_frames(
@@ -1115,6 +1465,7 @@ impl MuxApp {
         cx.notify();
     }
 
+    #[allow(clippy::too_many_lines)]
     fn apply_user_event(&mut self, event: UserEvent, window: &mut Window, cx: &mut Context<Self>) {
         let result = match event {
             UserEvent::Attached(attachment) => {
@@ -1196,9 +1547,17 @@ impl MuxApp {
                 }
                 Ok(())
             }
+            UserEvent::RunningChecked { target, running } => {
+                self.finish_close(target, &running, cx);
+                Ok(())
+            }
             UserEvent::BackendError(message) => {
                 self.pending_agent_prompt = None;
                 Err(anyhow!(message))
+            }
+            UserEvent::StripProblem(said) => {
+                self.say_in_strip(said, true, cx);
+                Ok(())
             }
             UserEvent::PaneParsed { pane_id, error } => {
                 if let Some(pane) = self.panes.get_mut(&pane_id) {
@@ -1342,22 +1701,24 @@ impl MuxApp {
             })
             .collect::<HashMap<_, _>>();
         self.agent_panes = valid_agent_panes;
-
-        let tabs = self
-            .session
-            .as_ref()
-            .map(|session| session.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>())
-            .unwrap_or_default();
-        self.tab_inks.retain(|tab_id, _| tabs.contains(tab_id));
-        for (position, tab_id) in tabs.into_iter().enumerate() {
-            self.tab_inks
-                .entry(tab_id)
-                .or_insert_with(|| Ink::for_position(position));
-        }
     }
 
+    /// A tab's colour is kept with the tab by the daemon, so it outlasts a
+    /// move along the strip and a restart of the app. A tab from before
+    /// colours were kept takes the colour of its place.
     fn tab_ink(&self, tab_id: TabId) -> Ink {
-        self.tab_inks.get(&tab_id).copied().unwrap_or(Ink::Peach)
+        let Some(session) = &self.session else {
+            return Ink::Peach;
+        };
+        session
+            .tabs
+            .iter()
+            .enumerate()
+            .find(|(_, tab)| tab.id == tab_id)
+            .map_or(Ink::Peach, |(position, tab)| {
+                tab.ink
+                    .map_or_else(|| Ink::for_position(position), Ink::from_index)
+            })
     }
 
     fn active_ink(&self) -> Ink {
@@ -1366,10 +1727,15 @@ impl MuxApp {
     }
 
     fn cycle_active_tab_ink(&mut self) {
-        if let Some(tab_id) = self.active_tab_id() {
-            let next = self.tab_ink(tab_id).next();
-            self.tab_inks.insert(tab_id, next);
+        let Some(tab_id) = self.active_tab_id() else {
+            return;
+        };
+        let next = self.tab_ink(tab_id).next().index();
+        // Shown at once; the daemon's answer says the same.
+        if let Some(tab) = self.session.as_mut().and_then(Session::active_tab_mut) {
+            tab.ink = Some(next);
         }
+        self.send_workspace(WorkspaceCommand::SetTabInk(next));
     }
 
     fn apply_server_event(&mut self, event: ServerEvent) -> Result<()> {
@@ -1421,8 +1787,65 @@ impl MuxApp {
                 self.note_agent_turn_end(&event);
             }
             ServerEvent::AgentResyncRequired => self.backend.send(CommandMessage::ListAgents),
+            ServerEvent::PaneCommandFinished {
+                pane_id,
+                program,
+                seconds,
+                ..
+            } => {
+                if let Some(pane) = self.panes.get_mut(&pane_id) {
+                    pane.program = None;
+                    pane.program_since = None;
+                }
+                self.note_finished_command(pane_id, &program, seconds);
+            }
+            ServerEvent::PaneCommandStarted {
+                pane_id, program, ..
+            } => {
+                if let Some(pane) = self.panes.get_mut(&pane_id) {
+                    pane.program = Some(program);
+                    pane.program_since = Some(Instant::now());
+                }
+            }
+            ServerEvent::PaneSecretInput {
+                pane_id, secret, ..
+            } => {
+                if let Some(pane) = self.panes.get_mut(&pane_id) {
+                    pane.secret_input = secret;
+                }
+            }
         }
         Ok(())
+    }
+
+    /// What a pane of the tab on screen hidden behind the zoomed pane
+    /// `shown` has called, if any has.
+    fn hidden_call(&self, shown: PaneId) -> Option<String> {
+        let tab = self.session.as_ref()?.active_tab()?;
+        let mut panes = Vec::new();
+        tab.layout.pane_ids(&mut panes);
+        panes
+            .iter()
+            .filter(|pane_id| **pane_id != shown)
+            .find_map(|pane_id| self.pane_call(*pane_id))
+            .map(|call| pane_calls::call_words(call).to_owned())
+    }
+
+    /// The way across the focused pane's longer side: side by side for a
+    /// wide pane, one above the other for a tall one.
+    fn longer_axis(&self) -> mux_workspace::SplitAxis {
+        let tall = self
+            .focused_pane_id()
+            .and_then(|pane_id| self.panes.get(&pane_id))
+            .is_some_and(|pane| {
+                self.metrics.cell_height * f32::from(pane.frame.rows)
+                    > self.metrics.cell_width * f32::from(pane.frame.cols)
+            });
+        if tall {
+            mux_workspace::SplitAxis::Vertical
+        } else {
+            mux_workspace::SplitAxis::Horizontal
+        }
     }
 
     fn focused_pane_id(&self) -> Option<PaneId> {
@@ -1471,6 +1894,7 @@ impl MuxApp {
     /// keyboard until it closes, whatever the workspace does meanwhile.
     fn field_has_keyboard(&self) -> bool {
         self.tab_rename.is_some()
+            || self.pane_rename.is_some()
             || self.session_sheet.is_some()
             || self.settings_sheet.is_some()
             || self.palette.is_some()
@@ -1769,6 +2193,10 @@ impl MuxApp {
             // the window lost focus before GPUI delivered the prior key-up.
             self.terminal_key_presses.remove(&event.keystroke.key);
         }
+        if self.catch_early_typing(&event.keystroke, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if window.has_active_dialog(cx)
             || window.has_active_sheet(cx)
             || self.field_has_keyboard()
@@ -1778,6 +2206,10 @@ impl MuxApp {
             return;
         }
         if self.quick_select_key(&event.keystroke, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if self.pane_menu_open() && self.pane_menu_key(&event.keystroke, window, cx) {
             cx.stop_propagation();
             return;
         }
@@ -1830,44 +2262,25 @@ impl MuxApp {
         cx: &mut Context<Self>,
     ) {
         if keystroke.modifiers.platform && keystroke.key == "c" {
-            let selected = self.selected_pane.or_else(|| self.focused_pane_id());
-            if let Some(text) = selected
-                .and_then(|pane_id| self.panes.get(&pane_id))
-                .and_then(|pane| {
-                    pane.with_engine(|engine| engine.selected_text())
-                        .ok()
-                        .flatten()
-                })
-                && let Some(clipboard) = &mut self.clipboard
-            {
-                let lines = text.lines().count().max(1);
-                if clipboard.set_text(text).is_ok() {
-                    let copied = if lines == 1 {
-                        "copied 1 line".to_owned()
-                    } else {
-                        format!("copied {lines} lines")
-                    };
-                    self.say_in_strip(copied, false, cx);
-                }
-            }
+            self.copy_selection(cx);
             return;
         }
-        if self.exited_pane_key(keystroke, held) || self.scrollback_key_down(keystroke, cx) {
+        if self.exited_pane_key(keystroke, held)
+            || self.scrollback_key_down(keystroke, cx)
+            || self.adjust_selection_key(keystroke, cx)
+        {
             return;
         }
         if keystroke.modifiers.platform && keystroke.key == "v" {
-            if let Some(clipboard) = &mut self.clipboard
-                && let Ok(text) = clipboard.get_text()
-                && let Some(pane_id) = self.terminal_input_pane_id()
-                && let Some(pane) = self.panes.get(&pane_id)
-                && let Ok(bytes) = pane.with_engine(|engine| engine.encode_paste(&text))
-            {
-                self.write_focused(bytes);
-                self.return_to_latest(pane_id, cx);
-            }
+            self.paste_clipboard(cx);
             return;
         }
 
+        // A key the pane hears ends whatever was being composed: on Linux a
+        // dead key's composed letter arrives as a key, not from the input
+        // method.
+        self.ime_marked = None;
+        self.restart_cursor_blink();
         let pane_id = terminal_key_down_target(
             &self.terminal_key_presses,
             &keystroke.key,
@@ -1879,11 +2292,236 @@ impl MuxApp {
         };
         if !keystroke.modifiers.platform {
             self.return_to_latest(pane_id, cx);
+            self.clear_selection_on_typing(pane_id);
         }
         if self.send_terminal_key_to(pane_id, keystroke, false, held, caps_lock) && !held {
             self.terminal_key_presses
                 .insert(keystroke.key.clone(), pane_id);
         }
+    }
+
+    /// Typing into a pane lets go of what was selected in it, as Ghostty
+    /// does, so a highlight never sits over text that has since changed,
+    /// unless `selection-clear-on-typing = false` keeps it.
+    fn clear_selection_on_typing(&mut self, pane_id: PaneId) {
+        if self.selected_pane != Some(pane_id) || !selection_clear_on_typing() {
+            return;
+        }
+        self.selected_pane = None;
+        if let Some(pane) = self.panes.get_mut(&pane_id) {
+            let _ = pane.with_engine(|engine| engine.set_selection(None));
+            let _ = pane.publish_frame();
+        }
+    }
+
+    /// The selected text, from the pane it was made in.
+    fn selected_text(&self) -> Option<String> {
+        let selected = self.selected_pane.or_else(|| self.focused_pane_id())?;
+        self.panes
+            .get(&selected)?
+            .with_engine(|engine| engine.selected_text())
+            .ok()
+            .flatten()
+    }
+
+    /// Copy the selection, and say how much in the strip.
+    fn copy_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = self.selected_text()
+            && let Some(clipboard) = &mut self.clipboard
+        {
+            let lines = text.lines().count().max(1);
+            if clipboard.set_text(text).is_ok() {
+                let copied = if lines == 1 {
+                    "copied 1 line".to_owned()
+                } else {
+                    format!("copied {lines} lines")
+                };
+                self.say_in_strip(copied, false, cx);
+            }
+        }
+    }
+
+    /// Put on the clipboard what programs copied with OSC 52 in the output
+    /// just applied, and say how much in the strip.
+    fn collect_pane_copies(&mut self, cx: &mut Context<Self>) {
+        let mut copied = None;
+        let mut reads = Vec::new();
+        for (pane_id, pane) in &mut self.panes {
+            if let Some(text) = pane.title.take_copied() {
+                copied = Some(text);
+            }
+            if let Some(place) = pane.title.take_clipboard_read() {
+                reads.push((*pane_id, place));
+            }
+        }
+        self.answer_clipboard_reads(reads, cx);
+        let Some(text) = copied.filter(|_| clipboard_write_allowed()) else {
+            return;
+        };
+        if let Some(clipboard) = &mut self.clipboard {
+            let lines = text.lines().count().max(1);
+            if clipboard.set_text(text).is_ok() {
+                let copied = if lines == 1 {
+                    "a program copied 1 line".to_owned()
+                } else {
+                    format!("a program copied {lines} lines")
+                };
+                self.say_in_strip(copied, false, cx);
+            }
+        }
+    }
+
+    /// Give programs that asked to read the clipboard what is on it, as
+    /// the user's Ghostty says: at once with `allow`, never with `deny`,
+    /// and by default after asking in the strip, a ⌘V handing it over.
+    fn answer_clipboard_reads(&mut self, reads: Vec<(PaneId, String)>, cx: &mut Context<Self>) {
+        use mux_terminal_ghostty::ClipboardRead;
+        let Some((pane_id, place)) = reads.into_iter().last() else {
+            return;
+        };
+        match clipboard_read() {
+            ClipboardRead::Allow => self.give_clipboard(pane_id, &place, cx),
+            ClipboardRead::Deny => {}
+            ClipboardRead::Ask => {
+                self.say_in_strip("a program asks for the clipboard · ⌘v gives it", true, cx);
+                self.clipboard_read_asked = Some((pane_id, place, self.strip_serial));
+            }
+        }
+    }
+
+    fn give_clipboard(&mut self, pane_id: PaneId, place: &str, cx: &mut Context<Self>) {
+        let Some(text) = self
+            .clipboard
+            .as_mut()
+            .and_then(|clipboard| clipboard.get_text().ok())
+        else {
+            return;
+        };
+        self.backend.send(CommandMessage::Write {
+            pane_id,
+            bytes: mux_terminal::clipboard_reply(place, &text),
+        });
+        self.say_in_strip("a program read the clipboard", false, cx);
+    }
+
+    /// A ⌘V while the strip still asks hands the clipboard to the program
+    /// that asked, instead of pasting. Returns whether it did.
+    fn answer_asked_clipboard_read(&mut self, cx: &mut Context<Self>) -> bool {
+        let asking = |serial: u64| {
+            self.strip_message
+                .as_ref()
+                .is_some_and(|message| message.serial == serial)
+        };
+        let Some((pane_id, place, _)) = self
+            .clipboard_read_asked
+            .take()
+            .filter(|(pane_id, _, serial)| asking(*serial) && self.panes.contains_key(pane_id))
+        else {
+            return false;
+        };
+        self.give_clipboard(pane_id, &place, cx);
+        true
+    }
+
+    /// A selection, made with the pointer or the keys, goes to the
+    /// selection clipboard for `paste_from_selection`, as in Ghostty, and with
+    /// `copy-on-select = clipboard` in the user's Ghostty config on the
+    /// clipboard too, without a word in the strip.
+    fn copy_on_select(&mut self) {
+        use mux_terminal_ghostty::CopyOnSelect;
+        let copies = copy_on_select();
+        if copies == CopyOnSelect::Off {
+            return;
+        }
+        let Some(text) = self.selected_text() else {
+            return;
+        };
+        if copies == CopyOnSelect::Clipboard
+            && let Some(clipboard) = &mut self.clipboard
+        {
+            let _ = clipboard.set_text(text.clone());
+        }
+        self.selection_clipboard = Some(text);
+    }
+
+    /// Paste the clipboard into the pane with the keys, as its program
+    /// asks for pastes, and show the pane's latest output.
+    fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
+        if self.answer_asked_clipboard_read(cx) {
+            return;
+        }
+        if let Some(clipboard) = &mut self.clipboard
+            && let Ok(text) = clipboard.get_text()
+        {
+            self.paste_text(&text, cx);
+        }
+    }
+
+    /// Paste what was last selected, as Ghostty's `paste_from_selection`
+    /// does, without going through the clipboard.
+    fn paste_selection_clipboard(&mut self, cx: &mut Context<Self>) {
+        match self.selection_clipboard.clone() {
+            Some(text) => self.paste_text(&text, cx),
+            None => self.say_in_strip("nothing selected to paste yet", false, cx),
+        }
+    }
+
+    fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if let Some(pane_id) = self.terminal_input_pane_id()
+            && let Some(pane) = self.panes.get(&pane_id)
+            && let Ok(bytes) = pane.with_engine(|engine| engine.encode_paste(text))
+        {
+            if self.hold_unsafe_paste(text, &bytes, cx) {
+                return;
+            }
+            self.write_focused(bytes);
+            self.return_to_latest(pane_id, cx);
+            // A synced tab's other panes get the paste too, each as it
+            // asks for pastes.
+            for target in self.key_targets(pane_id).into_iter().skip(1) {
+                if let Some(pane) = self.panes.get(&target)
+                    && let Ok(bytes) = pane.with_engine(|engine| engine.encode_paste(text))
+                {
+                    self.backend.send(CommandMessage::Write {
+                        pane_id: target,
+                        bytes,
+                    });
+                }
+            }
+        }
+    }
+
+    /// A paste with a line break, into a program that hasn't asked for
+    /// bracketed pastes, runs each line as it lands, as Ghostty warns.
+    /// The first ⌘V says so and the second within a few seconds goes
+    /// ahead. Returns whether the paste is held.
+    fn hold_unsafe_paste(&mut self, text: &str, bytes: &[u8], cx: &mut Context<Self>) -> bool {
+        if !paste_runs_lines(text, bytes) || !paste_protection() {
+            return false;
+        }
+        let key = {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut hasher);
+            hasher.finish()
+        };
+        if self
+            .paste_armed
+            .take()
+            .is_some_and(|(armed, at)| armed == key && at.elapsed() < CLOSE_AGAIN_WINDOW)
+        {
+            self.strip_message = None;
+            return false;
+        }
+        self.paste_armed = Some((key, Instant::now()));
+        let lines = text.trim_end_matches('\n').lines().count().max(1);
+        let said = if lines == 1 {
+            "this paste ends in a line break, so it would run · ⌘v again to paste".to_owned()
+        } else {
+            format!("this paste would run {lines} lines · ⌘v again to paste")
+        };
+        self.say_in_strip(said, true, cx);
+        true
     }
 
     fn send_terminal_key_to(
@@ -1894,23 +2532,38 @@ impl MuxApp {
         held: bool,
         caps_lock: bool,
     ) -> bool {
-        let Some(pane) = self.panes.get(&pane_id) else {
+        if !self.panes.contains_key(&pane_id) {
             return false;
-        };
-        let terminal_event = terminal_key_event(keystroke, release, held, caps_lock);
-        match pane.with_engine(|engine| engine.encode_key(&terminal_event)) {
-            Ok(bytes) => {
-                if !bytes.is_empty() {
-                    self.note_pane_key(pane_id);
-                    self.backend.send(CommandMessage::Write { pane_id, bytes });
+        }
+        let mut terminal_event = terminal_key_event(keystroke, release, held, caps_lock);
+        if option_as_alt() {
+            option_as_meta(&mut terminal_event, keystroke);
+        }
+        // Each pane encodes the key for itself: one shell may have asked
+        // for application cursor keys or the kitty protocol, another not.
+        for target in self.key_targets(pane_id) {
+            let Some(pane) = self.panes.get(&target) else {
+                continue;
+            };
+            match pane.with_engine(|engine| engine.encode_key(&terminal_event)) {
+                Ok(bytes) => {
+                    if !bytes.is_empty() {
+                        self.note_pane_key(target);
+                        self.backend.send(CommandMessage::Write {
+                            pane_id: target,
+                            bytes,
+                        });
+                    }
                 }
-                true
-            }
-            Err(error) => {
-                error!(%error, "encode terminal key");
-                false
+                Err(error) => {
+                    error!(%error, "encode terminal key");
+                    if target == pane_id {
+                        return false;
+                    }
+                }
             }
         }
+        true
     }
 
     fn forward_terminal_tab(&mut self, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -1957,6 +2610,10 @@ impl MuxApp {
             Action::EnterMode(mode) => self.mode = mode,
             Action::WriteTerminal(bytes) => self.write_focused(bytes),
             Action::SplitPane(axis) => self.send_workspace(WorkspaceCommand::SplitPane(axis)),
+            Action::SplitPaneAuto => {
+                let axis = self.longer_axis();
+                self.send_workspace(WorkspaceCommand::SplitPane(axis));
+            }
             Action::FocusPane(direction) => {
                 self.send_workspace(WorkspaceCommand::FocusPane(direction));
             }
@@ -1966,10 +2623,27 @@ impl MuxApp {
             Action::ResizePane(direction) => {
                 self.send_workspace(WorkspaceCommand::ResizePane(direction));
             }
-            Action::ClosePane => self.send_workspace(WorkspaceCommand::ClosePane),
+            Action::ClosePane => {
+                // A tab's only pane closes the tab.
+                let lone = self
+                    .session
+                    .as_ref()
+                    .and_then(Session::active_tab)
+                    .filter(|tab| matches!(tab.layout, mux_workspace::PaneLayout::Leaf(_)))
+                    .map(|tab| tab.id);
+                if let Some(tab_id) = lone {
+                    self.request_close(CloseTarget::Tab(tab_id));
+                } else if let Some(pane_id) = self.focused_pane_id() {
+                    self.request_close(CloseTarget::Pane(pane_id));
+                }
+            }
             Action::TogglePaneZoom => self.send_workspace(WorkspaceCommand::TogglePaneZoom),
             Action::NewTab => self.send_workspace(WorkspaceCommand::NewTab),
-            Action::CloseTab => self.send_workspace(WorkspaceCommand::CloseTab),
+            Action::CloseTab => {
+                if let Some(tab_id) = self.active_tab_id() {
+                    self.request_close(CloseTarget::Tab(tab_id));
+                }
+            }
             Action::RenameTab => self.open_rename_tab(window, cx),
             Action::SelectTab(number) => {
                 if let Some(tab) = self
@@ -1987,8 +2661,182 @@ impl MuxApp {
             Action::OpenAgentSurface => self.toggle_agents(window, cx),
             Action::OpenSettings => self.toggle_settings_sheet(window, cx),
             Action::OpenCommandPalette => self.toggle_palette(window, cx),
+            Action::MoveTab(direction) => self.move_active_tab(direction),
+            Action::BreakPaneToTab => self.break_pane_to_tab(cx),
+            Action::RenamePane => self.open_rename_pane(window, cx),
+            Action::ReopenClosedTab => self.send_workspace(WorkspaceCommand::ReopenClosedTab),
+            Action::EqualizePanes => self.send_workspace(WorkspaceCommand::EqualizePanes),
+            Action::SwapPane(direction) => {
+                self.send_workspace(WorkspaceCommand::SwapPane(direction));
+            }
+            Action::ToggleSyncTab => {
+                self.toggle_sync_tab();
+                let said = if self.active_tab_synced() {
+                    "typing into every pane in this tab · ⌃t s to stop"
+                } else {
+                    "typing into one pane again"
+                };
+                self.say_in_strip(said, false, cx);
+            }
         }
         cx.notify();
+    }
+
+    /// Close the focused pane or the tab on screen, once the daemon has
+    /// said what its panes are running. A second close of the same thing
+    /// soon after one that found something running goes ahead at once.
+    fn request_close(&mut self, target: CloseTarget) {
+        if self
+            .close_armed
+            .take()
+            .is_some_and(|(armed, at)| armed == target && at.elapsed() < CLOSE_AGAIN_WINDOW)
+        {
+            self.strip_message = None;
+            self.close_now(target);
+            return;
+        }
+        if close_confirm() == mux_terminal_ghostty::CloseConfirm::Never {
+            self.close_now(target);
+            return;
+        }
+        let pane_ids = match target {
+            CloseTarget::Pane(pane_id) => vec![pane_id],
+            CloseTarget::Tab(tab_id) => self
+                .session
+                .as_ref()
+                .and_then(|session| session.tabs.iter().find(|tab| tab.id == tab_id))
+                .map(|tab| {
+                    let mut panes = Vec::new();
+                    tab.layout.pane_ids(&mut panes);
+                    panes
+                })
+                .unwrap_or_default(),
+            CloseTarget::OtherTabs(kept) => {
+                let mut panes = Vec::new();
+                for tab in self.session.iter().flat_map(|session| &session.tabs) {
+                    if tab.id != kept {
+                        tab.layout.pane_ids(&mut panes);
+                    }
+                }
+                panes
+            }
+        };
+        // A pane whose shell has ended runs nothing.
+        let pane_ids = pane_ids
+            .into_iter()
+            .filter(|pane_id| !self.pane_exits.contains_key(pane_id))
+            .collect::<Vec<_>>();
+        if pane_ids.is_empty() {
+            self.close_now(target);
+        } else {
+            self.backend
+                .send(CommandMessage::CheckRunning { target, pane_ids });
+        }
+    }
+
+    /// The daemon has said what a close would end. Nothing but shells: it
+    /// goes ahead. Otherwise the strip names what would end, and the next
+    /// close of the same thing goes ahead.
+    fn finish_close(&mut self, target: CloseTarget, running: &[String], cx: &mut Context<Self>) {
+        let always = close_confirm() == mux_terminal_ghostty::CloseConfirm::Always;
+        if running.is_empty() && !always {
+            self.close_now(target);
+            return;
+        }
+        self.close_armed = Some((target, Instant::now()));
+        if running.is_empty() {
+            // `confirm-close-surface = always` asks even with only shells.
+            let what = match target {
+                CloseTarget::Pane(_) => "this pane",
+                CloseTarget::Tab(tab_id) if self.active_tab_id() == Some(tab_id) => "this tab",
+                CloseTarget::Tab(_) => "that tab",
+                CloseTarget::OtherTabs(_) => "the other tabs",
+            };
+            self.say_in_strip(format!("close again to close {what}"), true, cx);
+            return;
+        }
+        let what = match target {
+            CloseTarget::Pane(_) => "here",
+            CloseTarget::Tab(tab_id) if self.active_tab_id() == Some(tab_id) => "in this tab",
+            CloseTarget::Tab(_) => "in that tab",
+            CloseTarget::OtherTabs(_) => "in the other tabs",
+        };
+        self.say_in_strip(
+            format!(
+                "{} {} running {what}  ·  close again to end {}",
+                chrome::names_list(running),
+                if running.len() == 1 { "is" } else { "are" },
+                if running.len() == 1 { "it" } else { "them" },
+            ),
+            true,
+            cx,
+        );
+    }
+
+    /// Close the pane or tab, if it is still the one with the keys.
+    fn close_now(&mut self, target: CloseTarget) {
+        match target {
+            CloseTarget::Pane(pane_id) if self.focused_pane_id() == Some(pane_id) => {
+                self.send_workspace(WorkspaceCommand::ClosePane);
+            }
+            CloseTarget::Tab(tab_id)
+                if self
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.tabs.iter().any(|tab| tab.id == tab_id)) =>
+            {
+                self.send_workspace(WorkspaceCommand::CloseTabWithId(tab_id));
+            }
+            CloseTarget::OtherTabs(kept) => {
+                let others = self
+                    .session
+                    .iter()
+                    .flat_map(|session| &session.tabs)
+                    .map(|tab| tab.id)
+                    .filter(|tab_id| *tab_id != kept)
+                    .collect::<Vec<_>>();
+                for tab_id in others {
+                    self.send_workspace(WorkspaceCommand::CloseTabWithId(tab_id));
+                }
+            }
+            CloseTarget::Pane(_) | CloseTarget::Tab(_) => {}
+        }
+    }
+
+    /// Clear the terminal pane with the keys, its history too, and show
+    /// it from the top. An agent pane has nothing to clear.
+    fn clear_pane(&mut self, cx: &mut Context<Self>) {
+        let Some(pane_id) = self.terminal_input_pane_id() else {
+            return;
+        };
+        if self.active_agent_pane() == Some(pane_id) {
+            return;
+        }
+        self.return_to_latest(pane_id, cx);
+        self.backend.send(CommandMessage::ClearPane { pane_id });
+    }
+
+    /// Put the pane's terminal back as it started, as Ghostty's `reset`.
+    fn reset_pane(&mut self, cx: &mut Context<Self>) {
+        let Some(pane_id) = self
+            .terminal_input_pane_id()
+            .filter(|pane_id| self.active_agent_pane() != Some(*pane_id))
+        else {
+            return;
+        };
+        self.return_to_latest(pane_id, cx);
+        self.backend.send(CommandMessage::ResetPane { pane_id });
+        self.say_in_strip("reset the terminal", false, cx);
+    }
+
+    /// A Mac shortcut does what its Zellij keys do, from whatever mode the
+    /// keys were in, and leaves them in Normal; Locked stays locked until
+    /// Ctrl+g.
+    fn run_shortcut(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode != InputMode::Locked {
+            self.mode = InputMode::Normal;
+        }
+        self.perform_action(action, window, cx);
     }
 
     /// Rename the active tab in its own chip: the name turns into a field
@@ -2037,6 +2885,55 @@ impl MuxApp {
         });
         self.mode = InputMode::Normal;
         cx.notify();
+    }
+
+    /// Move the tab on screen one place along the strip; at either end it
+    /// stays where it is.
+    fn move_active_tab(&mut self, direction: Direction) {
+        match direction {
+            Direction::Left => self.move_active_tab_by(-1),
+            Direction::Right => self.move_active_tab_by(1),
+            Direction::Up | Direction::Down => {}
+        }
+    }
+
+    /// Move the tab on screen `by` places along the strip, right when
+    /// positive, stopping at either end.
+    fn move_active_tab_by(&mut self, by: isize) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let Some(from) = session
+            .tabs
+            .iter()
+            .position(|tab| tab.id == session.active_tab)
+        else {
+            return;
+        };
+        let to = from
+            .saturating_add_signed(by)
+            .min(session.tabs.len().saturating_sub(1));
+        if to != from {
+            self.send_workspace(WorkspaceCommand::MoveTab {
+                tab: session.active_tab,
+                to,
+            });
+        }
+    }
+
+    /// Give the focused pane a tab of its own, next to this one. A pane
+    /// alone in its tab already has one, and the strip says so.
+    fn break_pane_to_tab(&mut self, cx: &mut Context<Self>) {
+        let alone = self
+            .session
+            .as_ref()
+            .and_then(Session::active_tab)
+            .is_some_and(|tab| matches!(tab.layout, mux_workspace::PaneLayout::Leaf(_)));
+        if alone {
+            self.say_in_strip("this pane already has the tab to itself", false, cx);
+            return;
+        }
+        self.send_workspace(WorkspaceCommand::BreakPaneToTab);
     }
 
     fn finish_tab_rename(&mut self, keep: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -3101,7 +3998,14 @@ impl MuxApp {
         }
     }
 
-    fn pointer_down(&mut self, pane_id: PaneId, rect: layout::Rect, event: &gpui::MouseDownEvent) {
+    fn pointer_down(
+        &mut self,
+        pane_id: PaneId,
+        rect: layout::Rect,
+        event: &gpui::MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let had_keys = self.terminal_input_pane_id() == Some(pane_id);
         self.request_pane_focus(pane_id);
         let button = terminal_mouse_button(event.button);
         if !event.modifiers.shift
@@ -3119,8 +4023,43 @@ impl MuxApp {
             self.selection_drag = None;
             return;
         }
-        if event.button == gpui::MouseButton::Left {
-            self.begin_selection(pane_id, rect, event);
+        match event.button {
+            gpui::MouseButton::Left if self.extend_selection(pane_id, rect, event) => {
+                self.copy_on_select();
+            }
+            gpui::MouseButton::Left => {
+                self.begin_cursor_click(pane_id, rect, event, had_keys);
+                self.begin_selection(pane_id, rect, event);
+            }
+            gpui::MouseButton::Right => self.right_click(pane_id, rect, event.position, cx),
+            _ => {}
+        }
+    }
+
+    /// A right-click in a pane: its menu, or what the user's Ghostty has
+    /// right-click do instead.
+    fn right_click(
+        &mut self,
+        pane_id: PaneId,
+        rect: layout::Rect,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        use mux_terminal_ghostty::RightClick;
+        static ACTION: ghostty_config::Reloadable<RightClick> =
+            ghostty_config::Reloadable::new(mux_terminal_ghostty::user_right_click);
+        match ACTION.get() {
+            RightClick::Menu => self.open_pane_menu(pane_id, rect, position),
+            RightClick::Copy => self.copy_selection(cx),
+            RightClick::CopyOrPaste if self.selected_text().is_some() => {
+                self.copy_selection(cx);
+                // Let go of it, so the next right-click pastes.
+                if let Some(selected) = self.selected_pane {
+                    self.clear_selection_on_typing(selected);
+                }
+            }
+            RightClick::Paste | RightClick::CopyOrPaste => self.paste_clipboard(cx),
+            RightClick::Ignore => {}
         }
     }
 
@@ -3128,7 +4067,7 @@ impl MuxApp {
         if event.pressed_button.is_none() && self.end_missed_release(event) {
             return true;
         }
-        if self.drag_seam(event) {
+        if self.drag_seam(event) || self.drag_scroll_thumb(event.position) {
             return true;
         }
         if let Some(capture) = self.mouse_reporting {
@@ -3146,6 +4085,7 @@ impl MuxApp {
         let Some(capture) = self.selection_drag else {
             return false;
         };
+        self.follow_cursor_click(event.position);
         self.drag_selection(capture, event);
         true
     }
@@ -3157,7 +4097,7 @@ impl MuxApp {
     /// whatever was held, as the release would have. Returns whether
     /// anything was.
     fn end_missed_release(&mut self, event: &gpui::MouseMoveEvent) -> bool {
-        let mut ended = self.end_seam_drag();
+        let mut ended = self.end_seam_drag() | self.release_scroll_thumb();
         if let Some(capture) = self.mouse_reporting.take() {
             let _ = self.report_mouse_event(
                 capture.pane_id,
@@ -3180,6 +4120,23 @@ impl MuxApp {
         ended
     }
 
+    /// With `focus-follows-mouse` in the user's Ghostty config, the pane
+    /// under the pointer takes the keys, unless a button is held or
+    /// something is open over the panes.
+    fn follow_mouse_focus(&mut self, pane_id: PaneId, event: &gpui::MouseMoveEvent, active: bool) {
+        if active
+            && event.pressed_button.is_none()
+            && focus_follows_mouse()
+            && self.palette.is_none()
+            && self.pane_menu.is_none()
+            && self.session_sheet.is_none()
+            && self.settings_sheet.is_none()
+            && !self.seam_dragging()
+        {
+            self.request_pane_focus(pane_id);
+        }
+    }
+
     fn pointer_hover(
         &mut self,
         pane_id: PaneId,
@@ -3189,6 +4146,7 @@ impl MuxApp {
         if self.mouse_reporting.is_some()
             || self.selection_drag.is_some()
             || self.seam_dragging()
+            || self.thumb_drag.is_some()
             || event.modifiers.shift
         {
             return false;
@@ -3205,7 +4163,9 @@ impl MuxApp {
     }
 
     fn pointer_up(&mut self, event: &gpui::MouseUpEvent) -> bool {
-        if event.button == gpui::MouseButton::Left && self.end_seam_drag() {
+        if event.button == gpui::MouseButton::Left
+            && (self.end_seam_drag() || self.release_scroll_thumb())
+        {
             return true;
         }
         if let Some(capture) = self.mouse_reporting.take() {
@@ -3224,6 +4184,8 @@ impl MuxApp {
             && let Some(capture) = self.selection_drag.take()
         {
             self.end_selection(capture, event);
+            self.finish_cursor_click();
+            self.copy_on_select();
             return true;
         }
         false
@@ -3288,6 +4250,7 @@ impl MuxApp {
                 geometry: pointer.geometry,
             },
         );
+        self.note_selection_edge(event.position, event.modifiers.alt);
     }
 
     fn end_selection(&mut self, capture: TerminalPointerCapture, event: &gpui::MouseUpEvent) {
@@ -3306,10 +4269,11 @@ impl MuxApp {
         rect: layout::Rect,
         event: &gpui::ScrollWheelEvent,
     ) -> bool {
+        let multiplier = scroll_multiplier();
         let (delta_rows, reset_fraction) = match event.delta {
-            gpui::ScrollDelta::Lines(delta) => (-delta.y * 3.0, true),
+            gpui::ScrollDelta::Lines(delta) => (-delta.y * multiplier.discrete, true),
             gpui::ScrollDelta::Pixels(delta) => (
-                -f32::from(delta.y) / self.metrics.cell_height,
+                -f32::from(delta.y) * multiplier.precision / self.metrics.cell_height,
                 matches!(event.touch_phase, gpui::TouchPhase::Started),
             ),
         };
@@ -3432,10 +4396,25 @@ impl MuxApp {
         if !title.is_empty() && title.parse::<u64>().is_err() {
             return chrome::truncate_chars(title, 24);
         }
+        if let Some(name) = self.pane_name(tab.focused_pane) {
+            return chrome::truncate_chars(name, 24);
+        }
+        let pane = self.panes.get(&tab.focused_pane);
+        if let Some(program) = pane.and_then(PaneReplica::untitled_program) {
+            return chrome::truncate_chars(program, 24);
+        }
+        pane.and_then(|pane| pane.title.title())
+            .map_or_else(|| "shell".to_owned(), chrome::tab_label)
+    }
+
+    /// A tab's name as its tooltip gives it: the chip's short name, then
+    /// in full what its focused pane's head says, when that says more.
+    fn tab_tooltip_name(&self, tab: &mux_workspace::Tab, label: &str) -> String {
         self.panes
             .get(&tab.focused_pane)
-            .and_then(|pane| pane.title.title())
-            .map_or_else(|| "shell".to_owned(), chrome::tab_label)
+            .and_then(PaneReplica::head_title)
+            .filter(|full| full != label)
+            .map_or_else(|| label.to_owned(), |full| format!("{label} — {full}"))
     }
 
     /// One tab in gofer's strip voice: an ink dot, then the name. The active
@@ -3465,14 +4444,15 @@ impl MuxApp {
             .any(|agent| agent.tab_id == Some(tab_id) && self.agent_unseen.contains(&agent.id));
         // The tab on screen shows its panes' calls in their own heads.
         let call = self.tab_call(tab).filter(|_| !active);
+        let named = self.tab_tooltip_name(tab, &label);
         let tooltip: SharedString = match (activity, call) {
-            (_, Some(call)) => format!("{label} · {}", pane_calls::call_words(call)),
-            (Some(AgentTabActivity::Idle), None) if unseen => format!("{label} · agent finished"),
-            (Some(activity), None) => format!("{label} · {}", agent_tab_activity_label(activity)),
-            (None, None) => label.clone(),
+            (_, Some(call)) => format!("{named} · {}", pane_calls::call_words(call)),
+            (Some(AgentTabActivity::Idle), None) if unseen => format!("{named} · agent finished"),
+            (Some(activity), None) => format!("{named} · {}", agent_tab_activity_label(activity)),
+            (None, None) => named,
         }
         .into();
-        let mut chip = h_flex()
+        let chip = h_flex()
             .id(SharedString::from(format!("tab-{tab_id}")))
             .group(group.clone())
             .flex_none()
@@ -3482,13 +4462,26 @@ impl MuxApp {
             .items_center()
             .rounded(px(6.0))
             .cursor_pointer()
-            .tooltip(move |_, cx| strip_tooltip(tooltip.clone(), None, cx))
-            .on_click(cx.listener(move |this, _, _, _| {
-                this.send_workspace(WorkspaceCommand::SelectTab(tab_id));
-            }));
-        if tab_mode && position < 9 {
+            // A menu open by the chip keeps its tooltip from covering it.
+            .when(self.pane_menu.is_none(), |chip| {
+                chip.tooltip(move |_, cx| strip_tooltip(tooltip.clone(), None, cx))
+            })
+            .on_click(
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    // A second click on the tab, now on screen, names it.
+                    if event.click_count() == 2 && active {
+                        this.open_rename_tab(window, cx);
+                    } else {
+                        this.send_workspace(WorkspaceCommand::SelectTab(tab_id));
+                    }
+                }),
+            );
+        let chip = Self::with_chip_pane_drop(chip, tab_id, active, cx);
+        let mut chip = Self::with_tab_drag(chip, tab_id, position, label.clone(), ink, cx);
+        // Tab mode names each tab's key beside it.
+        if let Some(number) = (position < 9 && tab_mode).then_some(position + 1) {
             chip = chip.child(kbd(
-                (position + 1).to_string(),
+                number.to_string(),
                 if active { ink.color() } else { color(TEXT) },
             ));
         }
@@ -3503,29 +4496,8 @@ impl MuxApp {
             _ if active => ink.color(),
             _ => ink.color().opacity(0.72),
         };
-        chip = chip.child(div().flex_none().size(px(6.0)).rounded_full().bg(dot));
-        if let Some(rename) = self
-            .tab_rename
-            .as_ref()
-            .filter(|rename| rename.tab_id == tab_id)
-        {
-            chip = chip.child(Self::render_tab_rename_field(rename, cx));
-        } else {
-            chip = chip.child(
-                div()
-                    .min_w_0()
-                    .max_w(px(200.0))
-                    .truncate()
-                    .font_weight(if active {
-                        FontWeight::BOLD
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .text_color(color(if active { TEXT } else { MUTED_TEXT }))
-                    .group_hover(group, |style| style.text_color(color(TEXT)))
-                    .child(label),
-            );
-        }
+        chip = Self::with_tab_close(chip, tab_id, dot, &group, cx);
+        chip = chip.child(self.render_tab_label(tab_id, label, active, group, cx));
         // Said in words as well, since a peach-inked tab's dot is peach
         // anyway: what its agent or a pane of it wants.
         let wants = if activity == Some(AgentTabActivity::Attention) {
@@ -3536,12 +4508,149 @@ impl MuxApp {
         if let Some(wants) = wants {
             chip = chip.child(div().flex_none().text_color(color(SIGNAL)).child(wants));
         }
+        chip = chip
+            .relative()
+            .children(self.render_chip_progress(tab, active));
         if active {
             chip.bg(wash(0.10))
         } else {
             chip.hover(|style| style.bg(wash(0.05)))
                 .active(|style| style.bg(wash(0.10)))
         }
+    }
+
+    /// The tab's name in its chip, or the field naming it.
+    fn render_tab_label(
+        &self,
+        tab_id: TabId,
+        label: String,
+        active: bool,
+        group: SharedString,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        if let Some(rename) = self
+            .tab_rename
+            .as_ref()
+            .filter(|rename| rename.tab_id == tab_id)
+        {
+            return Self::render_tab_rename_field(rename, cx).into_any_element();
+        }
+        div()
+            .min_w_0()
+            .max_w(px(200.0))
+            .truncate()
+            .font_weight(if active {
+                FontWeight::BOLD
+            } else {
+                FontWeight::NORMAL
+            })
+            .text_color(color(if active { TEXT } else { MUTED_TEXT }))
+            .group_hover(group, |style| style.text_color(color(TEXT)))
+            .child(label)
+            .into_any_element()
+    }
+
+    /// The tab's dot, which turns into a close mark while the pointer is
+    /// over the chip, as a Safari tab's icon does; a middle click on the
+    /// chip closes it too. Closing a tab with something running asks first,
+    /// as closing a pane does.
+    fn with_tab_close(
+        chip: gpui::Stateful<gpui::Div>,
+        tab_id: TabId,
+        dot: Hsla,
+        group: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let mark = div().size(px(6.0)).rounded_full().bg(dot);
+        let close = div()
+            .id(SharedString::from(format!("tab-close-{tab_id}")))
+            .relative()
+            .flex_none()
+            .size(px(14.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(3.0))
+            .hover(|style| style.bg(wash(0.12)))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.request_close(CloseTarget::Tab(tab_id));
+                cx.notify();
+            }))
+            .child(mark.group_hover(group.clone(), |style| style.opacity(0.0)))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(12.0))
+                    .line_height(px(12.0))
+                    .text_color(color(MUTED_TEXT))
+                    .opacity(0.0)
+                    .group_hover(group.clone(), |style| style.opacity(1.0))
+                    .child("×"),
+            );
+        chip.child(close)
+            .on_mouse_down(
+                gpui::MouseButton::Middle,
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.request_close(CloseTarget::Tab(tab_id));
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.open_tab_menu(tab_id, event.position);
+                    cx.notify();
+                }),
+            )
+    }
+
+    /// A chip dragged along the strip takes the place of the one it is
+    /// dropped on, and is shown. The chip it is over shows an edge in the
+    /// dragged tab's ink on the side it will land.
+    fn with_tab_drag(
+        chip: gpui::Stateful<gpui::Div>,
+        tab_id: TabId,
+        position: usize,
+        label: String,
+        ink: Ink,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        chip.on_drag(
+            DraggedTab {
+                tab_id,
+                from: position,
+                label,
+                ink,
+            },
+            |dragged, _, _, cx| cx.new(|_| dragged.clone()),
+        )
+        .drag_over::<DraggedTab>(move |style, dragged, _, _| {
+            let edge = dragged.ink.color();
+            match dragged.from.cmp(&position) {
+                std::cmp::Ordering::Greater => style.bg(wash(0.08)).border_l_2().border_color(edge),
+                std::cmp::Ordering::Less => style.bg(wash(0.08)).border_r_2().border_color(edge),
+                std::cmp::Ordering::Equal => style,
+            }
+        })
+        .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, _| {
+            if dragged.tab_id != tab_id {
+                this.send_workspace(WorkspaceCommand::MoveTab {
+                    tab: dragged.tab_id,
+                    to: position,
+                });
+            }
+            this.send_workspace(WorkspaceCommand::SelectTab(dragged.tab_id));
+        }))
     }
 
     /// The chip's name as a field while it is being renamed, set exactly
@@ -3632,7 +4741,7 @@ impl MuxApp {
         }
         strip
             .child(tabs)
-            .child(
+            .child(Self::with_new_tab_pane_drop(
                 div()
                     .id("tab-new")
                     .flex_none()
@@ -3650,7 +4759,8 @@ impl MuxApp {
                         this.send_workspace(WorkspaceCommand::NewTab);
                     }))
                     .child("+"),
-            )
+                cx,
+            ))
             .child(
                 div()
                     .id("window-drag-region")
@@ -3675,13 +4785,16 @@ impl MuxApp {
             .child(self.render_session_mark(cx))
     }
 
-    /// What the strip is saying, in place of the mode's keys. A click
-    /// clears it; hovering shows all of it when it doesn't fit.
+    /// What the strip is saying, in place of the mode's keys. It has room
+    /// before a long row of tabs, which scrolls for the moment it shows. A
+    /// click clears it; hovering shows all of it when it still doesn't fit.
     fn render_strip_message(message: &StripMessage, cx: &mut Context<Self>) -> impl IntoElement {
         let full = SharedString::from(message.text.clone());
         h_flex()
             .id("strip-message")
             .min_w(px(0.0))
+            .flex_none()
+            .max_w(gpui::relative(0.72))
             .h(px(24.0))
             .px(px(6.0))
             .items_center()
@@ -3717,22 +4830,30 @@ impl MuxApp {
                 ],
                 InputMode::Pane => &[
                     ("hjkl", "focus"),
+                    ("⇧hjkl", "move"),
                     ("r", "right"),
                     ("d", "down"),
                     ("x", "close"),
                     ("f", "zoom"),
+                    ("c", "name"),
                     ("⌃n", "resize"),
+                    ("⌃g", "lock"),
                 ],
                 InputMode::Tab => &[
-                    ("hl", "move"),
+                    ("hl", "go"),
                     ("1-9", "jump"),
                     ("n", "new"),
                     ("r", "rename"),
+                    ("⇧hl", "move"),
+                    ("b", "break out"),
                     ("c", "ink"),
+                    ("s", "sync"),
                     ("x", "close"),
+                    ("⌃g", "lock"),
                 ],
                 InputMode::Session => &[("w", "switch"), ("d", "detach")],
-                InputMode::Resize => &[("hjkl", "resize"), ("enter", "done")],
+                InputMode::Resize => &[("hjkl", "resize"), ("=", "even"), ("enter", "done")],
+                InputMode::Locked => &[("⌃g", "unlock")],
             }
         };
         let key_color = if normal {
@@ -3742,8 +4863,11 @@ impl MuxApp {
         };
         // When the strip is short of room, hints that don't fit wrap onto a
         // second line that is clipped away, so none is ever cut in half.
+        // In a mode its keys are what the strip is for, so a long row of
+        // tabs scrolls rather than crowd them out.
         let mut row = h_flex()
             .min_w(px(0.0))
+            .when(!normal, |row| row.flex_none().max_w(gpui::relative(0.72)))
             .h(px(24.0))
             .flex_wrap()
             .when(normal, Styled::flex_row_reverse)
@@ -3790,6 +4914,7 @@ impl MuxApp {
                 InputMode::Tab => "TAB",
                 InputMode::Session => "SESSION",
                 InputMode::Resize => "RESIZE",
+                InputMode::Locked => "LOCKED",
             }
         };
         let pill = h_flex()
@@ -3852,6 +4977,217 @@ impl MuxApp {
     /// The root's pointer listeners. A drag or a mouse report that started
     /// in a pane follows the pointer wherever it goes and ends on a release
     /// anywhere; ⌘ pressed or let go over a link shows or hides it.
+    /// The Mac shortcuts' actions, which work from anywhere in the window.
+    fn with_shortcut_actions(
+        root: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        root.on_action(cx.listener(|this, _: &GrowMuxText, _, cx| this.step_font_size(1.0, cx)))
+            .on_action(cx.listener(|this, _: &ShrinkMuxText, _, cx| {
+                this.step_font_size(-1.0, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ResetMuxText, _, cx| {
+                this.set_font_size(this.configured_font_size, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ClearMuxPane, _, cx| this.clear_pane(cx)))
+            .on_action(cx.listener(|this, _: &NewMuxTab, window, cx| {
+                this.run_shortcut(Action::NewTab, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SplitMuxRight, window, cx| {
+                this.run_shortcut(
+                    Action::SplitPane(mux_workspace::SplitAxis::Horizontal),
+                    window,
+                    cx,
+                );
+            }))
+            .on_action(cx.listener(|this, _: &SplitMuxAuto, window, cx| {
+                this.run_shortcut(Action::SplitPaneAuto, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SplitMuxDown, window, cx| {
+                this.run_shortcut(
+                    Action::SplitPane(mux_workspace::SplitAxis::Vertical),
+                    window,
+                    cx,
+                );
+            }))
+            .on_action(cx.listener(|this, _: &ZoomMuxPane, window, cx| {
+                this.run_shortcut(Action::TogglePaneZoom, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CloseMuxPane, window, cx| {
+                this.run_shortcut(Action::ClosePane, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CloseMuxTab, window, cx| {
+                this.run_shortcut(Action::CloseTab, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewMuxSession, _, _| this.start_session_here()))
+            .on_action(cx.listener(|this, _: &NextMuxTab, window, cx| {
+                this.run_shortcut(Action::NextTab, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PreviousMuxTab, window, cx| {
+                this.run_shortcut(Action::PreviousTab, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectMuxTab1, window, cx| {
+                this.run_shortcut(Action::SelectTab(1), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectMuxTab2, window, cx| {
+                this.run_shortcut(Action::SelectTab(2), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectMuxTab3, window, cx| {
+                this.run_shortcut(Action::SelectTab(3), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectMuxTab4, window, cx| {
+                this.run_shortcut(Action::SelectTab(4), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectMuxTab5, window, cx| {
+                this.run_shortcut(Action::SelectTab(5), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectMuxTab6, window, cx| {
+                this.run_shortcut(Action::SelectTab(6), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectMuxTab7, window, cx| {
+                this.run_shortcut(Action::SelectTab(7), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectMuxTab8, window, cx| {
+                this.run_shortcut(Action::SelectTab(8), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextMuxPane, _, cx| this.cycle_pane(true, cx)))
+            .on_action(cx.listener(|this, _: &PreviousMuxPane, _, cx| {
+                this.cycle_pane(false, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectLastMuxTab, window, cx| {
+                let last = this
+                    .session
+                    .as_ref()
+                    .map_or(0, |session| session.tabs.len());
+                this.run_shortcut(
+                    Action::SelectTab(u8::try_from(last).unwrap_or(u8::MAX)),
+                    window,
+                    cx,
+                );
+            }))
+    }
+
+    /// The keys iTerm moves between panes and resizes them with.
+    fn with_pane_shortcut_actions(
+        root: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        root.on_action(cx.listener(|this, _: &FocusMuxPaneLeft, window, cx| {
+            this.run_shortcut(Action::FocusPane(Direction::Left), window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &FocusMuxPaneRight, window, cx| {
+            this.run_shortcut(Action::FocusPane(Direction::Right), window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &FocusMuxPaneUp, window, cx| {
+            this.run_shortcut(Action::FocusPane(Direction::Up), window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &FocusMuxPaneDown, window, cx| {
+            this.run_shortcut(Action::FocusPane(Direction::Down), window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &ResizeMuxPaneLeft, window, cx| {
+            this.run_shortcut(Action::ResizePane(Direction::Left), window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &ResizeMuxPaneRight, window, cx| {
+            this.run_shortcut(Action::ResizePane(Direction::Right), window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &ResizeMuxPaneUp, window, cx| {
+            this.run_shortcut(Action::ResizePane(Direction::Up), window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &ResizeMuxPaneDown, window, cx| {
+            this.run_shortcut(Action::ResizePane(Direction::Down), window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &EqualizeMuxPanes, window, cx| {
+            this.run_shortcut(Action::EqualizePanes, window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &ReloadMuxConfig, _, cx| {
+            this.reload_ghostty_config(cx);
+        }))
+        .on_action(
+            cx.listener(|this, bind: &keybind::GhosttyKeybind, window, cx| {
+                this.run_ghostty_keybind(bind, window, cx);
+            }),
+        )
+    }
+
+    /// Name the window for the tab on screen and its session, as the
+    /// Window menu, Mission Control and the Dock list it.
+    fn sync_window_title(&mut self, window: &mut Window) {
+        static FIXED: ghostty_config::Reloadable<Option<String>> =
+            ghostty_config::Reloadable::new(mux_terminal_ghostty::user_window_title);
+        let title = FIXED.get().unwrap_or_else(|| self.window_title_for_tab());
+        if title != self.window_title {
+            window.set_window_title(&title);
+            self.window_title = title;
+        }
+    }
+
+    fn window_title_for_tab(&self) -> String {
+        self.session.as_ref().map_or_else(
+            || "Mux".to_owned(),
+            |session| {
+                session.active_tab().map_or_else(
+                    || session.name.clone(),
+                    |tab| format!("{} — {}", self.tab_label(tab), session.name),
+                )
+            },
+        )
+    }
+
+    /// What the Window menu does to the window itself.
+    fn with_find_actions(
+        root: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        root.on_action(cx.listener(|this, _: &OpenFind, window, cx| this.open_find(window, cx)))
+            .on_action(cx.listener(|this, _: &FindSelection, window, cx| {
+                this.find_selection(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FindOlder, _, cx| this.step_find(true, cx)))
+            .on_action(cx.listener(|this, _: &FindNewer, _, cx| this.step_find(false, cx)))
+    }
+
+    fn with_window_actions(
+        root: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        root.on_action(cx.listener(|this, _: &ReopenMuxTab, window, cx| {
+            this.run_shortcut(Action::ReopenClosedTab, window, cx);
+        }))
+        .on_action(cx.listener(|_, _: &MinimizeMuxWindow, window, _| {
+            window.minimize_window();
+        }))
+        .on_action(cx.listener(|_, _: &ZoomMuxWindow, window, _| window.zoom_window()))
+        .on_action(cx.listener(|_, _: &ToggleMuxFullScreen, window, _| {
+            window.toggle_fullscreen();
+        }))
+    }
+
+    /// Show the next pane of the tab, or the one before, in the order the
+    /// layout reads, coming round at the ends.
+    fn cycle_pane(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(tab) = self.session.as_ref().and_then(Session::active_tab) else {
+            return;
+        };
+        let mut panes = Vec::new();
+        tab.layout.pane_ids(&mut panes);
+        let Some(at) = panes
+            .iter()
+            .position(|pane_id| *pane_id == tab.focused_pane)
+        else {
+            return;
+        };
+        let next = if forward {
+            (at + 1) % panes.len()
+        } else {
+            (at + panes.len() - 1) % panes.len()
+        };
+        if next != at {
+            self.mode = InputMode::Normal;
+            self.request_pane_focus(panes[next]);
+            cx.notify();
+        }
+    }
+
     fn with_pointer_capture(
         root: gpui::Stateful<gpui::Div>,
         cx: &mut Context<Self>,
@@ -3911,8 +5247,38 @@ impl MuxApp {
 
     /// The slab behind a pane: a rounded card with a slim head. The focused
     /// slab takes the tab's ink as its border, ring and glow.
+    fn active_tab_zoomed(&self) -> bool {
+        self.session
+            .as_ref()
+            .and_then(Session::active_tab)
+            .is_some_and(|tab| tab.zoomed_pane.is_some())
+    }
+
+    /// How much of a pane's text shows: as in Ghostty, a split without the
+    /// keys fades back a little; every pane of a synced tab has them.
+    fn pane_content_opacity(
+        &self,
+        geometry: &layout::PaneGeometry,
+        opacity: f32,
+        pane_count: usize,
+    ) -> f32 {
+        if pane_count > 1
+            && !geometry.focused
+            && !self.pane_synced(self.active_tab_id(), geometry.pane_id)
+        {
+            opacity * unfocused_split_opacity()
+        } else {
+            opacity
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
-    fn render_pane_slab(&self, pane: motion::DrawnPane, zoomed: bool) -> gpui::AnyElement {
+    fn render_pane_slab(
+        &self,
+        pane: motion::DrawnPane,
+        zoomed: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let motion::DrawnPane {
             index,
             geometry,
@@ -3926,26 +5292,55 @@ impl MuxApp {
         let pane = self.panes.get(&geometry.pane_id);
         let agent_pane = self.active_agent_pane() == Some(geometry.pane_id);
         let agent = self.active_agent().filter(|_| agent_pane);
+        // Every pane of a synced tab takes the keys, so each wears the ink.
+        let synced = self.pane_synced(self.active_tab_id(), geometry.pane_id);
+        let edge = |rest: f32| {
+            if ringed {
+                ink.color().opacity(0.55)
+            } else if synced {
+                ink.color().opacity(0.3)
+            } else {
+                hairline(rest)
+            }
+        };
         let title: SharedString = if agent_pane {
             agent.map_or_else(
                 || "agent".into(),
                 |agent| agent_view::agent_title(agent).into(),
             )
+        } else if let Some(name) = self.pane_name(geometry.pane_id) {
+            name.to_owned().into()
         } else {
-            pane.and_then(|pane| pane.title.title()).map_or_else(
-                || format!("pane {number}").into(),
-                |title| chrome::terminal_place(title).to_owned().into(),
-            )
+            pane.and_then(PaneReplica::timed_head_title)
+                .map_or_else(|| format!("pane {number}").into(), Into::into)
         };
+        // A named pane still says what its shell does, beside the name.
+        let beside = self
+            .pane_name(geometry.pane_id)
+            .and(pane)
+            .and_then(PaneReplica::timed_head_title);
         let call = self
             .pane_call(geometry.pane_id)
             .filter(|_| !focused && !agent_pane);
         // A pane with nothing sitting in its head wears a legend instead: the
         // same words, small, set into the slab's top edge.
         let legend = geometry.legended();
+        let pane_id = geometry.pane_id;
         let mut head = h_flex()
+            .id(SharedString::from(format!("pane-head-{pane_id}")))
             .flex_none()
             .items_center()
+            // A double click on a terminal pane's head names the pane.
+            .when(!agent_pane, |head| {
+                Self::with_pane_drag(head, pane_id, title.clone(), ink).on_click(cx.listener(
+                    move |this, event: &gpui::ClickEvent, window, cx| {
+                        if event.click_count() == 2 {
+                            this.request_pane_focus(pane_id);
+                            this.open_rename_pane(window, cx);
+                        }
+                    },
+                ))
+            })
             .map(|head| {
                 if legend {
                     head.absolute()
@@ -3957,11 +5352,7 @@ impl MuxApp {
                         .px(px(6.0))
                         .rounded(px(5.0))
                         .border_1()
-                        .border_color(if ringed {
-                            ink.color().opacity(0.55)
-                        } else {
-                            hairline(0.10)
-                        })
+                        .border_color(edge(0.10))
                         .bg(color(SURFACE))
                         .overflow_hidden()
                         .font_family(EMBEDDED_TERMINAL_FONT)
@@ -3993,13 +5384,30 @@ impl MuxApp {
                     }),
             )
             .child(
-                div()
-                    .min_w(px(0.0))
-                    .truncate()
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(color(if focused { TEXT } else { MUTED_TEXT }))
-                    .child(title),
+                self.render_pane_rename_field(
+                    geometry.pane_id,
+                    if legend { 10.5 } else { 12.0 },
+                    cx,
+                )
+                .unwrap_or_else(|| {
+                    div()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(color(if focused { TEXT } else { MUTED_TEXT }))
+                        .child(title)
+                        .into_any_element()
+                }),
             )
+            .when_some(beside, |head, beside| {
+                head.child(
+                    div()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .text_color(color(FAINT_TEXT))
+                        .child(beside),
+                )
+            })
             .when_some(agent, |head, agent| {
                 head.child(
                     div()
@@ -4035,6 +5443,30 @@ impl MuxApp {
         }
         if zoomed {
             head = head.child(div().flex_none().text_color(ink.color()).child("zoom"));
+            // The panes the zoom hides have no heads of their own to say
+            // they called.
+            if let Some(said) = self.hidden_call(pane_id) {
+                head = head.child(
+                    div()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .text_color(color(SIGNAL))
+                        .child(format!("· behind: {said}")),
+                );
+            }
+        }
+        if synced {
+            head = head.child(div().flex_none().text_color(ink.color()).child("sync"));
+        }
+        // What is typed into a password prompt doesn't show, so the head
+        // says it is going somewhere.
+        if pane.is_some_and(|pane| pane.secret_input) {
+            head = head.child(
+                div()
+                    .flex_none()
+                    .text_color(color(SIGNAL))
+                    .child("password hidden"),
+            );
         }
         // A dragged seam resizes every pane on either side of it, so each
         // says its size while it moves.
@@ -4058,11 +5490,7 @@ impl MuxApp {
             .rounded(px(12.0))
             .bg(color(SURFACE))
             .border_1()
-            .border_color(if ringed {
-                ink.color().opacity(0.55)
-            } else {
-                hairline(0.07)
-            })
+            .border_color(edge(0.07))
             // A slab gliding in starts narrower than its head.
             .overflow_hidden()
             .when(opacity < 1.0, |slab| slab.opacity(opacity))
@@ -4095,8 +5523,12 @@ impl MuxApp {
         &mut self,
         geometry: layout::PaneGeometry,
         opacity: f32,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<Entity<gpui_terminal::TerminalView>> {
+        // Behind other windows the pane with the keys shows a hollow
+        // cursor, as in Ghostty.
+        let has_keys = geometry.focused && window.is_window_active();
         let pane_id = geometry.pane_id;
         let pane = self.panes.get(&pane_id)?;
         let props = gpui_terminal::TerminalProps {
@@ -4104,10 +5536,15 @@ impl MuxApp {
             font_family: self.terminal_font.clone(),
             metrics: self.metrics,
             // A dead shell has no cursor to show.
-            focused: geometry.focused && !self.pane_has_exited(pane_id),
+            focused: has_keys && !self.pane_has_exited(pane_id) && self.cursor_lit(pane_id),
             chrome: gpui_terminal::TerminalChrome {
                 surface: color(SURFACE),
                 cursor: self.active_ink().color(),
+                selection: self.ghostty_theme.selection_background,
+                selection_text: self.ghostty_theme.selection_foreground,
+                // A blink's dark half shows nothing, and a dead shell has
+                // no cursor at all.
+                hollow_cursor: !has_keys && !self.pane_has_exited(pane_id),
             },
             marks: self
                 .quick_select_marks(pane_id)
@@ -4142,7 +5579,7 @@ impl MuxApp {
         let pointer_app = cx.weak_entity();
         let hover_app = pointer_app.clone();
         let scroll_app = pointer_app.clone();
-        let surface = div()
+        let surface = Self::with_pane_drop(div(), pane_id, body, cx)
             .absolute()
             .left(px(body.x))
             .top(px(body.y))
@@ -4151,24 +5588,36 @@ impl MuxApp {
             .overflow_hidden()
             .bg(rgb(SURFACE))
             .when(opacity < 1.0, |surface| surface.opacity(opacity))
-            .when(self.pane_link_hovered(pane_id), |surface| {
-                surface.cursor_pointer()
+            // Text takes the I-beam, as in any Mac terminal; a link under
+            // ⌘ the pointing hand.
+            .map(|surface| {
+                if self.pane_link_hovered(pane_id) {
+                    surface.cursor_pointer()
+                } else {
+                    surface.cursor(gpui::CursorStyle::IBeam)
+                }
             })
             .on_any_mouse_down(move |event, window, cx| {
                 let _ = pointer_app.update(cx, |this, cx| {
+                    if this.grab_scroll_thumb(pane_id, body, event) {
+                        cx.notify();
+                        return;
+                    }
                     if this.open_link_under(pane_id, rect, event, cx) {
                         return;
                     }
                     this.focus_handle.focus(window, cx);
-                    this.pointer_down(pane_id, rect, event);
+                    this.pointer_down(pane_id, rect, event, cx);
                     cx.notify();
                 });
                 cx.stop_propagation();
             })
-            .on_mouse_move(move |event, _, cx| {
+            .on_mouse_move(move |event, window, cx| {
+                let active = window.is_window_active();
                 let handled = hover_app
                     .update(cx, |this, cx| {
                         let command = event.modifiers.platform;
+                        this.follow_mouse_focus(pane_id, event, active);
                         this.hover_link(pane_id, rect, event.position, command, cx);
                         this.pointer_hover(pane_id, rect, event)
                     })
@@ -4194,7 +5643,11 @@ impl MuxApp {
                     .h(px(rect.height))
                     .child(terminal.cached(gpui::StyleRefinement::default().size_full())),
             )
-            .children(self.render_quick_select_labels(pane_id, rect));
+            .children(self.render_quick_select_labels(pane_id, rect))
+            .children(self.bell_flash_overlay(pane_id))
+            .children(self.prompt_flash_overlay(pane_id, rect))
+            .children(self.render_thumb_grip(pane_id, body))
+            .child(self.file_drop_target(pane_id, cx));
         surface.into_any_element()
     }
 }
@@ -4234,6 +5687,8 @@ impl UserEvent {
             Self::Agent(_) => "agent",
             Self::AgentFiles { .. } => "agent-files",
             Self::BackendError(_) => "backend-error",
+            Self::StripProblem(_) => "strip-problem",
+            Self::RunningChecked { .. } => "running-checked",
             Self::PaneParsed { .. } => "pane-parsed",
         }
     }
@@ -4241,7 +5696,8 @@ impl UserEvent {
 
 impl Render for MuxApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.ensure_agent_pulse(cx);
+        self.ensure_animations(cx);
+        self.sync_window_title(window);
         let theme = BezelTheme::of(cx).clone();
         let viewport = window.viewport_size();
         let geometry =
@@ -4265,12 +5721,10 @@ impl Render for MuxApp {
             .on_action(cx.listener(|this, _: &OpenMuxPalette, window, cx| {
                 this.toggle_palette(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &OpenFind, window, cx| this.open_find(window, cx)))
-            .on_action(cx.listener(|this, _: &FindOlder, _, cx| this.step_find(true, cx)))
-            .on_action(cx.listener(|this, _: &FindNewer, _, cx| this.step_find(false, cx)))
             .on_action(cx.listener(|this, _: &OpenQuickSelect, window, cx| {
                 this.toggle_quick_select(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &GoToMuxCall, _, cx| this.go_to_call(cx)))
             .on_key_down(cx.listener(Self::handle_key_down))
             .on_key_up(cx.listener(Self::handle_key_up))
             // Quick select is for the keys: a click anywhere puts it away
@@ -4282,16 +5736,21 @@ impl Render for MuxApp {
             }));
         let drawn = self.draw_layout(&geometry, viewport, window);
         self.publish_ground(&drawn, viewport, window, cx);
-        let mut root = Self::with_pointer_capture(root, cx)
-            .font_family(EMBEDDED_TERMINAL_FONT)
-            .text_color(theme.text)
-            .child(self.render_tabs(cx));
+        let mut root = Self::with_pointer_capture(
+            Self::with_window_actions(
+                Self::with_pane_shortcut_actions(
+                    Self::with_find_actions(Self::with_shortcut_actions(root, cx), cx),
+                    cx,
+                ),
+                cx,
+            ),
+            cx,
+        )
+        .font_family(EMBEDDED_TERMINAL_FONT)
+        .text_color(theme.text)
+        .child(self.render_tabs(cx));
 
-        let zoomed = self
-            .session
-            .as_ref()
-            .and_then(Session::active_tab)
-            .is_some_and(|tab| tab.zoomed_pane.is_some());
+        let zoomed = self.active_tab_zoomed();
         let hints = if self.mode == InputMode::Pane && pane_count > 1 {
             neighbour_hints(&geometry.panes)
         } else {
@@ -4302,22 +5761,25 @@ impl Render for MuxApp {
         }
         let mut shown_terminals = HashSet::new();
         for pane in drawn.panes {
-            let (geometry, opacity) = (pane.geometry, pane.opacity);
+            let geometry = pane.geometry;
             let pane_id = geometry.pane_id;
-            root = root.child(self.render_pane_slab(pane, zoomed));
+            let shown = self.pane_content_opacity(&geometry, pane.opacity, pane_count);
+            root = root.child(self.render_pane_slab(pane, zoomed, cx));
             if self.active_agent_pane() == Some(pane_id) {
                 let (frame, focused) = (geometry.frame, geometry.focused);
                 root = root.child(self.render_agent_pane(pane_id, frame, focused, window, cx));
             } else {
-                if let Some(terminal) = self.terminal_view(geometry, opacity, cx) {
+                if let Some(terminal) = self.terminal_view(geometry, shown, window, cx) {
                     shown_terminals.insert(pane_id);
-                    root = root.child(self.render_terminal_pane(geometry, opacity, terminal, cx));
+                    root = root.child(self.render_terminal_pane(geometry, shown, terminal, cx));
                 }
                 root = root.children(self.render_pane_exit(geometry));
-                root = root.children(self.render_scroll_thumb(geometry));
+                root = root.children(self.render_pane_progress(geometry));
+                root = root.children(self.render_scrollback_marks(geometry, cx));
                 root = root.children(self.render_find_ticks(geometry));
                 root = root.children(self.render_pane_find(geometry, cx));
                 root = root.children(self.render_link_underline(geometry));
+                root = root.children(self.render_ime(geometry, cx));
             }
             if let Some(letter) = hints.get(&pane_id) {
                 root = root.child(pane_focus_hint(
@@ -4336,6 +5798,7 @@ impl Render for MuxApp {
             .children(self.render_session_sheet(cx))
             .children(self.render_settings_sheet(cx))
             .children(self.render_palette(viewport, cx))
+            .children(self.render_pane_menu(viewport, cx))
     }
 }
 
@@ -4368,6 +5831,35 @@ impl Render for StripTooltip {
                     tip.child(kbd(keys, color(TEXT)))
                 }),
         )
+    }
+}
+
+/// A tab chip on its way to another place in the strip.
+#[derive(Clone)]
+struct DraggedTab {
+    tab_id: TabId,
+    from: usize,
+    label: String,
+    ink: Ink,
+}
+
+impl Render for DraggedTab {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .h(px(26.0))
+            .px(px(10.0))
+            .gap(px(8.0))
+            .items_center()
+            .rounded(px(6.0))
+            .bg(color(SURFACE))
+            .border_1()
+            .border_color(self.ink.color().opacity(0.6))
+            .shadow_md()
+            .font_family(EMBEDDED_TERMINAL_FONT)
+            .text_size(px(12.5))
+            .text_color(color(TEXT))
+            .child(div().size(px(6.0)).rounded_full().bg(self.ink.color()))
+            .child(self.label.clone())
     }
 }
 
@@ -5056,6 +6548,50 @@ fn terminal_key_event(
     }
 }
 
+/// Whether pastes that would run commands wait for a second ⌘V, as the
+/// user's Ghostty has it.
+fn paste_protection() -> bool {
+    static ENABLED: ghostty_config::Reloadable<bool> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_paste_protection);
+    ENABLED.get()
+}
+
+/// Whether pasting `text`, encoded as `bytes`, would run something: it
+/// breaks a line and the program hasn't asked for bracketed pastes, which
+/// would hold it as one piece of text.
+fn paste_runs_lines(text: &str, bytes: &[u8]) -> bool {
+    text.contains(['\n', '\r']) && !bytes.starts_with(b"\x1b[200~")
+}
+
+/// Whether Option is Meta for the shell, as the user's Ghostty has it.
+fn option_as_alt() -> bool {
+    static ENABLED: ghostty_config::Reloadable<bool> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_option_as_alt);
+    ENABLED.get()
+}
+
+/// Make an Option key type its plain character with Alt, so `Option+b`
+/// reaches the shell as Meta-b (back a word) instead of as `∫`. A shifted
+/// letter keeps its case; other shifted keys still compose, since the plain
+/// key says nothing of what Shift would make of it.
+fn option_as_meta(event: &mut TerminalKeyEvent, keystroke: &gpui::Keystroke) {
+    let modifiers = keystroke.modifiers;
+    if !modifiers.alt || modifiers.control || modifiers.platform || event.text.is_none() {
+        return;
+    }
+    let mut chars = keystroke.key.chars();
+    let (Some(plain), None) = (chars.next(), chars.next()) else {
+        return;
+    };
+    let plain = match (modifiers.shift, plain.is_ascii_alphabetic()) {
+        (false, _) => plain,
+        (true, true) => plain.to_ascii_uppercase(),
+        (true, false) => return,
+    };
+    event.text = Some(plain.to_string());
+    event.consumed_modifiers.alt = false;
+}
+
 fn terminal_tab_keystroke(shift: bool) -> gpui::Keystroke {
     gpui::Keystroke {
         modifiers: gpui::Modifiers {
@@ -5146,6 +6682,22 @@ fn terminal_codepoint(key: &str, terminal_key: TerminalKey) -> Option<char> {
     }
 }
 
+/// How soon a second close must follow one that found something running.
+const CLOSE_AGAIN_WINDOW: Duration = Duration::from_secs(5);
+
+/// The range of terminal text sizes, in points.
+const MIN_FONT_SIZE: f32 = 8.0;
+const MAX_FONT_SIZE: f32 = 36.0;
+
+/// A text size as the strip says it: whole points without a fraction.
+fn font_size_words(size: f32) -> String {
+    if size.fract().abs() < f32::EPSILON {
+        format!("{size:.0} pt")
+    } else {
+        format!("{size:.1} pt")
+    }
+}
+
 fn quit_mux(_: &QuitMux, cx: &mut App) {
     // The daemon owns terminal and ACP process lifetime. Quitting this native
     // client deliberately detaches the GUI without touching the workspace.
@@ -5153,32 +6705,71 @@ fn quit_mux(_: &QuitMux, cx: &mut App) {
 }
 
 fn configure_application_menu(cx: &mut App) {
-    cx.set_menus(vec![Menu {
-        name: "Mux".into(),
-        disabled: false,
-        items: vec![
-            MenuItem::action("Go to…", OpenMuxPalette),
-            MenuItem::action("Settings…", OpenMuxSettings),
-            MenuItem::separator(),
-            MenuItem::os_submenu("Services", SystemMenuType::Services),
-            MenuItem::separator(),
-            MenuItem::action("Quit Mux", QuitMux),
-        ],
-    }]);
+    cx.set_menus(vec![
+        Menu {
+            name: "Mux".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("Go to…", OpenMuxPalette),
+                MenuItem::action("Settings…", OpenMuxSettings),
+                MenuItem::action("Reload Ghostty Config", ReloadMuxConfig),
+                MenuItem::separator(),
+                MenuItem::os_submenu("Services", SystemMenuType::Services),
+                MenuItem::separator(),
+                MenuItem::action("Hide Mux", HideMux),
+                MenuItem::action("Hide Others", HideOtherApps),
+                MenuItem::action("Show All", ShowAllApps),
+                MenuItem::separator(),
+                MenuItem::action("Quit Mux", QuitMux),
+            ],
+        },
+        Menu {
+            name: "Shell".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("New Tab", NewMuxTab),
+                MenuItem::action("New Session", NewMuxSession),
+                MenuItem::action("Reopen Closed Tab or Pane", ReopenMuxTab),
+                MenuItem::separator(),
+                MenuItem::action("Split Right", SplitMuxRight),
+                MenuItem::action("Split Down", SplitMuxDown),
+                MenuItem::action("Zoom Pane", ZoomMuxPane),
+                MenuItem::action("Even Out Panes", EqualizeMuxPanes),
+                MenuItem::separator(),
+                MenuItem::action("Find…", OpenFind),
+                MenuItem::action("Use Selection for Find", FindSelection),
+                MenuItem::action("Quick Select", OpenQuickSelect),
+                MenuItem::action("Clear", ClearMuxPane),
+                MenuItem::separator(),
+                MenuItem::action("Close Pane", CloseMuxPane),
+                MenuItem::action("Close Tab", CloseMuxTab),
+            ],
+        },
+        Menu {
+            name: "Window".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("Go to the Pane That Called", GoToMuxCall),
+                MenuItem::separator(),
+                MenuItem::action("Minimize", MinimizeMuxWindow),
+                MenuItem::action("Zoom", ZoomMuxWindow),
+                MenuItem::separator(),
+                MenuItem::action("Bigger Text", GrowMuxText),
+                MenuItem::action("Smaller Text", ShrinkMuxText),
+                MenuItem::action("Actual Size", ResetMuxText),
+                MenuItem::separator(),
+                MenuItem::action("Show Next Tab", NextMuxTab),
+                MenuItem::action("Show Previous Tab", PreviousMuxTab),
+                MenuItem::separator(),
+                MenuItem::action("Select Next Pane", NextMuxPane),
+                MenuItem::action("Select Previous Pane", PreviousMuxPane),
+            ],
+        },
+    ]);
 }
 
-fn configure_application_actions(cx: &mut App) {
-    cx.on_action(quit_mux);
-    cx.bind_keys([
-        KeyBinding::new("cmd-q", QuitMux, None),
-        KeyBinding::new("cmd-,", OpenMuxSettings, None),
-        KeyBinding::new("cmd-p", OpenMuxPalette, None),
-        KeyBinding::new("cmd-shift-p", OpenMuxPalette, None),
-        KeyBinding::new("cmd-f", OpenFind, None),
-        KeyBinding::new("cmd-g", FindOlder, None),
-        KeyBinding::new("cmd-shift-g", FindNewer, None),
-        KeyBinding::new("cmd-shift-space", OpenQuickSelect, None),
-    ]);
+/// The keys of the palette's and find's fields.
+fn bind_field_keys(cx: &mut App) {
     // The palette's field keeps typing; the keys that move through the
     // list, choose from it and close it are the palette's.
     let palette = Some("MuxPalette > Input");
@@ -5190,6 +6781,7 @@ fn configure_application_actions(cx: &mut App) {
         KeyBinding::new("ctrl-n", NextPaletteRow, palette),
         KeyBinding::new("tab", NextPaletteRow, palette),
         KeyBinding::new("enter", ChoosePaletteRow, palette),
+        KeyBinding::new("shift-enter", PastePaletteRow, palette),
         KeyBinding::new("escape", ClosePalette, palette),
     ]);
     let find = Some("MuxFind > Input");
@@ -5200,6 +6792,24 @@ fn configure_application_actions(cx: &mut App) {
         KeyBinding::new("down", FindNewer, find),
         KeyBinding::new("escape", CloseFind, find),
     ]);
+}
+
+fn configure_application_actions(cx: &mut App) {
+    cx.on_action(quit_mux);
+    cx.on_action(|_: &HideMux, cx| cx.hide());
+    cx.on_action(|_: &HideOtherApps, cx| cx.hide_other_apps());
+    cx.on_action(|_: &ShowAllApps, cx| cx.unhide_other_apps());
+    cx.bind_keys([
+        KeyBinding::new("cmd-q", QuitMux, None),
+        KeyBinding::new("cmd-,", OpenMuxSettings, None),
+        KeyBinding::new("cmd-p", OpenMuxPalette, None),
+        KeyBinding::new("cmd-shift-p", OpenMuxPalette, None),
+        KeyBinding::new("cmd-f", OpenFind, None),
+        KeyBinding::new("cmd-g", FindOlder, None),
+        KeyBinding::new("cmd-shift-g", FindNewer, None),
+        KeyBinding::new("cmd-shift-space", OpenQuickSelect, None),
+    ]);
+    bind_field_keys(cx);
     // Terminal panes own Tab; the component root must not turn it into focus traversal.
     cx.bind_keys([
         KeyBinding::new("tab", ForwardTerminalTab, Some("MuxTerminal")),
@@ -5304,6 +6914,16 @@ fn mux_bezel_palette(appearance: BezelAppearance) -> BezelTheme {
         theme.success = color(SAGE);
     }
     theme
+}
+
+/// The pointer hides while typing only when the user's Ghostty asks for it
+/// with `mouse-hide-while-typing`; GPUI would hide it otherwise.
+fn configure_pointer_hiding(cx: &mut App) {
+    cx.set_cursor_hide_mode(if mux_terminal_ghostty::user_mouse_hide_while_typing() {
+        gpui::CursorHideMode::OnTyping
+    } else {
+        gpui::CursorHideMode::Never
+    });
 }
 
 fn configure_theme(cx: &mut App) {
@@ -5425,7 +7045,9 @@ fn initialize_graphical_application(cx: &mut App) {
         CancelAgentTurn,
         Some("MuxAgentPane"),
     )]);
+    keybind::bind_ghostty_keys(cx);
     configure_theme(cx);
+    configure_pointer_hiding(cx);
     if let Err(error) = cx.text_system().add_fonts(vec![
         Cow::Borrowed(
             include_bytes!("../assets/fonts/JetBrainsMonoNerdFontMono-Regular.ttf").as_slice(),
@@ -5453,11 +7075,14 @@ fn run_graphical_application(
         .with_assets(MuxAssets)
         .run(move |cx: &mut App| {
             initialize_graphical_application(cx);
-            let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
+            let bounds = window_frame::opening_bounds(state_dir.as_deref(), cx);
             let window = cx.open_window(
                 WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(560.0), px(360.0))),
+                    window_bounds: Some(bounds),
+                    window_min_size: Some(size(
+                        px(window_frame::MIN_WIDTH),
+                        px(window_frame::MIN_HEIGHT),
+                    )),
                     // Keep a native titled/resizable AppKit window while drawing content through
                     // its transparent titlebar. A missing GPUI titlebar drops the standard
                     // resizable/minimizable/closable style masks on macOS, which also prevents
@@ -5465,6 +7090,9 @@ fn run_graphical_application(
                     titlebar: Some(TitlebarOptions {
                         // Centre the traffic lights in the single top strip.
                         traffic_light_position: Some(point(px(14.0), px(11.0))),
+                        // Until a session is shown, which names it after
+                        // the tab on screen.
+                        title: Some("Mux".into()),
                         ..TitleBar::title_bar_options()
                     }),
                     window_background: BezelTheme::of(cx).window_background_appearance(),
@@ -5490,12 +7118,7 @@ fn run_graphical_application(
                 },
             );
             match window {
-                Ok(window) => {
-                    window
-                        .update(cx, |_, window, _| window.set_window_title("Mux"))
-                        .ok();
-                    cx.activate(true);
-                }
+                Ok(_) => cx.activate(true),
                 Err(error) => {
                     error!(%error, "failed to open GPUI window");
                     cx.quit();
@@ -5560,9 +7183,9 @@ mod tests {
         AgentTabActivity, GridMetrics, PaneOutputUpdate, PaneReplica, PaneScrollState,
         agent_session_is_visible, agent_tab_activity, agent_tab_activity_label,
         command_needs_agent, format_agent_context_usage, format_session_pane_count,
-        input_position_at, layout, or_list, pane_needs_live_frame, pane_parser,
-        reconcile_pane_replicas, strip_wording, take_terminal_key_release, terminal_frame_text,
-        terminal_input_pane, terminal_key_down_target, terminal_key_event,
+        input_position_at, layout, option_as_meta, or_list, pane_needs_live_frame, pane_parser,
+        paste_runs_lines, reconcile_pane_replicas, strip_wording, take_terminal_key_release,
+        terminal_frame_text, terminal_input_pane, terminal_key_down_target, terminal_key_event,
         terminal_sizes_for_geometry, terminal_tab_keystroke,
     };
     use mux_acp::AgentSessionStatus;
@@ -5777,6 +7400,47 @@ mod tests {
         assert_eq!(terminal_input_pane(None, Some(focused)), Some(focused));
     }
 
+    #[test]
+    fn a_paste_runs_lines_only_outside_bracketed_paste() {
+        let mut engine = GhosttyEngine::new(TerminalSize::default()).expect("new terminal");
+        let plain = engine.encode_paste("ls\nrm -rf x").expect("encode");
+        assert!(paste_runs_lines("ls\nrm -rf x", &plain));
+        assert!(!paste_runs_lines("just words", &plain));
+        engine
+            .apply_output(1, b"\x1b[?2004h")
+            .expect("bracketed paste on");
+        let bracketed = engine.encode_paste("ls\nrm -rf x").expect("encode");
+        assert!(!paste_runs_lines("ls\nrm -rf x", &bracketed));
+    }
+
+    #[test]
+    fn option_as_meta_sends_escape_and_the_plain_key() {
+        let engine = GhosttyEngine::new(TerminalSize::default()).expect("new terminal");
+        let option = |key: &str, composed: &str, shift: bool| gpui::Keystroke {
+            modifiers: gpui::Modifiers {
+                alt: true,
+                shift,
+                ..gpui::Modifiers::default()
+            },
+            key: key.to_owned(),
+            key_char: Some(composed.to_owned()),
+        };
+        let meta = |keystroke: &gpui::Keystroke| {
+            let mut event = terminal_key_event(keystroke, false, false, false);
+            option_as_meta(&mut event, keystroke);
+            engine.encode_key(&event).expect("encode Option key")
+        };
+
+        assert_eq!(meta(&option("b", "∫", false)), b"\x1bb");
+        assert_eq!(meta(&option("f", "ƒ", false)), b"\x1bf");
+        assert_eq!(meta(&option("b", "ı", true)), b"\x1bB");
+        assert_eq!(meta(&option(".", "≥", false)), b"\x1b.");
+        assert_eq!(meta(&option(".", "˘", true)), "˘".as_bytes());
+        let composed = option("b", "∫", false);
+        let plain = terminal_key_event(&composed, false, false, false);
+        assert_eq!(engine.encode_key(&plain).expect("encode"), "∫".as_bytes());
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn terminal_text_applies_macos_caps_lock_without_inventing_shift() {
@@ -5906,6 +7570,8 @@ mod tests {
             terminal: daemon_engine.attachment().expect("daemon attachment"),
             exit_status: None,
             title: None,
+            program: None,
+            command_endings: Vec::new(),
         };
         let reconciled = reconcile_pane_replicas(
             HashMap::from([(pane_id, local_replica)]),
@@ -5951,6 +7617,8 @@ mod tests {
             terminal: daemon_engine.attachment().expect("daemon attachment"),
             exit_status: None,
             title: None,
+            program: None,
+            command_endings: Vec::new(),
         };
 
         let mut reconciled = reconcile_pane_replicas(
@@ -5998,6 +7666,8 @@ mod tests {
             terminal: daemon_engine.attachment().expect("daemon attachment"),
             exit_status: None,
             title: None,
+            program: None,
+            command_endings: Vec::new(),
         };
 
         let mut reconciled = reconcile_pane_replicas(
@@ -6069,6 +7739,8 @@ mod tests {
             terminal,
             exit_status: None,
             title: None,
+            program: None,
+            command_endings: Vec::new(),
         };
 
         let Err(error) = super::restore_pane_replica(&pane, &GhosttyTheme::default()) else {
@@ -6119,5 +7791,11 @@ mod tests {
         session.active_tab_mut().expect("active tab").zoomed_pane = Some(left);
         assert!(!pane_needs_live_frame(&session, None, right));
         assert!(pane_needs_live_frame(&session, None, left));
+    }
+
+    #[test]
+    fn text_sizes_read_in_whole_points() {
+        assert_eq!(super::font_size_words(14.0), "14 pt");
+        assert_eq!(super::font_size_words(13.5), "13.5 pt");
     }
 }

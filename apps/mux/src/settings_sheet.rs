@@ -4,6 +4,8 @@
 //! sheet lists them the way the launcher does: the name, then what it runs
 //! or what it still needs, then on or off. A change saves as it is made.
 //! The file behind it sits at the foot, with how to add an agent of your own.
+//! The terminal's look and feel come from the user's Ghostty config, so the
+//! sheet says which file that is and what Mux took from it.
 //! The sheet reads the file each time it opens, so an agent added by hand
 //! shows up without a restart, and a toggle never writes over an edit.
 
@@ -108,6 +110,7 @@ impl MuxApp {
                 self.toggle_agent_setting(row);
             }
             "o" => self.show_settings_file(),
+            "g" => self.show_ghostty_config(),
             _ => return,
         }
         cx.stop_propagation();
@@ -151,6 +154,23 @@ impl MuxApp {
                 if !path.exists() {
                     self.settings.save(state_dir)?;
                 }
+                Command::new("/usr/bin/open").arg("-R").arg(path).spawn()?;
+                Ok(())
+            });
+        if let Err(error) = shown
+            && let Some(sheet) = self.settings_sheet.as_mut()
+        {
+            sheet.problem = Some(format!("couldn't show it: {error:#}"));
+        }
+    }
+
+    /// Show the Ghostty config Mux reads in Finder: the last one read, as
+    /// it has the last word.
+    fn show_ghostty_config(&mut self) {
+        let shown = mux_terminal_ghostty::user_config_files()
+            .pop()
+            .ok_or_else(|| anyhow!("there's no Ghostty config"))
+            .and_then(|path| {
                 Command::new("/usr/bin/open").arg("-R").arg(path).spawn()?;
                 Ok(())
             });
@@ -220,6 +240,7 @@ impl MuxApp {
                     .child(rows),
             )
             .child(self.settings_file_line(sheet))
+            .child(self.settings_terminal_lines())
             .child(settings_sheet_hints());
         let panel = if self.motion == MotionPreference::Reduced {
             panel.into_any_element()
@@ -376,6 +397,65 @@ impl MuxApp {
     }
 }
 
+impl MuxApp {
+    /// Where the terminal's look and feel come from: the Ghostty config,
+    /// and the font and theme Mux took from it.
+    fn settings_terminal_lines(&self) -> impl IntoElement {
+        let configs = mux_terminal_ghostty::user_config_files();
+        let read = if configs.is_empty() {
+            "no Ghostty config, so Ghostty's own defaults".to_owned()
+        } else {
+            configs
+                .iter()
+                .map(|path| agent_view::home_relative(path))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let theme = mux_terminal_ghostty::user_theme_name()
+            .unwrap_or_else(|| "Mux's own colours".to_owned());
+        let font = format!("{} {}", self.terminal_font, self.configured_font_size);
+        let line = |name: &'static str, value: String| {
+            h_flex()
+                .pl(px(24.0))
+                .pr(px(10.0))
+                .gap(px(16.0))
+                .child(div().flex_none().w(px(NAME_WIDTH)).child(name))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(color(MUTED_TEXT))
+                        .child(value),
+                )
+        };
+        v_flex()
+            .gap(px(4.0))
+            .text_size(px(12.0))
+            .text_color(color(FAINT_TEXT))
+            .child(
+                div()
+                    .h(px(22.0))
+                    .pl(px(24.0))
+                    .child("terminal, from ghostty"),
+            )
+            .child(line("config", read))
+            .child(line("font", font))
+            .child(line("theme", theme))
+            .children(super::keybind::keybind_summary().map(|summary| line("keybinds", summary)))
+            .child(
+                h_flex()
+                    .pl(px(24.0))
+                    .pr(px(10.0))
+                    .gap(px(16.0))
+                    .child(div().flex_none().w(px(NAME_WIDTH)))
+                    .child(div().flex_1().min_w_0().whitespace_normal().child(
+                        "cursor, padding and the rest come from it too; reload it from ⌘p after an edit",
+                    )),
+            )
+    }
+}
+
 /// The sheet's keys, in gofer's `[key] label` form.
 fn settings_sheet_hints() -> impl IntoElement {
     h_flex()
@@ -388,6 +468,7 @@ fn settings_sheet_hints() -> impl IntoElement {
                 ("↑↓", "choose"),
                 ("space", "on/off"),
                 ("o", "show in finder"),
+                ("g", "ghostty"),
                 ("esc", "close"),
             ]
             .into_iter()

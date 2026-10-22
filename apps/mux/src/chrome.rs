@@ -20,6 +20,18 @@ impl Ink {
         Self::ALL[index % Self::ALL.len()]
     }
 
+    /// The ink at a place in [`Self::ALL`], as tabs keep it.
+    #[must_use]
+    pub const fn from_index(index: u8) -> Self {
+        Self::ALL[index as usize % Self::ALL.len()]
+    }
+
+    /// This ink's place in [`Self::ALL`].
+    #[must_use]
+    pub const fn index(self) -> u8 {
+        self as u8
+    }
+
     #[must_use]
     pub const fn next(self) -> Self {
         match self {
@@ -203,14 +215,20 @@ pub fn terminal_place(title: &str) -> &str {
     title
 }
 
+/// Whether a title's place reads as a directory: `~/src`, `/etc`, or a
+/// deep one cut as Ghostty's shell integration cuts it, `…/c/d/e`.
+#[must_use]
+pub fn is_path(place: &str) -> bool {
+    (place.starts_with('~') || place.starts_with('/') || place.starts_with("…/"))
+        && !place.contains(char::is_whitespace)
+}
+
 /// A tab-sized name for a terminal title: the last component of a directory,
 /// or the command that is running, cut to fit.
 #[must_use]
 pub fn tab_label(title: &str) -> String {
     let place = terminal_place(title);
-    let path_like =
-        (place.starts_with('~') || place.starts_with('/')) && !place.contains(char::is_whitespace);
-    let label = if path_like {
+    let label = if is_path(place) {
         place
             .trim_end_matches('/')
             .rsplit('/')
@@ -239,9 +257,42 @@ pub fn truncate_chars(text: &str, limit: usize) -> String {
     cut
 }
 
+/// Names as a sentence lists them, each once: `a`, `a and b`, `a, b and
+/// c`, and past three, the first two and how many more.
+#[must_use]
+pub fn names_list(names: &[String]) -> String {
+    let mut unique: Vec<&str> = Vec::new();
+    for name in names {
+        if !unique.contains(&name.as_str()) {
+            unique.push(name);
+        }
+    }
+    match unique.as_slice() {
+        [] => String::new(),
+        [only] => (*only).to_owned(),
+        [first, second] => format!("{first} and {second}"),
+        [first, second, third] => format!("{first}, {second} and {third}"),
+        [first, second, rest @ ..] => format!("{first}, {second} and {} more", rest.len()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_read_as_a_sentence() {
+        let names = |list: &[&str]| {
+            list.iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names_list(&names(&["cargo"])), "cargo");
+        assert_eq!(names_list(&names(&["cargo", "cargo"])), "cargo");
+        assert_eq!(names_list(&names(&["cargo", "nvim"])), "cargo and nvim");
+        assert_eq!(names_list(&names(&["a", "b", "c"])), "a, b and c");
+        assert_eq!(names_list(&names(&["a", "b", "c", "d"])), "a, b and 2 more");
+    }
 
     #[test]
     fn dot_matrix_draws_session_names_and_refuses_unknown_glyphs() {

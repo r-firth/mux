@@ -1,0 +1,50 @@
+# Mux's shell integration for zsh. Mux points ZDOTDIR here so that this file
+# runs first. It puts your ZDOTDIR back and loads your own .zshenv, so the
+# rest of your startup files load as they always do, then marks where each
+# prompt and command begins (OSC 133) so Mux can step between prompts.
+if [[ -n "${MUX_USER_ZDOTDIR+set}" ]]; then
+  ZDOTDIR="$MUX_USER_ZDOTDIR"
+  unset MUX_USER_ZDOTDIR
+else
+  unset ZDOTDIR
+fi
+[[ -r "${ZDOTDIR:-$HOME}/.zshenv" ]] && builtin source "${ZDOTDIR:-$HOME}/.zshenv"
+
+if [[ -o interactive ]]; then
+  autoload -Uz add-zsh-hook
+  typeset -g _mux_command_running=
+  # A bar at the prompt, blinking (5) or steady (6), and the program's own
+  # cursor while a command runs, as Ghostty's shell integration does.
+  typeset -g _mux_prompt_cursor="${MUX_PROMPT_CURSOR-}"
+  unset MUX_PROMPT_CURSOR
+  # Titles the pane with where the shell is, and what it runs while it
+  # runs, as Ghostty's shell integration does. A title set by the user's own
+  # hooks, which run after these, wins.
+  typeset -g _mux_shell_title="${MUX_SHELL_TITLE-}"
+  unset MUX_SHELL_TITLE
+  _mux_precmd() {
+    local exit_status=$?
+    if [[ -n "$_mux_command_running" ]]; then
+      builtin print -n "\e]133;D;${exit_status}\a"
+    fi
+    _mux_command_running=
+    builtin print -n "\e]133;A\a"
+    # In the prompt too, so a prompt zsh draws again, as Ctrl+l does, is
+    # still marked.
+    [[ $PS1 == *$'\e]133;A'* ]] || PS1=$'%{\e]133;A\a%}'$PS1
+    if [[ -n "$_mux_prompt_cursor" ]]; then builtin print -n "\e[${_mux_prompt_cursor} q"; fi
+    if [[ -n "$_mux_shell_title" ]]; then
+      builtin print -rn -- $'\e]2;'"${(%):-%(4~|…/%3~|%~)}"$'\a'
+    fi
+  }
+  _mux_preexec() {
+    _mux_command_running=1
+    builtin print -n "\e]133;C\a"
+    if [[ -n "$_mux_prompt_cursor" ]]; then builtin print -n "\e[0 q"; fi
+    if [[ -n "$_mux_shell_title" ]]; then
+      builtin print -rn -- $'\e]2;'"${1//[[:cntrl:]]}"$'\a'
+    fi
+  }
+  add-zsh-hook precmd _mux_precmd
+  add-zsh-hook preexec _mux_preexec
+fi

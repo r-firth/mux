@@ -9,8 +9,8 @@ use mux_acp::{
     AgentSpec,
 };
 use mux_protocol::{
-    CreateSession, ErrorCode, RemoteError, ServerEvent, SessionAttachment, SessionSelector,
-    SessionSummary, SpawnCommand,
+    CreateSession, ErrorCode, RemoteError, RunningProgram, ServerEvent, SessionAttachment,
+    SessionSelector, SessionSummary, SpawnCommand,
 };
 use mux_terminal::TerminalSize;
 use mux_workspace::{AgentSessionId, PaneId, Session, SessionId, TabId, WorkspaceCommand};
@@ -18,13 +18,20 @@ use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use tokio::sync::broadcast;
 
-use crate::pane::PaneRuntime;
+use crate::pane::{ForegroundChange, PaneRuntime};
+
+mod reopen;
+mod restore;
 
 pub struct DaemonState {
     state_dir: PathBuf,
     replay_bytes_per_pane: usize,
     sessions: RwLock<HashMap<SessionId, Arc<SessionRuntime>>>,
     agents: AgentManager,
+    /// The workspace as last written to disk.
+    saved_workspace: Mutex<String>,
+    /// What each pane's text was when last written to disk, as a hash.
+    saved_pane_text: Mutex<HashMap<PaneId, u64>>,
 }
 
 impl DaemonState {
@@ -34,6 +41,8 @@ impl DaemonState {
             replay_bytes_per_pane,
             sessions: RwLock::new(HashMap::new()),
             agents: AgentManager::new(),
+            saved_workspace: Mutex::new(String::new()),
+            saved_pane_text: Mutex::new(HashMap::new()),
         }
     }
 
@@ -95,6 +104,80 @@ impl DaemonState {
             .ok_or_else(|| {
                 RemoteError::new(ErrorCode::NotFound, format!("pane not found: {pane_id}"))
             })
+    }
+
+    /// Tell each session's clients about programs that have finished in its
+    /// panes since the last look.
+    pub fn announce_finished_commands(&self) {
+        let sessions = self.sessions.read().values().cloned().collect::<Vec<_>>();
+        for session in sessions {
+            let session_id = session.model.read().id;
+            let panes = session.panes.read().values().cloned().collect::<Vec<_>>();
+            for pane in panes {
+                let event = match pane.look_at_foreground() {
+                    Some(ForegroundChange::Started(program)) => ServerEvent::PaneCommandStarted {
+                        session_id,
+                        pane_id: pane.id,
+                        program,
+                    },
+                    Some(ForegroundChange::Finished(program, took)) => {
+                        ServerEvent::PaneCommandFinished {
+                            session_id,
+                            pane_id: pane.id,
+                            program,
+                            seconds: took.as_secs(),
+                        }
+                    }
+                    None => continue,
+                };
+                let _ = session.events.send(event);
+            }
+        }
+    }
+
+    /// Tell each session's clients about panes that have started or
+    /// stopped reading a password since the last look.
+    pub fn announce_secret_input(&self) {
+        let sessions = self.sessions.read().values().cloned().collect::<Vec<_>>();
+        for session in sessions {
+            let session_id = session.model.read().id;
+            let panes = session.panes.read().values().cloned().collect::<Vec<_>>();
+            for pane in panes {
+                if let Some(secret) = pane.look_at_secret_input() {
+                    let _ = session.events.send(ServerEvent::PaneSecretInput {
+                        session_id,
+                        pane_id: pane.id,
+                        secret,
+                    });
+                }
+            }
+        }
+    }
+
+    pub fn clear_pane(&self, pane_id: PaneId) -> Result<(), RemoteError> {
+        self.find_pane(pane_id)?.clear().map_err(internal_error)
+    }
+
+    pub fn reset_pane(&self, pane_id: PaneId) -> Result<(), RemoteError> {
+        self.find_pane(pane_id)?.reset().map_err(internal_error)
+    }
+
+    /// What these panes run in front of their shells, wherever they are.
+    pub fn running_programs(&self, pane_ids: &[PaneId]) -> Vec<RunningProgram> {
+        let sessions = self.sessions.read();
+        pane_ids
+            .iter()
+            .filter_map(|pane_id| {
+                sessions.values().find_map(|session| {
+                    let panes = session.panes.read();
+                    let name = panes.get(pane_id)?.running_program()?;
+                    Some(RunningProgram {
+                        pane_id: *pane_id,
+                        name,
+                    })
+                })
+            })
+            .collect()
     }
 
     pub fn prompt_agent(
@@ -224,6 +307,7 @@ impl DaemonState {
                 size: request.initial_size,
             },
             mutation: Mutex::new(()),
+            closed: Mutex::new(Vec::new()),
         });
         let summary = runtime.summary();
         sessions.insert(summary.id, runtime);
@@ -344,8 +428,11 @@ impl DaemonState {
                 .map_err(internal_error);
         }
         let session = self.resolve(&SessionSelector::Id(session_id))?;
-        let closing_tab =
-            matches!(command, WorkspaceCommand::CloseTab).then(|| session.model.read().active_tab);
+        let closing_tab = match command {
+            WorkspaceCommand::CloseTab => Some(session.model.read().active_tab),
+            WorkspaceCommand::CloseTabWithId(tab_id) => Some(tab_id),
+            _ => None,
+        };
         let attachment = session
             .apply_command(command, self.replay_bytes_per_pane)
             .map_err(internal_error)?;
@@ -401,6 +488,7 @@ impl DaemonState {
         writer.flush()?;
         writer.get_ref().sync_all()?;
         fs::rename(temporary, destination)?;
+        self.save_workspace();
         Ok(())
     }
 }
@@ -411,6 +499,8 @@ struct SessionRuntime {
     events: broadcast::Sender<ServerEvent>,
     spawn: SpawnTemplate,
     mutation: Mutex<()>,
+    /// The tabs and panes closed last, the newest at the end.
+    closed: Mutex<Vec<reopen::Closed>>,
 }
 
 impl SessionRuntime {
@@ -441,6 +531,8 @@ impl SessionRuntime {
         })
     }
 
+    // One arm per command; splitting the match would only scatter it.
+    #[allow(clippy::too_many_lines)]
     fn apply_command(
         &self,
         command: WorkspaceCommand,
@@ -451,7 +543,7 @@ impl SessionRuntime {
             WorkspaceCommand::SplitPane(axis) => {
                 let session_id = self.model.read().id;
                 let pane_id = PaneId::new();
-                let pane = self.spawn_pane_in_focused_cwd(session_id, pane_id, replay_bytes)?;
+                let pane = self.spawn_new_pane(session_id, pane_id, replay_bytes, true)?;
                 let result = self
                     .model
                     .write()
@@ -482,6 +574,41 @@ impl SessionRuntime {
                 let focused = tab.focused_pane;
                 tab.layout.resize_toward(focused, direction)?;
             }
+            WorkspaceCommand::SwapPanes { moved, with } => {
+                let mut model = self.model.write();
+                let tab = model
+                    .active_tab_mut()
+                    .ok_or(SessionMutationError::NoActiveTab)?;
+                // Both must be in the tab; the moved one ends up focused.
+                tab.focus(with)?;
+                tab.focus(moved)?;
+                tab.layout.swap(moved, with);
+            }
+            WorkspaceCommand::MovePaneBeside { pane, target, side } => {
+                self.model
+                    .write()
+                    .active_tab_mut()
+                    .ok_or(SessionMutationError::NoActiveTab)?
+                    .move_pane_beside(pane, target, side)?;
+            }
+            WorkspaceCommand::MovePaneToTab { pane, tab } => {
+                self.model.write().move_pane_to_tab(pane, tab)?;
+            }
+            WorkspaceCommand::SwapPane(direction) => {
+                self.model
+                    .write()
+                    .active_tab_mut()
+                    .ok_or(SessionMutationError::NoActiveTab)?
+                    .swap_with_neighbor(direction)?;
+            }
+            WorkspaceCommand::EqualizePanes => {
+                self.model
+                    .write()
+                    .active_tab_mut()
+                    .ok_or(SessionMutationError::NoActiveTab)?
+                    .layout
+                    .equalize();
+            }
             WorkspaceCommand::ResizeSplit {
                 first,
                 second,
@@ -497,6 +624,7 @@ impl SessionRuntime {
                     .focus(pane_id)?;
             }
             WorkspaceCommand::ClosePane => {
+                self.remember_closed_pane();
                 let pane_id = self
                     .model
                     .write()
@@ -515,17 +643,30 @@ impl SessionRuntime {
             WorkspaceCommand::NewTab => {
                 let session_id = self.model.read().id;
                 let pane_id = PaneId::new();
-                let pane = self.spawn_pane_in_focused_cwd(session_id, pane_id, replay_bytes)?;
-                if let Err(error) = self.model.write().add_tab(pane_id) {
+                let pane = self.spawn_new_pane(session_id, pane_id, replay_bytes, false)?;
+                let added = if new_tab_after_current() {
+                    self.model.write().add_tab_after_active(pane_id)
+                } else {
+                    self.model.write().add_tab(pane_id)
+                };
+                if let Err(error) = added {
                     let _ = pane.kill();
                     return Err(error.into());
                 }
                 self.panes.write().insert(pane_id, pane);
             }
             WorkspaceCommand::CloseTab => {
+                let active = self.model.read().active_tab;
+                self.remember_closed_tab(active);
                 let pane_ids = self.model.write().close_active_tab()?;
                 self.remove_panes(&pane_ids);
             }
+            WorkspaceCommand::CloseTabWithId(tab_id) => {
+                self.remember_closed_tab(tab_id);
+                let pane_ids = self.model.write().close_tab(tab_id)?;
+                self.remove_panes(&pane_ids);
+            }
+            WorkspaceCommand::ReopenClosedTab => self.reopen_closed(replay_bytes)?,
             WorkspaceCommand::RenameTab(title) => {
                 let title = validated_name("tab", &title)?;
                 self.model
@@ -535,13 +676,44 @@ impl SessionRuntime {
                     .title = title;
             }
             WorkspaceCommand::SelectTab(tab_id) => self.model.write().select_tab(tab_id)?,
+            WorkspaceCommand::RenamePane { pane, name } => {
+                self.model.write().rename_pane(pane, &name)?;
+            }
             WorkspaceCommand::NextTab => self.model.write().cycle_tab(1)?,
             WorkspaceCommand::PreviousTab => self.model.write().cycle_tab(-1)?,
             WorkspaceCommand::RenameSession(name) => {
                 self.model.write().name = validated_name("session", &name)?;
             }
+            WorkspaceCommand::MoveTab { tab, to } => self.model.write().move_tab(tab, to)?,
+            WorkspaceCommand::BreakPaneToTab => {
+                self.model.write().break_focused_pane()?;
+            }
+            WorkspaceCommand::SetTabInk(ink) => self.model.write().set_active_tab_ink(ink)?,
         }
         Ok(self.attachment()?)
+    }
+
+    /// A new split's or tab's shell: where the focused pane is, unless the
+    /// user's Ghostty config says new ones start afresh.
+    fn spawn_new_pane(
+        &self,
+        session_id: SessionId,
+        pane_id: PaneId,
+        replay_bytes: usize,
+        split: bool,
+    ) -> Result<Arc<PaneRuntime>, crate::pane::PaneError> {
+        if inherit_working_directory(split) {
+            return self.spawn_pane_in_focused_cwd(session_id, pane_id, replay_bytes);
+        }
+        PaneRuntime::spawn(
+            session_id,
+            pane_id,
+            &self.spawn.cwd,
+            &self.spawn.command,
+            self.spawn.size,
+            replay_bytes,
+            self.events.clone(),
+        )
     }
 
     fn spawn_pane_in_focused_cwd(
@@ -621,6 +793,8 @@ enum SessionMutationError {
     Pane(#[from] crate::pane::PaneError),
     #[error("{kind} name cannot be empty")]
     EmptyName { kind: &'static str },
+    #[error("there is no closed tab or pane to reopen")]
+    NothingClosed,
 }
 
 fn validated_name(kind: &'static str, value: &str) -> Result<String, SessionMutationError> {
@@ -654,6 +828,32 @@ fn agent_error(error: &mux_acp::AgentError) -> RemoteError {
         mux_acp::AgentError::Protocol(_) => ErrorCode::Internal,
     };
     RemoteError::new(code, error.to_string())
+}
+
+/// Whether a new split (or tab) starts where the focused pane is, as the
+/// user's Ghostty config has it.
+fn inherit_working_directory(split: bool) -> bool {
+    #[cfg(feature = "ghostty")]
+    {
+        mux_terminal_ghostty::user_inherit_working_directory(split)
+    }
+    #[cfg(not(feature = "ghostty"))]
+    {
+        let _ = split;
+        true
+    }
+}
+/// Whether a new tab opens just after the current one, as the user's Ghostty
+/// config may ask; otherwise it goes at the end of the strip.
+fn new_tab_after_current() -> bool {
+    #[cfg(feature = "ghostty")]
+    {
+        mux_terminal_ghostty::user_new_tab_after_current()
+    }
+    #[cfg(not(feature = "ghostty"))]
+    {
+        false
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -827,6 +1027,54 @@ mod tests {
         assert_eq!(state.list_sessions(), vec![first.clone()]);
         state.kill_session(first.id).expect("kill first session");
         assert!(state.list_sessions().is_empty());
+    }
+
+    #[test]
+    fn a_program_the_shell_runs_is_seen_starting_and_finishing() {
+        let state_directory = tempfile::tempdir().expect("state directory");
+        let state = DaemonState::new(state_directory.path().to_path_buf(), 64 * 1024);
+        let session = state
+            .create_session(CreateSession {
+                name: "foreground".to_owned(),
+                cwd: state_directory.path().to_path_buf(),
+                command: SpawnCommand {
+                    program: PathBuf::from("/bin/sh"),
+                    args: Vec::new(),
+                    environment: Vec::new(),
+                },
+                initial_panes: 1,
+                initial_size: TerminalSize::default(),
+            })
+            .expect("create session");
+        let runtime = state
+            .resolve(&SessionSelector::Id(session.id))
+            .expect("session runtime");
+        let pane = runtime.panes.read().values().next().expect("pane").clone();
+        pane.write(b"sleep 1\n").expect("run sleep");
+
+        let started = wait_for_change(&pane);
+        assert_eq!(started, ForegroundChange::Started("sleep".to_owned()));
+        let attachment = runtime.attachment().expect("attachment while it runs");
+        assert_eq!(attachment.panes[0].program.as_deref(), Some("sleep"));
+
+        let ForegroundChange::Finished(program, took) = wait_for_change(&pane) else {
+            panic!("expected sleep to finish");
+        };
+        assert_eq!(program, "sleep");
+        assert!(took >= Duration::from_millis(500), "ran for {took:?}");
+        let attachment = runtime.attachment().expect("attachment at the prompt");
+        assert_eq!(attachment.panes[0].program, None);
+    }
+
+    fn wait_for_change(pane: &PaneRuntime) -> ForegroundChange {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(change) = pane.look_at_foreground() {
+                return change;
+            }
+            assert!(Instant::now() < deadline, "the foreground never changed");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     fn wait_for_cwd(pane: &PaneRuntime, expected: &std::path::Path) {

@@ -9,7 +9,9 @@
 //! that matched turn peach. Enter goes there. It opens on the tab you were in
 //! before this one, so ⌘P then enter goes back and forth between two tabs.
 //! Each agent mux can start is there too, but only once something is typed
-//! (`codex`), so agents stay out of the way of the map.
+//! (`codex`), so agents stay out of the way of the map, and so are the
+//! commands run in the pane it opened over (`cargo`): enter scrolls back to
+//! one's prompt.
 
 use super::*;
 use gpui::{HighlightStyle, StyledText};
@@ -31,7 +33,7 @@ const MARK_X: f32 = LIST_PAD + ROW_PAD + GUTTER + GUTTER_GAP;
 const LABEL_X: f32 = MARK_X + MARK + MARK_GAP;
 
 pub(super) struct Palette {
-    input: Entity<InputState>,
+    pub(super) input: Entity<InputState>,
     query: String,
     /// The row the keys act on, by where it leads, so the list can change
     /// under it (a title updating, a tab closing) without losing it. `None`
@@ -41,6 +43,8 @@ pub(super) struct Palette {
     /// Where the pointer last moved, so a list scrolled under a resting
     /// pointer doesn't take the choice away from the keys.
     pointer: Option<gpui::Point<gpui::Pixels>>,
+    /// The commands run in the pane it was opened over, found by typing.
+    ran: Vec<scrollback::CommandRan>,
     _subscription: gpui::Subscription,
 }
 
@@ -52,15 +56,22 @@ enum Destination {
     Command(Command),
     /// One of the agent profiles, by its place in the list.
     Agent(usize),
+    /// A command run in a pane, by its prompt's row.
+    Ran(PaneId, usize),
+    /// What was typed, found in the pane with the keys, when nothing else
+    /// matches it.
+    FindInPane,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Command {
+    GoToCall,
     NewTab,
     SplitRight,
     SplitDown,
     Zoom,
     Resize,
+    Lock,
     RenameTab,
     TabInk,
     Find,
@@ -71,6 +82,24 @@ enum Command {
     Settings,
     ClosePane,
     CloseTab,
+    BreakPane,
+    SyncTab,
+    RenamePane,
+    ReopenTab,
+    EqualizePanes,
+    MoveTabLeft,
+    MoveTabRight,
+    Clear,
+    Reset,
+    NextPane,
+    BiggerText,
+    SmallerText,
+    ActualSize,
+    SelectOutput,
+    CopyOutput,
+    OpenHistory,
+    RevealDirectory,
+    ReloadConfig,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -128,6 +157,15 @@ impl Row {
     }
 }
 
+impl Palette {
+    /// What was typed before the field had the keys, as though typed into
+    /// it.
+    pub(super) fn typed(&mut self, query: &str) {
+        query.clone_into(&mut self.query);
+        self.selected = None;
+    }
+}
+
 impl MuxApp {
     /// Open the palette, or close it if it is open: ⌘P does both.
     pub(super) fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -158,12 +196,14 @@ impl MuxApp {
         window.on_next_frame(move |window, cx| {
             focus.update(cx, |input, cx| input.focus(window, cx));
         });
+        let ran = self.commands_ran();
         self.palette = Some(Palette {
             input,
             query: String::new(),
             selected: None,
             scroll: ScrollHandle::new(),
             pointer: None,
+            ran,
             _subscription: subscription,
         });
         self.mode = InputMode::Normal;
@@ -225,7 +265,43 @@ impl MuxApp {
         }
     }
 
+    /// Shift+Return: a command run before is typed at the prompt of the
+    /// pane with the keys, to run again or change first; any other row is
+    /// chosen as Return chooses it.
+    pub(super) fn paste_palette_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.as_ref() else {
+            return;
+        };
+        let rows = self.palette_rows(&palette.query.clone());
+        let Some(row) = rows.get(self.palette_choice(&rows)) else {
+            return;
+        };
+        let Destination::Ran(pane_id, prompt) = row.destination else {
+            self.go_to(row.destination, window, cx);
+            return;
+        };
+        let command = palette
+            .ran
+            .iter()
+            .find(|ran| ran.pane_id == pane_id && ran.row == prompt)
+            .map(|ran| ran.command.clone());
+        self.close_palette(window, cx);
+        if let Some(command) = command
+            && let Some(pane_id) = self.terminal_input_pane_id()
+            && let Some(pane) = self.panes.get(&pane_id)
+            && let Ok(bytes) = pane.with_engine(|engine| engine.encode_paste(&command))
+        {
+            self.backend.send(CommandMessage::Write { pane_id, bytes });
+            self.return_to_latest(pane_id, cx);
+        }
+        cx.notify();
+    }
+
     fn go_to(&mut self, destination: Destination, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self
+            .palette
+            .as_ref()
+            .map(|palette| palette.query.trim().to_owned());
         self.close_palette(window, cx);
         let active = self.active_tab_id();
         match destination {
@@ -245,6 +321,12 @@ impl MuxApp {
             }
             Destination::Command(command) => self.run_palette_command(command, window, cx),
             Destination::Agent(index) => self.open_agent_from_palette(index, window, cx),
+            Destination::Ran(pane_id, row) => self.go_to_command(pane_id, row, cx),
+            Destination::FindInPane => {
+                if let Some(query) = query {
+                    self.find_text(query, window, cx);
+                }
+            }
         }
         cx.notify();
     }
@@ -261,12 +343,20 @@ impl MuxApp {
             Command::SplitDown => Action::SplitPane(mux_workspace::SplitAxis::Vertical),
             Command::Zoom => Action::TogglePaneZoom,
             Command::Resize => Action::EnterMode(InputMode::Resize),
+            Command::Lock => Action::EnterMode(InputMode::Locked),
             Command::RenameTab => Action::RenameTab,
             Command::Agent => Action::OpenAgentSurface,
             Command::Sessions => Action::OpenSessionSwitcher,
             Command::Settings => Action::OpenSettings,
             Command::ClosePane => Action::ClosePane,
             Command::CloseTab => Action::CloseTab,
+            Command::BreakPane => Action::BreakPaneToTab,
+            Command::SyncTab => Action::ToggleSyncTab,
+            Command::RenamePane => Action::RenamePane,
+            Command::ReopenTab => Action::ReopenClosedTab,
+            Command::EqualizePanes => Action::EqualizePanes,
+            Command::MoveTabLeft => Action::MoveTab(mux_workspace::Direction::Left),
+            Command::MoveTabRight => Action::MoveTab(mux_workspace::Direction::Right),
             Command::TabInk => {
                 self.cycle_active_tab_ink();
                 return;
@@ -277,6 +367,58 @@ impl MuxApp {
             }
             Command::QuickSelect => {
                 self.toggle_quick_select(window, cx);
+                return;
+            }
+            Command::Clear => {
+                self.clear_pane(cx);
+                return;
+            }
+            Command::Reset => {
+                self.reset_pane(cx);
+                return;
+            }
+            Command::ReloadConfig => {
+                self.reload_ghostty_config(cx);
+                return;
+            }
+            Command::SelectOutput => {
+                self.select_last_output(cx);
+                return;
+            }
+            Command::CopyOutput => {
+                self.copy_last_output(cx);
+                return;
+            }
+            Command::GoToCall => {
+                self.go_to_call(cx);
+                return;
+            }
+            Command::OpenHistory => {
+                if let Some(pane_id) = self.focused_pane_id() {
+                    self.open_history_in_editor(pane_id, cx);
+                }
+                return;
+            }
+            Command::RevealDirectory => {
+                if let Some(pane_id) = self.focused_pane_id() {
+                    self.reveal_directory(pane_id);
+                }
+                return;
+            }
+            Command::NextPane => {
+                self.cycle_pane(true, cx);
+                return;
+            }
+            Command::BiggerText => {
+                self.step_font_size(1.0, cx);
+                return;
+            }
+            Command::SmallerText => {
+                self.step_font_size(-1.0, cx);
+                return;
+            }
+            Command::ActualSize => {
+                self.set_font_size(self.configured_font_size, cx);
                 return;
             }
             Command::NewSession => {
@@ -353,6 +495,21 @@ impl MuxApp {
             true
         });
         rank(&mut rows);
+        if rows.is_empty()
+            && self
+                .terminal_input_pane_id()
+                .is_some_and(|pane_id| self.active_agent_pane() != Some(pane_id))
+        {
+            let mut row = Row::new(
+                Destination::FindInPane,
+                "find",
+                format!("find “{}” in this pane", query.trim()),
+                3,
+            );
+            row.tone = MUTED_TEXT;
+            row.hint = Some(("⌘f".to_owned(), FAINT_TEXT));
+            rows.push(row);
+        }
         rows
     }
 
@@ -386,7 +543,44 @@ impl MuxApp {
             rows.push(row);
         }
         self.push_agent_rows(&mut rows);
+        self.push_command_rows(&mut rows);
         rows
+    }
+
+    /// A row for each command run in the session, the pane the palette
+    /// opened over first, found by typing: enter brings its prompt to the
+    /// top, in whatever tab it is.
+    fn push_command_rows(&self, rows: &mut Vec<Row>) {
+        let Some(palette) = &self.palette else {
+            return;
+        };
+        for ran in &palette.ran {
+            let mut row = Row::new(
+                Destination::Ran(ran.pane_id, ran.row),
+                "ran",
+                ran.command.clone(),
+                3,
+            );
+            row.tone = MUTED_TEXT;
+            row.quiet = true;
+            let tone = if ran.ending.failed().is_some() {
+                SIGNAL
+            } else {
+                FAINT_TEXT
+            };
+            // `failed` lists every command that failed, wherever it ran.
+            if ran.ending.failed().is_some() {
+                "failed exit error".clone_into(&mut row.also);
+            }
+            let words = scrollback::ending_words(ran.ending);
+            row.hint = match (words, &ran.place) {
+                (Some(words), Some(place)) => Some((format!("{words} · {place}"), tone)),
+                (words, place) => words
+                    .map(|words| (words, tone))
+                    .or_else(|| place.clone().map(|place| (place, FAINT_TEXT))),
+            };
+            rows.push(row);
+        }
     }
 
     /// A row for each agent ⌃a offers: the one already in this tab to go
@@ -513,13 +707,12 @@ impl MuxApp {
                 .tab_agent(tab_id)
                 .map_or_else(|| "agent".to_owned(), agent_view::agent_title);
         }
-        self.panes
-            .get(&pane_id)
-            .and_then(|pane| pane.title.title())
-            .map_or_else(
-                || format!("pane {number}"),
-                |title| chrome::terminal_place(title).to_owned(),
-            )
+        let shown = self.panes.get(&pane_id).and_then(PaneReplica::head_title);
+        match (self.pane_name(pane_id), shown) {
+            (Some(name), Some(shown)) => format!("{name} · {shown}"),
+            (Some(name), None) => name.to_owned(),
+            (None, shown) => shown.unwrap_or_else(|| format!("pane {number}")),
+        }
     }
 
     /// The agent a tab's agent pane shows, as `active_agent` finds it for
@@ -607,12 +800,9 @@ impl MuxApp {
 
     /// What mux can do, each with the keys that do it and other words it
     /// answers to. Some say what they will do to the pane or tab on screen.
-    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 15] {
-        let zoomed = self
-            .session
-            .as_ref()
-            .and_then(Session::active_tab)
-            .is_some_and(|tab| tab.zoomed_pane.is_some());
+    #[allow(clippy::too_many_lines)] // One entry per command.
+    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 35] {
+        let zoomed = self.active_tab_zoomed();
         let agent_here = self
             .active_agent_pane()
             .is_some_and(|pane_id| Some(pane_id) == self.focused_pane_id());
@@ -641,7 +831,65 @@ impl MuxApp {
                 "maximise maximize fullscreen unzoom",
             ),
             (Command::Resize, "⌃p ⌃n", "resize panes", "size grow shrink"),
+            (
+                Command::Lock,
+                "⌃g",
+                "lock: every key to the program",
+                "locked passthrough ctrl prefix",
+            ),
+            (
+                Command::EqualizePanes,
+                "⌃p ⌃n =",
+                "even out panes",
+                "equalize balance same size split",
+            ),
+            (
+                Command::NextPane,
+                "",
+                "next pane",
+                "focus switch cycle other",
+            ),
             (Command::RenameTab, "⌃t r", "rename this tab", "name title"),
+            (
+                Command::MoveTabLeft,
+                "⌃t ⇧h",
+                "move this tab left",
+                "reorder order shift earlier",
+            ),
+            (
+                Command::MoveTabRight,
+                "⌃t ⇧l",
+                "move this tab right",
+                "reorder order shift later",
+            ),
+            (
+                Command::BreakPane,
+                "⌃t b",
+                "move this pane to a new tab",
+                "break out detach pop split own",
+            ),
+            (
+                Command::ReopenTab,
+                "",
+                "reopen the tab or pane closed last",
+                "undo restore closed tab pane split back",
+            ),
+            (
+                Command::RenamePane,
+                "⌃p c",
+                "name this pane",
+                "rename title label pane",
+            ),
+            (
+                Command::SyncTab,
+                "⌃t s",
+                if self.active_tab_synced() {
+                    "stop typing into every pane"
+                } else {
+                    "type into every pane in this tab"
+                },
+                "sync synchronize broadcast all panes",
+            ),
             (
                 Command::TabInk,
                 "⌃t c",
@@ -653,6 +901,48 @@ impl MuxApp {
                 "⌘f",
                 "find in this pane",
                 "search look grep history scrollback",
+            ),
+            (
+                Command::Clear,
+                "",
+                "clear this pane",
+                "clean wipe cls history scrollback",
+            ),
+            (
+                Command::Reset,
+                "",
+                "reset this pane's terminal",
+                "reset garbled broken stuck mouse mode ris stty sane",
+            ),
+            (
+                Command::SelectOutput,
+                "",
+                "select the last command's output",
+                "output result printed prompt",
+            ),
+            (
+                Command::CopyOutput,
+                "",
+                "copy the last command's output",
+                "clipboard result printed",
+            ),
+            (
+                Command::OpenHistory,
+                "",
+                "open this pane's history in an editor",
+                "scrollback export save text file dump",
+            ),
+            (
+                Command::RevealDirectory,
+                "",
+                "show this pane's directory in Finder",
+                "reveal open folder cwd working",
+            ),
+            (
+                Command::GoToCall,
+                "",
+                "go to the pane that called",
+                "jump bell notification agent waiting needs attention",
             ),
             (
                 Command::QuickSelect,
@@ -683,10 +973,34 @@ impl MuxApp {
                 "new session create workspace",
             ),
             (
+                Command::ReloadConfig,
+                "",
+                "reload the Ghostty config",
+                "refresh ghostty config settings theme font keybind",
+            ),
+            (
                 Command::Settings,
                 "⌘,",
                 "settings",
                 "preferences agents config",
+            ),
+            (
+                Command::BiggerText,
+                "",
+                "bigger text",
+                "font size larger increase zoom in",
+            ),
+            (
+                Command::SmallerText,
+                "",
+                "smaller text",
+                "font size decrease zoom out",
+            ),
+            (
+                Command::ActualSize,
+                "",
+                "actual text size",
+                "font size reset default",
             ),
             (Command::ClosePane, "⌃p x", "close this pane", "kill exit"),
             (Command::CloseTab, "⌃t x", "close this tab", "kill exit"),
@@ -706,7 +1020,10 @@ impl MuxApp {
         let slab_width = PALETTE_WIDTH.min(width - 32.0);
 
         let list = Self::palette_list(palette, &rows, chosen, cx);
-        let query = palette_query(&palette.input);
+        let pastes = rows
+            .get(chosen)
+            .is_some_and(|row| matches!(row.destination, Destination::Ran(..)));
+        let query = palette_query(&palette.input, pastes);
         let top = height * 0.14;
         let slab = v_flex()
             .id("palette")
@@ -717,6 +1034,9 @@ impl MuxApp {
             }))
             .on_action(cx.listener(|this, _: &ChoosePaletteRow, window, cx| {
                 this.choose_palette_row(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PastePaletteRow, window, cx| {
+                this.paste_palette_row(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ClosePalette, window, cx| {
                 this.close_palette(window, cx);
@@ -885,7 +1205,7 @@ impl MuxApp {
 
 /// The query line: gofer's prompt over the marks, what is typed in line
 /// with the names, and the key that closes it.
-fn palette_query(input: &Entity<InputState>) -> impl IntoElement {
+fn palette_query(input: &Entity<InputState>, pastes: bool) -> impl IntoElement {
     h_flex()
         .relative()
         .flex_none()
@@ -919,6 +1239,17 @@ fn palette_query(input: &Entity<InputState>) -> impl IntoElement {
                     .text_color(color(TEXT)),
             ),
         )
+        // A command run before can be typed at the prompt instead of gone
+        // back to.
+        .when(pastes, |row| {
+            row.gap(px(14.0)).child(
+                h_flex()
+                    .gap(px(4.0))
+                    .text_color(color(FAINT_TEXT))
+                    .child(kbd("⇧↩", color(MUTED_TEXT)))
+                    .child("type it here"),
+            )
+        })
         .child(kbd("esc", color(FAINT_TEXT)))
 }
 
@@ -934,7 +1265,9 @@ fn match_row(row: &Row, terms: &[&str], number: Option<usize>) -> Option<(i32, V
     let mut score = 0;
     let mut matched = Vec::new();
     for term in terms {
-        if let Some((points, positions)) = fuzzy_match(term, &row.label) {
+        if let Some((points, positions)) = fuzzy_match(term, &row.label)
+            .filter(|(_, positions)| reads_as_typed(&row.label, positions))
+        {
             score += points;
             if is_a_word_of(term, &row.label) {
                 score += WHOLE_WORD;
@@ -947,6 +1280,26 @@ fn match_row(row: &Row, terms: &[&str], number: Option<usize>) -> Option<(i32, V
     matched.sort_unstable();
     matched.dedup();
     Some((score, matched))
+}
+
+/// Whether matched letters read as something typed for this text: each run
+/// of them after the first starts a word, or goes on in the word the run
+/// before it ended in. `sr` reads as split right and `splt` as split, but
+/// `palet` is not "reopen the tab closed last", its letters strewn through
+/// the middles of four words.
+fn reads_as_typed(text: &str, positions: &[usize]) -> bool {
+    let chars = text.chars().collect::<Vec<_>>();
+    let word = |index: usize| {
+        chars[..=index]
+            .iter()
+            .enumerate()
+            .filter(|&(at, _)| word_start_bonus(&chars, at) > 0)
+            .count()
+    };
+    positions.windows(2).all(|pair| {
+        let (previous, at) = (pair[0], pair[1]);
+        at == previous + 1 || word_start_bonus(&chars, at) > 0 || word(at) == word(previous)
+    })
 }
 
 /// How well `query` matches `text`, the way fzf finds it: every character
@@ -1136,6 +1489,19 @@ mod tests {
         assert_eq!(positions("CW", "cargo watch"), Some(vec![0, 6]));
         assert_eq!(positions("ba", "abc"), None);
         assert_eq!(positions("", "anything"), Some(vec![]));
+    }
+
+    #[test]
+    fn strewn_letters_do_not_match() {
+        let reads = |query, text| {
+            let (_, positions) = fuzzy_match(query, text).unwrap();
+            reads_as_typed(text, &positions)
+        };
+        assert!(reads("sr", "split right"));
+        assert!(reads("splt", "split right"));
+        assert!(reads("oad", "reload config"));
+        assert!(reads("cw", "cargo watch"));
+        assert!(!reads("palet", "reopen the tab closed last"));
     }
 
     #[test]
