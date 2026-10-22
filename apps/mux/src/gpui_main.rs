@@ -182,6 +182,7 @@ gpui::actions!(
         NextMuxTab,
         NextPaletteRow,
         OpenFind,
+        FindSelection,
         OpenMuxPalette,
         OpenMuxSettings,
         OpenQuickSelect,
@@ -4622,6 +4623,18 @@ impl MuxApp {
     }
 
     /// What the Window menu does to the window itself.
+    fn with_find_actions(
+        root: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        root.on_action(cx.listener(|this, _: &OpenFind, window, cx| this.open_find(window, cx)))
+            .on_action(cx.listener(|this, _: &FindSelection, window, cx| {
+                this.find_selection(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FindOlder, _, cx| this.step_find(true, cx)))
+            .on_action(cx.listener(|this, _: &FindNewer, _, cx| this.step_find(false, cx)))
+    }
+
     fn with_window_actions(
         root: gpui::Stateful<gpui::Div>,
         cx: &mut Context<Self>,
@@ -5136,9 +5149,6 @@ impl Render for MuxApp {
             .on_action(cx.listener(|this, _: &OpenMuxPalette, window, cx| {
                 this.toggle_palette(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &OpenFind, window, cx| this.open_find(window, cx)))
-            .on_action(cx.listener(|this, _: &FindOlder, _, cx| this.step_find(true, cx)))
-            .on_action(cx.listener(|this, _: &FindNewer, _, cx| this.step_find(false, cx)))
             .on_action(cx.listener(|this, _: &OpenQuickSelect, window, cx| {
                 this.toggle_quick_select(window, cx);
             }))
@@ -5155,7 +5165,10 @@ impl Render for MuxApp {
         self.publish_ground(&drawn, viewport, window, cx);
         let mut root = Self::with_pointer_capture(
             Self::with_window_actions(
-                Self::with_pane_shortcut_actions(Self::with_shortcut_actions(root, cx), cx),
+                Self::with_pane_shortcut_actions(
+                    Self::with_find_actions(Self::with_shortcut_actions(root, cx), cx),
+                    cx,
+                ),
                 cx,
             ),
             cx,
@@ -6162,6 +6175,7 @@ fn configure_application_menu(cx: &mut App) {
                 MenuItem::action("Zoom Pane", ZoomMuxPane),
                 MenuItem::separator(),
                 MenuItem::action("Find…", OpenFind),
+                MenuItem::action("Use Selection for Find", FindSelection),
                 MenuItem::action("Quick Select", OpenQuickSelect),
                 MenuItem::action("Clear", ClearMuxPane),
                 MenuItem::separator(),
@@ -6243,6 +6257,7 @@ fn configure_application_actions(cx: &mut App) {
         KeyBinding::new("cmd-p", OpenMuxPalette, None),
         KeyBinding::new("cmd-shift-p", OpenMuxPalette, None),
         KeyBinding::new("cmd-f", OpenFind, None),
+        KeyBinding::new("cmd-e", FindSelection, None),
         KeyBinding::new("cmd-g", FindOlder, None),
         KeyBinding::new("cmd-shift-g", FindNewer, None),
         KeyBinding::new("cmd-shift-space", OpenQuickSelect, None),

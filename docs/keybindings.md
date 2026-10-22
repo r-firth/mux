@@ -157,6 +157,9 @@ arrives.
 | Escape | Close find, leaving the pane where it is |
 | `Cmd+F` | Back to the field with its text selected, to type over it |
 
+`Cmd+E` finds what is selected, as in any Mac app: its first line goes
+into the field and the search starts from the newest output.
+
 ## Quick select
 
 `Cmd+Shift+Space` puts a key or two, solid in the tab's ink, on every URL,

@@ -119,6 +119,29 @@ impl MuxApp {
         cx.notify();
     }
 
+    /// ⌘E, as in any Mac app: find what is selected, its first line, in the
+    /// pane with the keys, starting from the newest.
+    pub(super) fn find_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(query) = self.selected_text().and_then(|text| {
+            let line = text.lines().find(|line| !line.trim().is_empty())?.trim();
+            (!line.is_empty()).then(|| line.to_owned())
+        }) else {
+            self.say_in_strip("select some text to find it", false, cx);
+            return;
+        };
+        self.open_find(window, cx);
+        let Some(find) = &self.find else {
+            return;
+        };
+        let input = find.input.clone();
+        input.update(cx, |input, cx| {
+            input.set_value(query.clone(), window, cx);
+            input.select_all(window, cx);
+        });
+        self.find_typed(query, cx);
+        cx.notify();
+    }
+
     pub(super) fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.find.take().is_some() {
             self.restore_keyboard(window, cx);
