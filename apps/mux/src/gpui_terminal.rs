@@ -29,6 +29,8 @@ pub struct TerminalChrome {
     pub cursor: Hsla,
     pub selection: Option<Rgb>,
     pub selection_text: Option<Rgb>,
+    /// Whether a pane without the keys marks its cursor with a hollow block.
+    pub hollow_cursor: bool,
 }
 
 /// Places marked on the grid, such as what a find turned up. The current one
@@ -535,7 +537,7 @@ fn paint_terminal(
 
     // A block cursor goes under the text, whose letter there is drawn in
     // the background's colour; the other shapes go over it.
-    paint_cursor(origin, metrics, frame, focused, chrome.cursor, true, window);
+    paint_cursor(origin, metrics, frame, focused, chrome, true, window);
 
     for run in prepared.runs {
         let position = point(
@@ -552,37 +554,37 @@ fn paint_terminal(
         );
     }
 
-    paint_cursor(
-        origin,
-        metrics,
-        frame,
-        focused,
-        chrome.cursor,
-        false,
-        window,
-    );
+    paint_cursor(origin, metrics, frame, focused, chrome, false, window);
 }
 
-/// Paint the cursor of a pane with the keys: a solid block `under_text`,
-/// the other shapes over it.
+/// Paint a pane's cursor: in the pane with the keys, a solid block
+/// `under_text` and the other shapes over it; elsewhere a hollow block, as
+/// Ghostty marks where an unfocused split's cursor is.
 fn paint_cursor(
     origin: gpui::Point<Pixels>,
     metrics: GridMetrics,
     frame: &RenderFrame,
     focused: bool,
-    ink: Hsla,
+    chrome: TerminalChrome,
     under_text: bool,
     window: &mut Window,
 ) {
-    let Some(cursor) = frame.cursor.filter(|cursor| {
-        focused
-            && cursor.visible
-            && cursor.x < frame.cols
-            && cursor.y < frame.rows
-            && (cursor.style == CursorStyle::Block) == under_text
-    }) else {
+    let (ink, hollow) = (chrome.cursor, chrome.hollow_cursor);
+    let Some(mut cursor) = frame
+        .cursor
+        .filter(|cursor| cursor.visible && cursor.x < frame.cols && cursor.y < frame.rows)
+    else {
         return;
     };
+    if !focused {
+        if !hollow {
+            return;
+        }
+        cursor.style = CursorStyle::HollowBlock;
+    }
+    if (cursor.style == CursorStyle::Block) != under_text {
+        return;
+    }
     let cell_bounds = Bounds::new(
         point(
             origin.x + px(metrics.cell_width) * usize::from(cursor.x),
@@ -590,7 +592,7 @@ fn paint_cursor(
         ),
         size(px(metrics.cell_width), px(metrics.cell_height)),
     );
-    let cursor_color = ink.alpha(0.88);
+    let cursor_color = ink.alpha(if focused { 0.88 } else { 0.5 });
     let cursor_bounds = match cursor.style {
         CursorStyle::Block => cell_bounds,
         CursorStyle::HollowBlock => {

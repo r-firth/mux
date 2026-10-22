@@ -5515,6 +5515,9 @@ impl MuxApp {
                 cursor: self.active_ink().color(),
                 selection: self.ghostty_theme.selection_background,
                 selection_text: self.ghostty_theme.selection_foreground,
+                // A blink's dark half shows nothing, and a dead shell has
+                // no cursor at all.
+                hollow_cursor: !geometry.focused && !self.pane_has_exited(pane_id),
             },
             marks: self
                 .quick_select_marks(pane_id)
