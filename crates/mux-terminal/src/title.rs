@@ -327,10 +327,13 @@ impl TitleScanner {
             }
             Some("D") => {
                 self.exit_status = parts.next().and_then(|status| status.trim().parse().ok());
-                if (self.command_started || !self.marks_starts)
-                    && let Some(ending) = self.commands.back_mut()
-                {
-                    *ending = self.exit_status;
+                if self.command_started || !self.marks_starts {
+                    // The first prompt this pane saw may have come before
+                    // Mux was listening, as after a restart.
+                    match self.commands.back_mut() {
+                        Some(ending) => *ending = self.exit_status,
+                        None => self.commands.push_back(self.exit_status),
+                    }
                 }
                 self.command_started = false;
             }
@@ -468,7 +471,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             [Some(2), None, Some(0), None]
         );
-        // bash marks no starts: each `D` is taken as given.
+        // bash marks no starts: each `D` is taken as given, the first for
+        // the prompt that was there before Mux was listening.
         let mut scanner = TitleScanner::default();
         scanner.scan(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
         scanner.scan(b"\x1b]133;D;1\x07\x1b]133;A\x07$ ");
@@ -478,7 +482,7 @@ mod tests {
                 .iter()
                 .copied()
                 .collect::<Vec<_>>(),
-            [Some(1), None]
+            [Some(0), Some(1), None]
         );
     }
 

@@ -402,6 +402,9 @@ right and `cw` finds the pane running `cargo watch`. A word also finds a pane
 by its tab's name, and a tab by what its panes are running. A number goes to
 that tab. Agents are listed once you type one's name: `codex` opens Codex in
 the pane with the keys, or shows the Codex session already in the tab.
+The commands run in the focused pane are found the same way, newest first
+and each once, with `exit 2` beside one that failed: `cargo t` then Return
+scrolls back to where `cargo test` was run.
 
 | Keys | Action |
 | --- | --- |

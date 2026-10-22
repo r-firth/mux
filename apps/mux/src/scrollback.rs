@@ -83,7 +83,12 @@ fn prompt_jump(
 /// any.
 fn command_above(prompts: &[usize], scroll: TerminalScrollState) -> Option<usize> {
     let top = usize::try_from(scroll.offset).unwrap_or(usize::MAX);
-    prompts.iter().rev().find(|&&row| row < top).copied()
+    prompts
+        .iter()
+        .rev()
+        .find(|&&row| row <= top)
+        .copied()
+        .filter(|&row| row < top)
 }
 
 /// How the command run from the prompt at `index` of `prompt_count` ended,
@@ -98,6 +103,30 @@ fn failed_status(
     let at = endings.len().checked_sub(from_newest + 1)?;
     endings[at].filter(|&status| status != 0)
 }
+
+/// The command on a prompt's line, after the prompt: what follows the
+/// first `$ `, `# `, `% `, `> ` or `❯ `, or the whole line when it has none.
+fn command_of(line: &str) -> &str {
+    ["$ ", "# ", "% ", "> ", "❯ "]
+        .iter()
+        .filter_map(|mark| line.find(mark).map(|at| at + mark.len()))
+        .min()
+        .map_or(line, |start| &line[start..])
+        .trim()
+}
+
+/// A command run in a pane, for the palette to go back to.
+#[derive(Clone, Debug)]
+pub(super) struct CommandRan {
+    pub(super) pane_id: PaneId,
+    /// Its prompt's row, from the top of the history.
+    pub(super) row: usize,
+    pub(super) command: String,
+    pub(super) failed: Option<i32>,
+}
+
+/// How many of a pane's latest commands the palette offers.
+const COMMANDS_OFFERED: usize = 200;
 
 /// Each pane's prompt rows, with the frame they were read for.
 pub(super) type PromptRows = std::cell::RefCell<HashMap<PaneId, (u64, Rc<Vec<usize>>)>>;
@@ -458,6 +487,57 @@ impl MuxApp {
         .collect()
     }
 
+    /// The commands run in the focused pane, newest first, each once,
+    /// leaving out the prompt still waiting and empty lines.
+    pub(super) fn commands_ran(&self) -> Vec<CommandRan> {
+        let Some(pane_id) = self.focused_pane_id() else {
+            return Vec::new();
+        };
+        let (Some(pane), Some(prompts)) =
+            (self.panes.get(&pane_id), self.cached_prompt_rows(pane_id))
+        else {
+            return Vec::new();
+        };
+        let endings = pane.title.command_endings();
+        let count = prompts.len();
+        let mut seen = std::collections::HashSet::new();
+        pane.with_engine(|engine| {
+            prompts
+                .iter()
+                .enumerate()
+                .rev()
+                .skip(1)
+                .take(COMMANDS_OFFERED)
+                .filter_map(|(index, &row)| {
+                    let line = engine.row_text(row).ok()?;
+                    let command = command_of(&line);
+                    // The same command again is offered once, at its newest.
+                    (!command.is_empty() && seen.insert(command.to_owned())).then(|| CommandRan {
+                        pane_id,
+                        row,
+                        command: command.to_owned(),
+                        failed: failed_status(endings, count, index),
+                    })
+                })
+                .collect()
+        })
+    }
+
+    /// Bring a command's prompt to the top of its pane, and the keys there.
+    pub(super) fn go_to_command(&mut self, pane_id: PaneId, row: usize) {
+        let Some(offset) = self
+            .panes
+            .get(&pane_id)
+            .map(|pane| pane.frame.scroll.offset)
+        else {
+            return;
+        };
+        self.request_pane_focus(pane_id);
+        let delta =
+            i64::try_from(row).unwrap_or(i64::MAX) - i64::try_from(offset).unwrap_or(i64::MAX);
+        self.scroll_viewport(pane_id, TerminalViewportScroll::Delta(delta));
+    }
+
     /// The pane's prompt rows, read again only when its screen has changed.
     fn cached_prompt_rows(&self, pane_id: PaneId) -> Option<Rc<Vec<usize>>> {
         let pane = self.panes.get(&pane_id)?;
@@ -516,7 +596,8 @@ impl MuxApp {
                 .left(px(rect.x))
                 .top(px(rect.y))
                 .w(px(rect.width - THUMB_GRIP))
-                .h(px(metrics.cell_height + 8.0))
+                .h(px(padding.top + metrics.cell_height))
+                .pt(px(padding.top))
                 .pl(px(padding.left))
                 .pr(px(8.0))
                 .items_center()
@@ -705,6 +786,15 @@ mod tests {
         assert_eq!(failed_status(&endings, 5, 2), None, "it succeeded");
         assert_eq!(failed_status(&endings, 5, 3), Some(2));
         assert_eq!(failed_status(&endings, 5, 4), None, "still at its prompt");
+    }
+
+    #[test]
+    fn the_command_is_what_follows_the_prompt() {
+        assert_eq!(command_of("root@vm:~# echo a > b"), "echo a > b");
+        assert_eq!(command_of("~/src $ cargo test"), "cargo test");
+        assert_eq!(command_of("❯ ls"), "ls");
+        assert_eq!(command_of("ryan@mac src % "), "");
+        assert_eq!(command_of("plain"), "plain");
     }
 
     #[test]

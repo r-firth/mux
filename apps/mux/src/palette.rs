@@ -9,7 +9,9 @@
 //! that matched turn peach. Enter goes there. It opens on the tab you were in
 //! before this one, so ⌘P then enter goes back and forth between two tabs.
 //! Each agent mux can start is there too, but only once something is typed
-//! (`codex`), so agents stay out of the way of the map.
+//! (`codex`), so agents stay out of the way of the map, and so are the
+//! commands run in the pane it opened over (`cargo`): enter scrolls back to
+//! one's prompt.
 
 use super::*;
 use gpui::{HighlightStyle, StyledText};
@@ -41,6 +43,8 @@ pub(super) struct Palette {
     /// Where the pointer last moved, so a list scrolled under a resting
     /// pointer doesn't take the choice away from the keys.
     pointer: Option<gpui::Point<gpui::Pixels>>,
+    /// The commands run in the pane it was opened over, found by typing.
+    ran: Vec<scrollback::CommandRan>,
     _subscription: gpui::Subscription,
 }
 
@@ -52,6 +56,8 @@ enum Destination {
     Command(Command),
     /// One of the agent profiles, by its place in the list.
     Agent(usize),
+    /// A command run in a pane, by its prompt's row.
+    Ran(PaneId, usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,12 +177,14 @@ impl MuxApp {
         window.on_next_frame(move |window, cx| {
             focus.update(cx, |input, cx| input.focus(window, cx));
         });
+        let ran = self.commands_ran();
         self.palette = Some(Palette {
             input,
             query: String::new(),
             selected: None,
             scroll: ScrollHandle::new(),
             pointer: None,
+            ran,
             _subscription: subscription,
         });
         self.mode = InputMode::Normal;
@@ -258,6 +266,7 @@ impl MuxApp {
             }
             Destination::Command(command) => self.run_palette_command(command, window, cx),
             Destination::Agent(index) => self.open_agent_from_palette(index, window, cx),
+            Destination::Ran(pane_id, row) => self.go_to_command(pane_id, row),
         }
         cx.notify();
     }
@@ -430,7 +439,28 @@ impl MuxApp {
             rows.push(row);
         }
         self.push_agent_rows(&mut rows);
+        self.push_command_rows(&mut rows);
         rows
+    }
+
+    /// A row for each command run in the pane the palette opened over,
+    /// found by typing: enter brings its prompt to the top.
+    fn push_command_rows(&self, rows: &mut Vec<Row>) {
+        let Some(palette) = &self.palette else {
+            return;
+        };
+        for ran in &palette.ran {
+            let mut row = Row::new(
+                Destination::Ran(ran.pane_id, ran.row),
+                "ran",
+                ran.command.clone(),
+                3,
+            );
+            row.tone = MUTED_TEXT;
+            row.quiet = true;
+            row.hint = ran.failed.map(|status| (format!("exit {status}"), SIGNAL));
+            rows.push(row);
+        }
     }
 
     /// A row for each agent ⌃a offers: the one already in this tab to go
