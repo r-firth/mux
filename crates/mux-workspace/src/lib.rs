@@ -526,6 +526,7 @@ impl Tab {
     pub fn focus(&mut self, pane_id: PaneId) -> Result<(), WorkspaceError> {
         if self.layout.contains(pane_id) {
             self.focused_pane = pane_id;
+            self.unzoom_for_focus();
             Ok(())
         } else {
             Err(WorkspaceError::UnknownPane(pane_id))
@@ -632,9 +633,21 @@ impl Tab {
             .min_by(|left, right| left.1.total_cmp(&right.1));
         if let Some((pane, _)) = candidate {
             self.focused_pane = pane;
+            self.unzoom_for_focus();
             return Ok(true);
         }
         Ok(false)
+    }
+
+    /// The keys going to a pane the zoom hides would go where nothing
+    /// shows, so the zoom ends, as in Ghostty and iTerm.
+    fn unzoom_for_focus(&mut self) {
+        if self
+            .zoomed_pane
+            .is_some_and(|zoomed| zoomed != self.focused_pane)
+        {
+            self.zoomed_pane = None;
+        }
     }
 }
 
@@ -1467,6 +1480,19 @@ pub enum WorkspaceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focusing_a_pane_the_zoom_hides_ends_the_zoom() {
+        let [left, right] = [PaneId::new(), PaneId::new()];
+        let mut tab = Tab::with_panes("1", &[left]).expect("tab");
+        tab.split_focused(right, SplitAxis::Horizontal)
+            .expect("split");
+        tab.toggle_zoom();
+        tab.focus(right).expect("focus");
+        assert_eq!(tab.zoomed_pane, Some(right), "the zoomed pane keeps it");
+        assert!(tab.focus_neighbor(Direction::Left).expect("focus"));
+        assert_eq!(tab.zoomed_pane, None);
+    }
 
     #[test]
     fn a_closed_pane_hands_the_keys_to_the_pane_that_takes_its_room() {
