@@ -147,7 +147,9 @@ Finder rather than opened.
 A pane out of sight that rings the bell, or sends a desktop notification
 (OSC 9 or OSC 777, as Claude Code and Codex do when they want you), is marked
 until it is looked at. Its tab's dot turns peach with what it said beside the
-name, and in the tab on screen the pane's head says it. While Mux is in the
+name, and in the tab on screen the pane's head says it. A program that ran for
+ten seconds or more and finishes out of sight, such as a build or a test run,
+calls the same way, with how long it took: `cargo done in 3m`. While Mux is in the
 background, the first call also bounces its Dock icon.
 
 ## Closing what is running

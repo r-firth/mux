@@ -505,7 +505,9 @@ impl BackendConnection {
         events: &EventSender,
     ) -> Result<()> {
         match event {
-            event @ (ServerEvent::PaneOutput { .. } | ServerEvent::PaneExited { .. }) => {
+            event @ (ServerEvent::PaneOutput { .. }
+            | ServerEvent::PaneExited { .. }
+            | ServerEvent::PaneCommandFinished { .. }) => {
                 send_event(events, UserEvent::Server(event))
             }
             ServerEvent::ResyncRequired { session_id } => {

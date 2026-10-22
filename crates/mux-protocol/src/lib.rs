@@ -25,8 +25,8 @@ use tokio::task::JoinHandle;
 /// and queued prompts to agent snapshots and events, a remembered title on
 /// each pane attachment, and a workspace command that sets a split's ratio.
 /// Version 9 adds workspace commands that move a tab along the strip and
-/// break a pane out into a tab of its own, and a request for what is running
-/// in a pane besides its shell.
+/// break a pane out into a tab of its own, a request for what is running in
+/// a pane besides its shell, and an event when such a program finishes.
 pub const PROTOCOL_VERSION: u16 = 9;
 /// Request id zero is reserved for latency-sensitive messages whose successful
 /// completion does not require a response.
@@ -232,6 +232,14 @@ pub enum ServerEvent {
     },
     Agent(AgentEvent),
     AgentResyncRequired,
+    /// A program a pane's shell ran has finished and given the terminal
+    /// back to the shell, after running for `seconds`.
+    PaneCommandFinished {
+        session_id: SessionId,
+        pane_id: PaneId,
+        program: String,
+        seconds: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -478,7 +478,8 @@ impl Client {
             event @ (ServerEvent::PaneExited { .. }
             | ServerEvent::WorkspaceChanged { .. }
             | ServerEvent::Agent(_)
-            | ServerEvent::AgentResyncRequired) => Some(event),
+            | ServerEvent::AgentResyncRequired
+            | ServerEvent::PaneCommandFinished { .. }) => Some(event),
         }
     }
 
@@ -507,7 +508,10 @@ fn attachment_supersedes_event(event: &ServerEvent, session_id: SessionId) -> bo
         | ServerEvent::WorkspaceChanged {
             session_id: event_session,
         } => *event_session == session_id,
-        ServerEvent::Agent(_) | ServerEvent::AgentResyncRequired => false,
+        // An attachment says nothing of programs that finished.
+        ServerEvent::Agent(_)
+        | ServerEvent::AgentResyncRequired
+        | ServerEvent::PaneCommandFinished { .. } => false,
     }
 }
 

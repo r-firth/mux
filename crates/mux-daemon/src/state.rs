@@ -97,6 +97,26 @@ impl DaemonState {
             })
     }
 
+    /// Tell each session's clients about programs that have finished in its
+    /// panes since the last look.
+    pub fn announce_finished_commands(&self) {
+        let sessions = self.sessions.read().values().cloned().collect::<Vec<_>>();
+        for session in sessions {
+            let session_id = session.model.read().id;
+            let panes = session.panes.read().values().cloned().collect::<Vec<_>>();
+            for pane in panes {
+                if let Some((program, took)) = pane.take_finished_command() {
+                    let _ = session.events.send(ServerEvent::PaneCommandFinished {
+                        session_id,
+                        pane_id: pane.id,
+                        program,
+                        seconds: took.as_secs(),
+                    });
+                }
+            }
+        }
+    }
+
     /// What these panes run in front of their shells, wherever they are.
     pub fn running_programs(&self, pane_ids: &[PaneId]) -> Vec<RunningProgram> {
         let sessions = self.sessions.read();

@@ -1,6 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use mux_protocol::{
     ClientHello, ClientMessage, CodecError, FrameReader, PROTOCOL_VERSION, Request, Response,
@@ -11,6 +12,9 @@ use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
 use crate::state::DaemonState;
+
+/// How often panes are looked at for programs that have finished.
+const FINISHED_COMMAND_POLL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug)]
 pub struct DaemonConfig {
@@ -56,6 +60,17 @@ impl DaemonServer {
         let listener = UnixListener::bind(&self.config.socket_path)?;
         set_private_socket_permissions(&self.config.socket_path)?;
         info!(socket = %self.config.socket_path.display(), "workspace daemon listening");
+
+        // Programs finishing in a pane are noticed by looking, once a second:
+        // one that prints nothing as it ends says nothing to the output.
+        let watched = Arc::clone(&self.state);
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(FINISHED_COMMAND_POLL);
+            loop {
+                ticks.tick().await;
+                watched.announce_finished_commands();
+            }
+        });
 
         loop {
             let (stream, _) = listener.accept().await?;

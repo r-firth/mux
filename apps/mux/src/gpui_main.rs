@@ -635,6 +635,9 @@ struct MuxApp {
     pane_restart: Option<pane_exit::PaneRestart>,
     /// Panes out of sight that rang or sent a notification, until seen.
     pane_calls: HashMap<PaneId, mux_terminal::Attention>,
+    /// Long programs that have finished since the calls were last gathered,
+    /// with what to say about each.
+    finished_commands: Vec<(PaneId, String)>,
     /// The link under the pointer while ⌘ is held, and where the pointer is.
     link_hover: Option<(PaneId, links::Link)>,
     link_pointer: Option<(PaneId, layout::Rect, gpui::Point<gpui::Pixels>)>,
@@ -798,6 +801,7 @@ impl MuxApp {
             pane_exits: HashMap::new(),
             pane_restart: None,
             pane_calls: HashMap::new(),
+            finished_commands: Vec::new(),
             link_hover: None,
             link_pointer: None,
             selected_pane: None,
@@ -1491,6 +1495,12 @@ impl MuxApp {
                 self.note_agent_turn_end(&event);
             }
             ServerEvent::AgentResyncRequired => self.backend.send(CommandMessage::ListAgents),
+            ServerEvent::PaneCommandFinished {
+                pane_id,
+                program,
+                seconds,
+                ..
+            } => self.note_finished_command(pane_id, &program, seconds),
         }
         Ok(())
     }

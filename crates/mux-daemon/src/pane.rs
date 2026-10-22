@@ -193,6 +193,13 @@ pub struct PaneRuntime {
     /// The window title from the pane's output, for clients that attach
     /// after the program set it.
     title: Arc<Mutex<TitleScanner>>,
+    /// The program in front of the shell when last looked, and since when.
+    foreground_command: Mutex<Option<ForegroundCommand>>,
+}
+
+struct ForegroundCommand {
+    since: Instant,
+    name: String,
 }
 
 impl PaneRuntime {
@@ -274,6 +281,7 @@ impl PaneRuntime {
             exit_status,
             process_id,
             title,
+            foreground_command: Mutex::new(None),
         }))
     }
 
@@ -329,22 +337,35 @@ impl PaneRuntime {
         if Some(foreground) == self.process_id {
             return None;
         }
-        let pid = Pid::from_u32(foreground);
-        let mut system = System::new();
-        system.refresh_processes_specifics(
-            ProcessesToUpdate::Some(&[pid]),
-            true,
-            ProcessRefreshKind::nothing(),
-        );
-        let name = system
-            .process(pid)
-            .map(|process| process.name().to_string_lossy().into_owned())
-            .unwrap_or_default();
-        Some(if name.is_empty() {
-            "a program".to_owned()
+        Some(process_name(foreground))
+    }
+
+    /// Look at what is in front of the shell. When a program the shell ran
+    /// has handed the terminal back since the last look, say which and how
+    /// long it ran. A pipeline or a program that starts others counts as the
+    /// one it started with.
+    pub fn take_finished_command(&self) -> Option<(String, Duration)> {
+        let shell = self.process_id?;
+        let foreground = if self.exit_status.lock().is_some() {
+            None
         } else {
-            name
-        })
+            foreground_process_id(&self.master)
+        };
+        let mut command = self.foreground_command.lock();
+        match foreground {
+            Some(process_id) if process_id != shell => {
+                if command.is_none() {
+                    *command = Some(ForegroundCommand {
+                        since: Instant::now(),
+                        name: process_name(process_id),
+                    });
+                }
+                None
+            }
+            _ => command
+                .take()
+                .map(|finished| (finished.name, finished.since.elapsed())),
+        }
     }
 
     /// Ask the operating system for the shell process's live working
@@ -432,6 +453,22 @@ fn spawn_reader(
         .name(format!("mux-pane-output-{pane_id}"))
         .spawn(move || output.run(&output_receiver))?;
     Ok(())
+}
+
+/// A process's name as the system knows it, or a stand-in when it has none.
+fn process_name(process_id: u32) -> String {
+    let pid = Pid::from_u32(process_id);
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    system
+        .process(pid)
+        .map(|process| process.name().to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "a program".to_owned())
 }
 
 #[cfg(unix)]
