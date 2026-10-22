@@ -387,7 +387,8 @@ A bell in the pane you are looking at flashes it for a moment in the tab's
 ink instead.
 
 `Cmd+J` goes to the pane that called last and hasn't been looked at, in
-whatever tab it is, so the agent asking for you is one key away.
+whatever tab it is, or failing that to an agent in another tab waiting for
+you to allow something, so whatever is asking for you is one key away.
 
 A program that reports its progress with OSC 9;4, as Ghostty shows, gets a
 thin bar along the top of its pane: the tab's ink while it goes, peach when

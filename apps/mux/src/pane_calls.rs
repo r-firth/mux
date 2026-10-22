@@ -17,8 +17,8 @@
 //! A bell in the pane you are looking at has nothing to mark, so the pane
 //! flashes instead, washed for a moment in its tab's ink.
 //!
-//! Cmd+J goes to the pane that called last, in whatever tab, so an agent
-//! asking for you is one key away.
+//! Cmd+J goes to the pane that called last, in whatever tab, or to an
+//! agent waiting on you, so whatever is asking for you is one key away.
 
 use super::*;
 use mux_terminal::Attention;
@@ -116,35 +116,53 @@ impl MuxApp {
     }
 
     /// Go to the pane that called last and has not been looked at since,
-    /// in whatever tab it is.
+    /// in whatever tab it is; failing that, to an agent in another tab
+    /// waiting for you to allow something or sign in.
     pub(super) fn go_to_call(&mut self, cx: &mut Context<Self>) {
         let calls = &self.pane_calls;
         self.call_order
             .retain(|pane_id| calls.contains_key(pane_id));
         let here = self.terminal_input_pane_id();
-        let Some(pane_id) = self
+        let called = self
             .call_order
             .iter()
             .rev()
             .copied()
             .find(|pane_id| Some(*pane_id) != here)
-        else {
-            self.say_in_strip("no pane is calling", false, cx);
+            .and_then(|pane_id| {
+                let tab = self
+                    .session
+                    .as_ref()?
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.layout.contains(pane_id))?;
+                Some((tab.id, Some(pane_id)))
+            });
+        let active = self.active_tab_id();
+        let target = called.or_else(|| {
+            let tab_id = self
+                .agents
+                .iter()
+                .filter(|agent| {
+                    matches!(
+                        agent.status,
+                        AgentSessionStatus::WaitingForPermission
+                            | AgentSessionStatus::WaitingForAuthentication
+                    )
+                })
+                .find_map(|agent| agent.tab_id.filter(|tab_id| Some(*tab_id) != active))?;
+            Some((tab_id, self.agent_panes.get(&tab_id).copied()))
+        });
+        let Some((tab_id, pane_id)) = target else {
+            self.say_in_strip("nothing is calling", false, cx);
             return;
         };
-        let tab_id = self.session.as_ref().and_then(|session| {
-            session
-                .tabs
-                .iter()
-                .find(|tab| tab.layout.contains(pane_id))
-                .map(|tab| tab.id)
-        });
-        if let Some(tab_id) = tab_id
-            && Some(tab_id) != self.active_tab_id()
-        {
+        if Some(tab_id) != active {
             self.send_workspace(WorkspaceCommand::SelectTab(tab_id));
         }
-        self.request_pane_focus(pane_id);
+        if let Some(pane_id) = pane_id {
+            self.request_pane_focus(pane_id);
+        }
         cx.notify();
     }
 
