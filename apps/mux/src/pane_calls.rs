@@ -64,6 +64,7 @@ impl MuxApp {
         let mut changed = false;
         let mut rung = None;
         let mut called = Vec::new();
+        let mut notices = Vec::new();
         let watched_too = command_finish_notice().watched_too;
         let heed_notifications = desktop_notifications();
         for (pane_id, words) in std::mem::take(&mut self.finished_commands) {
@@ -96,6 +97,9 @@ impl MuxApp {
                 (previous, call) => {
                     fresh |= previous.is_none();
                     changed |= previous != Some(&call);
+                    if let Attention::Notification(said) = &call {
+                        notices.push((*pane_id, said.clone()));
+                    }
                     self.pane_calls.insert(*pane_id, call);
                     called.push(*pane_id);
                 }
@@ -106,6 +110,16 @@ impl MuxApp {
         }
         if fresh {
             window.request_attention();
+        }
+        if !window.is_window_active() {
+            for (pane_id, said) in notices {
+                let title = self
+                    .pane_name(pane_id)
+                    .map(ToOwned::to_owned)
+                    .or_else(|| self.panes.get(&pane_id)?.head_title())
+                    .unwrap_or_else(|| "Mux".to_owned());
+                desktop_notice::post(&title, &said);
+            }
         }
         if let Some(pane_id) = rung {
             self.flash_bell(pane_id, cx);

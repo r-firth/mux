@@ -451,7 +451,9 @@ calls the same way, with how long it took: `cargo done in 3m`, or
 as Mux starts them). Ghostty's `notify-on-command-finish-after` sets how
 long counts as long (`30s`, `1m30s`), and `notify-on-command-finish` turns
 it off (`never`) or on for the pane you are looking at too (`always`).
-While Mux is in the background, the first call also bounces its Dock icon.
+While Mux is in the background, the first call also bounces its Dock icon,
+and a program's notification shows in Notification Center as Ghostty's do,
+titled for its pane.
 A bell in the pane you are looking at flashes it for a moment in the tab's
 ink instead. Ghostty's `desktop-notifications = false` leaves programs'
 notifications unheeded; bells and finished commands still call.

@@ -10,6 +10,7 @@ mod backend;
 mod chrome;
 mod cursor_blink;
 mod cursor_click;
+mod desktop_notice;
 mod early_typing;
 mod file_drop;
 mod find;
