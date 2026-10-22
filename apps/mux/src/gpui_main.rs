@@ -812,8 +812,8 @@ struct MuxApp {
     /// goes ahead.
     paste_armed: Option<(u64, Instant)>,
     /// A program's clipboard read waiting on a ⌘V: the pane, the clipboard
-    /// it named, and when it asked.
-    clipboard_read_asked: Option<(PaneId, String, Instant)>,
+    /// it named, and the strip message that asks.
+    clipboard_read_asked: Option<(PaneId, String, u64)>,
     /// When Mux last closed a pane or tab, for ⌘Z to bring it back.
     closed_at: Option<Instant>,
     /// What was last selected with the pointer, for ⌘⇧V.
@@ -2431,8 +2431,8 @@ impl MuxApp {
             ClipboardRead::Allow => self.give_clipboard(pane_id, &place, cx),
             ClipboardRead::Deny => {}
             ClipboardRead::Ask => {
-                self.clipboard_read_asked = Some((pane_id, place, Instant::now()));
                 self.say_in_strip("a program asks for the clipboard · ⌘v gives it", true, cx);
+                self.clipboard_read_asked = Some((pane_id, place, self.strip_serial));
             }
         }
     }
@@ -2452,14 +2452,18 @@ impl MuxApp {
         self.say_in_strip("a program read the clipboard", false, cx);
     }
 
-    /// A ⌘V soon after a program asked to read the clipboard hands it over
-    /// instead of pasting. Returns whether it did.
+    /// A ⌘V while the strip still asks hands the clipboard to the program
+    /// that asked, instead of pasting. Returns whether it did.
     fn answer_asked_clipboard_read(&mut self, cx: &mut Context<Self>) -> bool {
-        const ASK_WINDOW: Duration = Duration::from_secs(15);
-        let Some((pane_id, place, _)) =
-            self.clipboard_read_asked.take().filter(|(pane_id, _, at)| {
-                at.elapsed() < ASK_WINDOW && self.panes.contains_key(pane_id)
-            })
+        let asking = |serial: u64| {
+            self.strip_message
+                .as_ref()
+                .is_some_and(|message| message.serial == serial)
+        };
+        let Some((pane_id, place, _)) = self
+            .clipboard_read_asked
+            .take()
+            .filter(|(pane_id, _, serial)| asking(*serial) && self.panes.contains_key(pane_id))
         else {
             return false;
         };

@@ -377,7 +377,7 @@ and programs over ssh do; the strip says how many lines it copied.
 `clipboard-write = deny` in your Ghostty config stops it. Reading the
 clipboard that way, as Neovim's OSC 52 paste does, is asked about first,
 as in Ghostty: the strip says a program asks for the clipboard, and `Cmd+V`
-within a few seconds gives it instead of pasting. `clipboard-read = allow`
+while it says so gives it instead of pasting. `clipboard-read = allow`
 gives it without asking and `deny` never does.
 
 ## Selecting
