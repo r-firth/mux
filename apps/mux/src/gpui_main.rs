@@ -453,10 +453,13 @@ fn copy_on_select() -> bool {
 /// Ghostty makes them with `adjust-cell-height`.
 fn terminal_metrics(font_family: &str, size: f32, cx: &App) -> GridMetrics {
     static ADJUST: OnceLock<mux_terminal_ghostty::CellAdjust> = OnceLock::new();
+    static PADDING: OnceLock<(f32, f32)> = OnceLock::new();
     let mut metrics = GridMetrics::from_font(font_family, size, cx.text_system());
     metrics.cell_height = ADJUST
         .get_or_init(mux_terminal_ghostty::user_cell_height_adjust)
         .apply(metrics.cell_height);
+    (metrics.padding_x, metrics.padding_y) =
+        *PADDING.get_or_init(mux_terminal_ghostty::user_window_padding);
     metrics
 }
 

@@ -210,6 +210,54 @@ fn parse_unfocused_split_opacity(contents: &str, opacity: &mut f32) {
     }
 }
 
+/// The space between a pane's edges and its text, in points:
+/// `window-padding-x` and `window-padding-y` from the user's Ghostty config,
+/// 2 each by default as in Ghostty. Mux pads both sides alike, so a
+/// `left,right` pair gives the larger of the two.
+#[must_use]
+pub fn user_window_padding() -> (f32, f32) {
+    let mut padding = (DEFAULT_WINDOW_PADDING, DEFAULT_WINDOW_PADDING);
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_window_padding(&contents, &mut padding);
+            }
+        }
+    }
+    padding
+}
+
+const DEFAULT_WINDOW_PADDING: f32 = 2.0;
+
+fn parse_window_padding(contents: &str, padding: &mut (f32, f32)) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        let axis = match key.as_str() {
+            "window-padding-x" => &mut padding.0,
+            "window-padding-y" => &mut padding.1,
+            _ => continue,
+        };
+        if value.is_empty() {
+            *axis = DEFAULT_WINDOW_PADDING;
+            continue;
+        }
+        let sides: Option<Vec<f32>> = value
+            .split(',')
+            .map(|side| {
+                side.trim()
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|side| side.is_finite())
+            })
+            .collect();
+        if let Some(widest) = sides
+            .filter(|sides| (1..=2).contains(&sides.len()))
+            .and_then(|sides| sides.into_iter().reduce(f32::max))
+        {
+            *axis = widest.clamp(0.0, 200.0);
+        }
+    }
+}
+
 /// Whether a program may copy to the clipboard with OSC 52:
 /// `clipboard-write` from the user's Ghostty config, allowed by default as in
 /// Ghostty. Mux has no prompt to ask with, so `ask` allows it, and the strip
@@ -3135,6 +3183,23 @@ mod theme_tests {
         assert_eq!(style, CursorStyle::HollowBlock);
         parse_cursor_style("cursor-style = underline\ncursor-style =\n", &mut style);
         assert_eq!(style, CursorStyle::Block);
+    }
+
+    #[test]
+    fn window_padding_takes_the_wider_side_of_a_pair() {
+        let mut padding = (DEFAULT_WINDOW_PADDING, DEFAULT_WINDOW_PADDING);
+        parse_window_padding(
+            "window-padding-x = 10\nwindow-padding-y = 4,12\n",
+            &mut padding,
+        );
+        assert_eq!(padding, (10.0, 12.0));
+        parse_window_padding(
+            "window-padding-x = wide\nwindow-padding-y = 1,2,3\n",
+            &mut padding,
+        );
+        assert_eq!(padding, (10.0, 12.0), "what is not a padding is ignored");
+        parse_window_padding("window-padding-x = -5\nwindow-padding-y =\n", &mut padding);
+        assert_eq!(padding, (0.0, DEFAULT_WINDOW_PADDING));
     }
 
     #[test]
