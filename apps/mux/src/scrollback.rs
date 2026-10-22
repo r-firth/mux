@@ -937,7 +937,9 @@ impl MuxApp {
                 let words = ending_words(ending).unwrap_or_default();
                 // The bar is slim; the area that takes the pointer is wider.
                 div()
-                    .id(("failure-mark", prompt))
+                    .id(SharedString::from(format!(
+                        "failure-mark-{pane_id}-{prompt}"
+                    )))
                     .absolute()
                     .left(px(rect.x + (padding.left - 7.0).max(0.0)))
                     .top(px(rect.y + padding.top + height * row as f32))
