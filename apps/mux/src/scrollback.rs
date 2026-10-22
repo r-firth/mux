@@ -883,6 +883,16 @@ impl MuxApp {
                 .whitespace_nowrap()
                 .hover(|style| style.text_color(color(TEXT)))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                // A right click offers what the pane's menu offers on the
+                // command: copying it, its output, or both.
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.open_command_menu(pane_id, rect, row, event.position);
+                        cx.notify();
+                    }),
+                )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if this.scroll_viewport(pane_id, TerminalViewportScroll::Delta(delta)) {
                         this.flash_prompt(pane_id, row, cx);

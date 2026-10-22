@@ -88,6 +88,22 @@ impl MuxApp {
         });
     }
 
+    /// The pane's menu for the command run from the prompt at history row
+    /// `prompt`, as a right click on its pinned line opens it.
+    pub(super) fn open_command_menu(
+        &mut self,
+        pane_id: PaneId,
+        rect: layout::Rect,
+        prompt: usize,
+        position: gpui::Point<gpui::Pixels>,
+    ) {
+        self.open_pane_menu(pane_id, rect, position);
+        if let Some(menu) = &mut self.pane_menu {
+            menu.link = None;
+            menu.command = Some(prompt);
+        }
+    }
+
     /// A tab's menu, by its chip: what the Tab mode keys do to it. The tab
     /// is shown first, so the menu acts on what is on screen.
     pub(super) fn open_tab_menu(&mut self, tab_id: TabId, position: gpui::Point<gpui::Pixels>) {

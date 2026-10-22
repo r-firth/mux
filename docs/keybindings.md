@@ -278,7 +278,8 @@ tick beside its scroll thumb marks each prompt in its history, orange for
 a command that failed, and when the view starts partway through a
 command's output, that command's prompt line stays pinned to the top of the
 pane, with `exit 2` beside it if it failed and how long it ran if that was
-a second or more; click it to go to the prompt.
+a second or more; click it to go to the prompt, or right-click it to copy
+the command, its output, or both.
 
 A command that failed also gets a slim peach bar in the left margin beside
 its prompt, as iTerm marks them, so a failure among many commands stands
