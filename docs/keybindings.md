@@ -469,7 +469,8 @@ pane's first, newest first and each once, with `exit 2` beside one that
 failed, how long each ran and, for another pane's, where (`exit 2 · 3m ·
 tab 3`): `cargo t` then Return goes to where `cargo test` was run, in
 whatever tab, and Shift+Return types it at the prompt instead, to run
-again or change first.
+again or change first. Typing `failed` lists the commands that failed, newest
+first.
 When nothing matches, the one row left finds what you typed in the pane
 with the keys, as `Cmd+F` would.
 

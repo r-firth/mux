@@ -544,6 +544,10 @@ impl MuxApp {
             } else {
                 FAINT_TEXT
             };
+            // `failed` lists every command that failed, wherever it ran.
+            if ran.ending.failed().is_some() {
+                row.also = "failed exit error".to_owned();
+            }
             let words = scrollback::ending_words(ran.ending);
             row.hint = match (words, &ran.place) {
                 (Some(words), Some(place)) => Some((format!("{words} · {place}"), tone)),
