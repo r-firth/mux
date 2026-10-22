@@ -179,6 +179,26 @@ impl PaneLayout {
         Ok(())
     }
 
+    /// The pane that takes `target`'s room when it closes: of the panes
+    /// beside it in its split, the one nearest it.
+    #[must_use]
+    pub fn heir(&self, target: PaneId) -> Option<PaneId> {
+        let Self::Split { first, second, .. } = self else {
+            return None;
+        };
+        let nearest = |side: &Self, last: bool| {
+            let mut panes = Vec::new();
+            side.pane_ids(&mut panes);
+            if last { panes.last() } else { panes.first() }.copied()
+        };
+        match (first.as_ref(), second.as_ref()) {
+            (Self::Leaf(pane), _) if *pane == target => nearest(second, false),
+            (_, Self::Leaf(pane)) if *pane == target => nearest(first, true),
+            _ if first.contains(target) => first.heir(target),
+            _ => second.heir(target),
+        }
+    }
+
     pub fn remove(&mut self, target: PaneId) -> Result<(), WorkspaceError> {
         match self {
             Self::Leaf(_) => Err(WorkspaceError::CannotCloseLastPane),
@@ -501,10 +521,12 @@ impl Tab {
 
     pub fn close_focused(&mut self) -> Result<PaneId, WorkspaceError> {
         let removed = self.focused_pane;
+        let heir = self.layout.heir(removed);
         self.layout.remove(removed)?;
         let mut remaining = Vec::new();
         self.layout.pane_ids(&mut remaining);
-        self.focused_pane = remaining[0];
+        // The keys go to the pane that takes its room, as in Ghostty.
+        self.focused_pane = heir.unwrap_or(remaining[0]);
         self.zoomed_pane = None;
         Ok(removed)
     }
@@ -1417,6 +1439,23 @@ pub enum WorkspaceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_closed_pane_hands_the_keys_to_the_pane_that_takes_its_room() {
+        let [left, top, bottom] = [PaneId::new(), PaneId::new(), PaneId::new()];
+        let mut tab = Tab::with_panes("1", &[left]).expect("tab");
+        tab.split_focused(top, SplitAxis::Horizontal)
+            .expect("split");
+        tab.split_focused(bottom, SplitAxis::Vertical)
+            .expect("split");
+        assert_eq!(tab.close_focused().expect("close"), bottom);
+        assert_eq!(tab.focused_pane, top, "not the first pane, on the left");
+        tab.split_focused(bottom, SplitAxis::Vertical)
+            .expect("split");
+        tab.focus(left).expect("focus");
+        tab.close_focused().expect("close");
+        assert_eq!(tab.focused_pane, top, "the nearer of the two on the right");
+    }
 
     #[test]
     fn two_panes_have_stable_order_and_focus() {
