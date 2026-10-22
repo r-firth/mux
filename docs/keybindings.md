@@ -114,8 +114,9 @@ This keeps foreground Control-key input untouched except for `Ctrl+p` and
 ## Scrollback
 
 The wheel or trackpad moves through a pane's history; a thin thumb on the
-pane's right edge shows where while it is scrolled back. Typing returns the
-pane to its latest output.
+pane's right edge shows where while it is scrolled back. Drag the thumb to
+move through the history, or click above or below it to jump there. Typing
+returns the pane to its latest output.
 
 A pane keeps as much history as your Ghostty does: the `scrollback-limit` in
 its config, or Ghostty's own 10 MB, which is several thousand rows (more in a

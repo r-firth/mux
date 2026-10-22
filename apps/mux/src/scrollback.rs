@@ -4,7 +4,8 @@
 //! with page up and page down go a page at a time. Typing anything returns a
 //! pane to its latest output, as in Ghostty, so what is typed is never sent
 //! somewhere out of sight. While a pane is scrolled back, a thin thumb on its
-//! right edge says where in its history it is.
+//! right edge says where in its history it is; drag it to move through the
+//! history, or click above or below it to jump there.
 
 use super::*;
 use mux_terminal::TerminalScrollState;
@@ -35,6 +36,37 @@ fn scrollback_key(
     }
 }
 
+/// How far in from the pane's right edge the thumb can be grabbed: wider
+/// than the thumb, which is slim to stay out of the way.
+const THUMB_GRIP: f32 = 14.0;
+const THUMB_INSET: f32 = 6.0;
+
+/// A held thumb: where its track is in the window, and where on the thumb
+/// the pointer took it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct ThumbDrag {
+    pane_id: PaneId,
+    track_top: f32,
+    track: f32,
+    grab: f32,
+}
+
+/// The history row the view starts at with the thumb's top `top` down a
+/// track `track` tall.
+fn offset_for_thumb(scroll: TerminalScrollState, track: f32, top: f32) -> u64 {
+    let (height, _) = thumb_geometry(scroll, track);
+    let travel = scroll.total.saturating_sub(scroll.len);
+    let room = (track - height).max(1.0);
+    let fraction = (top / room).clamp(0.0, 1.0);
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let offset = (fraction * travel as f32).round() as u64;
+    offset.min(travel)
+}
+
 /// The thumb's height and its offset from the top of a track `track` tall.
 fn thumb_geometry(scroll: TerminalScrollState, track: f32) -> (f32, f32) {
     let total = scroll.total.max(1) as f32;
@@ -46,6 +78,82 @@ fn thumb_geometry(scroll: TerminalScrollState, track: f32) -> (f32, f32) {
 }
 
 impl MuxApp {
+    /// A press on a pane's right edge while its thumb shows: take the thumb,
+    /// or, off it, jump so the thumb sits under the pointer and take it
+    /// there. Returns whether the press was the thumb's.
+    pub(super) fn grab_scroll_thumb(
+        &mut self,
+        pane_id: PaneId,
+        body: layout::Rect,
+        event: &gpui::MouseDownEvent,
+    ) -> bool {
+        let (x, y) = (f32::from(event.position.x), f32::from(event.position.y));
+        if event.button != gpui::MouseButton::Left
+            || x < body.x + body.width - THUMB_GRIP
+            || !self.scroll_thumb_shown(pane_id)
+        {
+            return false;
+        }
+        let Some(scroll) = self.panes.get(&pane_id).map(|pane| pane.frame.scroll) else {
+            return false;
+        };
+        let track_top = body.y + THUMB_INSET;
+        let track = body.height - THUMB_INSET * 2.0;
+        let (height, top) = thumb_geometry(scroll, track);
+        let at = y - track_top;
+        let grab = if (top..=top + height).contains(&at) {
+            at - top
+        } else {
+            height / 2.0
+        };
+        self.request_pane_focus(pane_id);
+        self.thumb_drag = Some(ThumbDrag {
+            pane_id,
+            track_top,
+            track,
+            grab,
+        });
+        self.drag_scroll_thumb(event.position);
+        true
+    }
+
+    /// The held thumb follows the pointer. Returns whether one is held.
+    pub(super) fn drag_scroll_thumb(&mut self, position: gpui::Point<gpui::Pixels>) -> bool {
+        let Some(drag) = self.thumb_drag else {
+            return false;
+        };
+        let Some(scroll) = self.panes.get(&drag.pane_id).map(|pane| pane.frame.scroll) else {
+            self.thumb_drag = None;
+            return false;
+        };
+        let top = f32::from(position.y) - drag.track_top - drag.grab;
+        let target = offset_for_thumb(scroll, drag.track, top);
+        if target != scroll.offset {
+            #[allow(clippy::cast_possible_wrap)]
+            let delta = target as i64 - scroll.offset as i64;
+            self.scroll_viewport(drag.pane_id, TerminalViewportScroll::Delta(delta));
+        }
+        true
+    }
+
+    /// Let go of the thumb. Returns whether one was held.
+    pub(super) fn release_scroll_thumb(&mut self) -> bool {
+        self.thumb_drag.take().is_some()
+    }
+
+    fn scroll_thumb_shown(&self, pane_id: PaneId) -> bool {
+        let Some(scroll) = self.panes.get(&pane_id).map(|pane| pane.frame.scroll) else {
+            return false;
+        };
+        let finding = self
+            .find
+            .as_ref()
+            .is_some_and(|find| find.pane_id == pane_id)
+            && scroll.total > scroll.len;
+        let held = self.thumb_drag.is_some_and(|drag| drag.pane_id == pane_id);
+        scroll.is_scrolled() || finding || held
+    }
+
     /// A history key typed into the pane with the keys. Returns whether the
     /// key was one.
     pub(super) fn scrollback_key_down(
@@ -110,26 +218,25 @@ impl MuxApp {
         geometry: layout::PaneGeometry,
     ) -> Option<gpui::AnyElement> {
         let scroll = self.panes.get(&geometry.pane_id)?.frame.scroll;
-        let finding = self
-            .find
-            .as_ref()
-            .is_some_and(|find| find.pane_id == geometry.pane_id)
-            && scroll.total > scroll.len;
-        if !scroll.is_scrolled() && !finding {
+        if !self.scroll_thumb_shown(geometry.pane_id) {
             return None;
         }
+        let held = self
+            .thumb_drag
+            .is_some_and(|drag| drag.pane_id == geometry.pane_id);
         let rect = geometry.surface();
-        let inset = 6.0;
-        let (height, top) = thumb_geometry(scroll, rect.height - inset * 2.0);
+        let (height, top) = thumb_geometry(scroll, rect.height - THUMB_INSET * 2.0);
+        // Held, it fills out a little and brightens, so it reads as taken.
+        let width = if held { 5.0 } else { 3.0 };
         Some(
             div()
                 .absolute()
-                .left(px(rect.x + rect.width - 7.0))
-                .top(px(rect.y + inset + top))
-                .w(px(3.0))
+                .left(px(rect.x + rect.width - 4.0 - width))
+                .top(px(rect.y + THUMB_INSET + top))
+                .w(px(width))
                 .h(px(height))
                 .rounded_full()
-                .bg(color(MUTED_TEXT).opacity(0.38))
+                .bg(color(MUTED_TEXT).opacity(if held { 0.7 } else { 0.38 }))
                 .into_any_element(),
         )
     }
@@ -195,5 +302,22 @@ mod tests {
             400.0,
         );
         assert!((height - 24.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_dragged_thumb_puts_the_view_where_it_is() {
+        let scroll = TerminalScrollState {
+            total: 400,
+            offset: 0,
+            len: 40,
+        };
+        // A 40-row view of 400 on a 400-point track: a 40-point thumb with
+        // 360 points to travel, a row for each point.
+        assert_eq!(offset_for_thumb(scroll, 400.0, 0.0), 0);
+        assert_eq!(offset_for_thumb(scroll, 400.0, 180.0), 180);
+        assert_eq!(offset_for_thumb(scroll, 400.0, 360.0), 360);
+        // Past either end it stops there.
+        assert_eq!(offset_for_thumb(scroll, 400.0, -50.0), 0);
+        assert_eq!(offset_for_thumb(scroll, 400.0, 900.0), 360);
     }
 }

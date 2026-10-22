@@ -671,6 +671,7 @@ struct MuxApp {
     palette: Option<palette::Palette>,
     find: Option<find::PaneFind>,
     seam_drag: Option<seams::SeamDrag>,
+    thumb_drag: Option<scrollback::ThumbDrag>,
     seam_pointer: Option<seams::SeamPointer>,
     seam_settle: Option<seams::SeamSettle>,
     layout_motion: motion::LayoutMotion,
@@ -853,6 +854,7 @@ impl MuxApp {
             palette: None,
             find: None,
             seam_drag: None,
+            thumb_drag: None,
             seam_pointer: None,
             seam_settle: None,
             layout_motion: motion::LayoutMotion::default(),
@@ -3515,7 +3517,7 @@ impl MuxApp {
         if event.pressed_button.is_none() && self.end_missed_release(event) {
             return true;
         }
-        if self.drag_seam(event) {
+        if self.drag_seam(event) || self.drag_scroll_thumb(event.position) {
             return true;
         }
         if let Some(capture) = self.mouse_reporting {
@@ -3545,7 +3547,7 @@ impl MuxApp {
     /// whatever was held, as the release would have. Returns whether
     /// anything was.
     fn end_missed_release(&mut self, event: &gpui::MouseMoveEvent) -> bool {
-        let mut ended = self.end_seam_drag();
+        let mut ended = self.end_seam_drag() | self.release_scroll_thumb();
         if let Some(capture) = self.mouse_reporting.take() {
             let _ = self.report_mouse_event(
                 capture.pane_id,
@@ -3577,6 +3579,7 @@ impl MuxApp {
         if self.mouse_reporting.is_some()
             || self.selection_drag.is_some()
             || self.seam_dragging()
+            || self.thumb_drag.is_some()
             || event.modifiers.shift
         {
             return false;
@@ -3593,7 +3596,9 @@ impl MuxApp {
     }
 
     fn pointer_up(&mut self, event: &gpui::MouseUpEvent) -> bool {
-        if event.button == gpui::MouseButton::Left && self.end_seam_drag() {
+        if event.button == gpui::MouseButton::Left
+            && (self.end_seam_drag() || self.release_scroll_thumb())
+        {
             return true;
         }
         if let Some(capture) = self.mouse_reporting.take() {
@@ -4844,6 +4849,10 @@ impl MuxApp {
             })
             .on_any_mouse_down(move |event, window, cx| {
                 let _ = pointer_app.update(cx, |this, cx| {
+                    if this.grab_scroll_thumb(pane_id, body, event) {
+                        cx.notify();
+                        return;
+                    }
                     if this.open_link_under(pane_id, rect, event, cx) {
                         return;
                     }
