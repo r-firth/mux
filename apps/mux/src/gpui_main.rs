@@ -665,6 +665,9 @@ struct MuxApp {
     /// A close that found something running, and when: closing the same
     /// thing again soon after goes ahead.
     close_armed: Option<(CloseTarget, Instant)>,
+    /// A paste that would run lines, and when: pasting it again soon after
+    /// goes ahead.
+    paste_armed: Option<(u64, Instant)>,
     /// The focused pane's size shows in its head while sizes are changing
     /// (and in resize mode), then gets out of the way.
     size_readout: bool,
@@ -853,6 +856,7 @@ impl MuxApp {
             bell_flash: None,
             bell_serial: 0,
             close_armed: None,
+            paste_armed: None,
             pane_menu: None,
             size_readout: false,
             size_readout_pending: false,
@@ -2089,6 +2093,9 @@ impl MuxApp {
             && let Some(pane) = self.panes.get(&pane_id)
             && let Ok(bytes) = pane.with_engine(|engine| engine.encode_paste(&text))
         {
+            if self.hold_unsafe_paste(&text, &bytes, cx) {
+                return;
+            }
             self.write_focused(bytes);
             self.return_to_latest(pane_id, cx);
             // A synced tab's other panes get the paste too, each as it
@@ -2104,6 +2111,39 @@ impl MuxApp {
                 }
             }
         }
+    }
+
+    /// A paste with a line break, into a program that hasn't asked for
+    /// bracketed pastes, runs each line as it lands, as Ghostty warns.
+    /// The first ⌘V says so and the second within a few seconds goes
+    /// ahead. Returns whether the paste is held.
+    fn hold_unsafe_paste(&mut self, text: &str, bytes: &[u8], cx: &mut Context<Self>) -> bool {
+        if !paste_runs_lines(text, bytes) || !paste_protection() {
+            return false;
+        }
+        let key = {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut hasher);
+            hasher.finish()
+        };
+        if self
+            .paste_armed
+            .take()
+            .is_some_and(|(armed, at)| armed == key && at.elapsed() < CLOSE_AGAIN_WINDOW)
+        {
+            self.strip_message = None;
+            return false;
+        }
+        self.paste_armed = Some((key, Instant::now()));
+        let lines = text.trim_end_matches('\n').lines().count().max(1);
+        let said = if lines == 1 {
+            "this paste ends in a line break, so it would run · ⌘v again to paste".to_owned()
+        } else {
+            format!("this paste would run {lines} lines · ⌘v again to paste")
+        };
+        self.say_in_strip(said, true, cx);
+        true
     }
 
     fn send_terminal_key_to(
@@ -5863,6 +5903,20 @@ fn terminal_key_event(
     }
 }
 
+/// Whether pastes that would run commands wait for a second ⌘V, as the
+/// user's Ghostty has it.
+fn paste_protection() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(mux_terminal_ghostty::user_paste_protection)
+}
+
+/// Whether pasting `text`, encoded as `bytes`, would run something: it
+/// breaks a line and the program hasn't asked for bracketed pastes, which
+/// would hold it as one piece of text.
+fn paste_runs_lines(text: &str, bytes: &[u8]) -> bool {
+    text.contains(['\n', '\r']) && !bytes.starts_with(b"\x1b[200~")
+}
+
 /// Whether Option is Meta for the shell, as the user's Ghostty has it.
 fn option_as_alt() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -6501,8 +6555,8 @@ mod tests {
         agent_session_is_visible, agent_tab_activity, agent_tab_activity_label,
         command_needs_agent, format_agent_context_usage, format_session_pane_count,
         input_position_at, layout, option_as_meta, or_list, pane_needs_live_frame, pane_parser,
-        reconcile_pane_replicas, strip_wording, take_terminal_key_release, terminal_frame_text,
-        terminal_input_pane, terminal_key_down_target, terminal_key_event,
+        paste_runs_lines, reconcile_pane_replicas, strip_wording, take_terminal_key_release,
+        terminal_frame_text, terminal_input_pane, terminal_key_down_target, terminal_key_event,
         terminal_sizes_for_geometry, terminal_tab_keystroke,
     };
     use mux_acp::AgentSessionStatus;
@@ -6715,6 +6769,19 @@ mod tests {
             Some(clicked)
         );
         assert_eq!(terminal_input_pane(None, Some(focused)), Some(focused));
+    }
+
+    #[test]
+    fn a_paste_runs_lines_only_outside_bracketed_paste() {
+        let mut engine = GhosttyEngine::new(TerminalSize::default()).expect("new terminal");
+        let plain = engine.encode_paste("ls\nrm -rf x").expect("encode");
+        assert!(paste_runs_lines("ls\nrm -rf x", &plain));
+        assert!(!paste_runs_lines("just words", &plain));
+        engine
+            .apply_output(1, b"\x1b[?2004h")
+            .expect("bracketed paste on");
+        let bracketed = engine.encode_paste("ls\nrm -rf x").expect("encode");
+        assert!(!paste_runs_lines("ls\nrm -rf x", &bracketed));
     }
 
     #[test]

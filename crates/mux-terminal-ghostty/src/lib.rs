@@ -143,6 +143,34 @@ pub fn user_option_as_alt() -> bool {
     enabled
 }
 
+/// Whether a paste that would run commands is held for a second ⌘V:
+/// `clipboard-paste-protection` from the user's Ghostty config, on by
+/// default as in Ghostty.
+#[must_use]
+pub fn user_paste_protection() -> bool {
+    let mut enabled = true;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_paste_protection(&contents, &mut enabled);
+            }
+        }
+    }
+    enabled
+}
+
+fn parse_paste_protection(contents: &str, enabled: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "clipboard-paste-protection" {
+            match value.as_str() {
+                "" | "true" => *enabled = true,
+                "false" => *enabled = false,
+                _ => {}
+            }
+        }
+    }
+}
+
 fn parse_option_as_alt(contents: &str, enabled: &mut bool) {
     for (key, value) in contents.lines().filter_map(parse_config_entry) {
         if key == "macos-option-as-alt" {
@@ -2673,6 +2701,15 @@ mod theme_tests {
         assert_eq!(theme.background, parse_rgb("101020"));
         assert_eq!(theme.foreground, parse_rgb("ffffff"));
         assert_eq!(theme.palette[4], parse_rgb("abcdef"));
+    }
+
+    #[test]
+    fn paste_protection_is_on_unless_turned_off() {
+        let mut enabled = true;
+        parse_paste_protection("clipboard-paste-protection = false\n", &mut enabled);
+        assert!(!enabled);
+        parse_paste_protection("clipboard-paste-protection =\n", &mut enabled);
+        assert!(enabled);
     }
 
     #[test]

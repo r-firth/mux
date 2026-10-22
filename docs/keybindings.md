@@ -179,6 +179,16 @@ a file, showing it in Finder or copying its path). The arrows and Return
 work it too; Escape or a click elsewhere puts it away. A program that takes
 the mouse, such as an editor, gets the click instead, unless Shift is held.
 
+## Pasting
+
+`Cmd+V` pastes as the program in front asks for pastes. A paste that would
+run something, because it breaks a line where the program hasn't asked for
+bracketed pastes (`cat`, an old shell, a remote prompt), waits: the strip
+says how many lines it would run, and `Cmd+V` again within a few seconds
+pastes it. A shell that brackets its pastes, as bash, zsh and fish do,
+gets the paste at once, since it holds it as text until Return. Setting
+`clipboard-paste-protection = false` in your Ghostty config turns this off.
+
 ## Shift-click
 
 Shift-click extends the selection to where you click, from its far end, as
