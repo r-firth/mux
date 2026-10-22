@@ -179,6 +179,23 @@ pub(super) fn output_rows(
     Some((first, last))
 }
 
+/// The command run from the prompt at `prompt` after a `$ `, then what it
+/// printed. None when no command was run there.
+fn transcript(prompts: &[usize], prompt: usize, lines: &[&str]) -> Option<String> {
+    let command = command_of(lines.get(prompt)?);
+    if command.is_empty() {
+        return None;
+    }
+    let mut transcript = format!("$ {command}");
+    if let Some((first, last)) = output_rows(prompts, prompt, lines) {
+        for line in &lines[first..=last] {
+            transcript.push('\n');
+            transcript.push_str(line.trim_end());
+        }
+    }
+    Some(transcript)
+}
+
 /// A pane's text as a file holds it: each line's trailing blanks and the
 /// blank lines at the end left off, ending in a newline.
 fn history_text(screen: &str) -> String {
@@ -628,6 +645,35 @@ impl MuxApp {
             && clipboard.set_text(command).is_ok()
         {
             self.say_in_strip("copied the command", false, cx);
+        }
+    }
+
+    /// Put on the clipboard the command run from a prompt and what it
+    /// printed, as a transcript to paste into an issue or a chat.
+    pub(super) fn copy_transcript(
+        &mut self,
+        pane_id: PaneId,
+        prompt: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane) = self.panes.get(&pane_id) else {
+            return;
+        };
+        let prompts = pane
+            .with_engine(|engine| engine.prompt_rows())
+            .unwrap_or_default();
+        let text = pane
+            .with_engine(|engine| engine.screen_text())
+            .unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        let Some(transcript) = transcript(&prompts, prompt, &lines) else {
+            self.say_in_strip("no command was run there", false, cx);
+            return;
+        };
+        if let Some(clipboard) = &mut self.clipboard
+            && clipboard.set_text(transcript).is_ok()
+        {
+            self.say_in_strip("copied the command and its output", false, cx);
         }
     }
 
@@ -1092,6 +1138,12 @@ mod tests {
         assert_eq!(output_rows(&prompts, 2, &lines), Some((3, 4)));
         assert_eq!(output_rows(&prompts, 6, &lines), Some((7, 7)));
         assert_eq!(output_rows(&[2, 3], 2, &lines), None, "printed nothing");
+        assert_eq!(
+            transcript(&prompts, 2, &lines).as_deref(),
+            Some("$ ls\na\nb")
+        );
+        assert_eq!(transcript(&[2, 3], 2, &lines).as_deref(), Some("$ ls"));
+        assert_eq!(transcript(&prompts, 7, &lines), None, "nothing typed");
     }
 
     #[test]

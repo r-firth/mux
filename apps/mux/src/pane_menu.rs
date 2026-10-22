@@ -4,7 +4,7 @@
 //! app's context menu offers: copy and paste, splits, zoom, evening out,
 //! naming the pane or moving it to a tab of its own, clear, find and close;
 //! on a link, opening or copying it; and on a command or what it printed,
-//! when the shell marks its prompts, copying the command or its output. A
+//! when the shell marks its prompts, copying the command, its output, or both. A
 //! program that takes the mouse, such as an editor, gets the click instead,
 //! unless Shift is held. Escape, a click elsewhere or a key that
 //! isn't the menu's puts it away.
@@ -22,6 +22,7 @@ enum Item {
     CopyLink,
     CopyCommand,
     CopyOutput,
+    CopyTranscript,
     Copy,
     Paste,
     SelectAll,
@@ -199,6 +200,13 @@ impl MuxApp {
             let rule = !lines.is_empty();
             lines.push(line(Item::CopyCommand, "copy command", "", true, rule));
             lines.push(line(Item::CopyOutput, "copy its output", "", true, false));
+            lines.push(line(
+                Item::CopyTranscript,
+                "copy command and output",
+                "",
+                true,
+                false,
+            ));
         }
         let linked = !lines.is_empty();
         lines.extend([
@@ -277,6 +285,11 @@ impl MuxApp {
             Item::CopyOutput => {
                 if let (Some(pane_id), Some(prompt)) = (pane_id, command) {
                     self.copy_output(pane_id, prompt, cx);
+                }
+            }
+            Item::CopyTranscript => {
+                if let (Some(pane_id), Some(prompt)) = (pane_id, command) {
+                    self.copy_transcript(pane_id, prompt, cx);
                 }
             }
             Item::Copy => self.copy_selection(cx),
