@@ -433,6 +433,35 @@ pub fn user_prompt_cursor() -> bool {
     user_shell_feature("cursor")
 }
 
+/// Whether the prompt's bar holds still: `cursor:steady` in Ghostty's
+/// `shell-integration-features`.
+#[must_use]
+pub fn user_prompt_cursor_steady() -> bool {
+    let mut steady = false;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_cursor_steady(&contents, &mut steady);
+            }
+        }
+    }
+    steady
+}
+
+fn parse_cursor_steady(contents: &str, steady: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "shell-integration-features" {
+            for named in value.split(',').map(str::trim) {
+                match named {
+                    "cursor:steady" => *steady = true,
+                    "cursor" | "cursor:blink" => *steady = false,
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 /// Whether the shell titles its pane with where it is and what it runs, as
 /// Ghostty's shell integration does unless `shell-integration-features`
 /// says `no-title`.
@@ -462,6 +491,7 @@ fn parse_shell_feature(contents: &str, feature: &str, on: &mut bool) {
             "shell-integration" if value == "none" => *on = false,
             "shell-integration-features" => {
                 for named in value.split(',').map(str::trim) {
+                    let named = named.split(':').next().unwrap_or(named);
                     if named == feature || named == "true" {
                         *on = true;
                     } else if named.strip_prefix("no-") == Some(feature) || named == "false" {
@@ -3790,6 +3820,17 @@ mod theme_tests {
         assert!(!title);
         parse_shell_feature("shell-integration = none\n", "cursor", &mut bar);
         assert!(!bar);
+        parse_shell_feature(
+            "shell-integration-features = cursor:steady\n",
+            "cursor",
+            &mut bar,
+        );
+        assert!(bar);
+        let mut steady = false;
+        parse_cursor_steady("shell-integration-features = cursor:steady\n", &mut steady);
+        assert!(steady);
+        parse_cursor_steady("shell-integration-features = cursor\n", &mut steady);
+        assert!(!steady);
     }
 
     #[test]

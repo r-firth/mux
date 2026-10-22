@@ -188,8 +188,8 @@ pane goes back to yours when the program resets it.
 
 At a zsh or bash prompt the cursor is a blinking bar, and the program's own
 while a command runs, as Ghostty's shell integration has it;
-`shell-integration-features = no-cursor` in your Ghostty config keeps your
-`cursor-style` at the prompt too.
+`shell-integration-features = cursor:steady` in your Ghostty config holds
+the bar still, and `no-cursor` keeps your `cursor-style` at the prompt too.
 
 Right-clicking a pane opens its menu, unless `right-click-action` in your
 Ghostty config says otherwise: `paste`, `copy`, `copy-or-paste` (copy what

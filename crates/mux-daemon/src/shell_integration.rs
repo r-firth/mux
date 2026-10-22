@@ -24,10 +24,24 @@ const BASH_PROMPT_COMMAND: &str = concat!(
 
 /// Where a command starts, printed from bash's PS0.
 const BASH_COMMAND_START: &str = r"\e]133;C\a";
-/// The prompt's blinking bar cursor, and the program's own cursor back as
-/// a command starts, as Ghostty's shell integration does.
+/// The prompt's blinking bar cursor, or a steady one, and the program's own
+/// cursor back as a command starts, as Ghostty's shell integration does.
 const BASH_PROMPT_CURSOR: &str = r"builtin printf '\033[5 q'; ";
+const BASH_STEADY_PROMPT_CURSOR: &str = r"builtin printf '\033[6 q'; ";
 const BASH_COMMAND_CURSOR: &str = r"\e[0 q";
+
+/// Whether the prompt's bar holds still: `cursor:steady` in the user's
+/// Ghostty config.
+fn steady_cursor() -> bool {
+    #[cfg(feature = "ghostty")]
+    {
+        mux_terminal_ghostty::user_prompt_cursor_steady()
+    }
+    #[cfg(not(feature = "ghostty"))]
+    {
+        false
+    }
+}
 
 /// Whether the prompt shows a bar cursor: Ghostty's `cursor` shell
 /// integration feature, on unless the user's Ghostty config turns it off.
@@ -104,7 +118,8 @@ pub fn environment(program: &Path) -> Vec<(OsString, OsString)> {
                 environment.push((OsString::from("MUX_USER_ZDOTDIR"), user));
             }
             if prompt_cursor() {
-                environment.push((OsString::from("MUX_PROMPT_CURSOR"), OsString::from("1")));
+                let shape = if steady_cursor() { "6" } else { "5" };
+                environment.push((OsString::from("MUX_PROMPT_CURSOR"), OsString::from(shape)));
             }
             if shell_title() {
                 environment.push((OsString::from("MUX_SHELL_TITLE"), OsString::from("1")));
@@ -115,7 +130,11 @@ pub fn environment(program: &Path) -> Vec<(OsString, OsString)> {
             let cursor = prompt_cursor();
             let extras = format!(
                 "{}{}",
-                if cursor { BASH_PROMPT_CURSOR } else { "" },
+                match (cursor, steady_cursor()) {
+                    (false, _) => "",
+                    (true, false) => BASH_PROMPT_CURSOR,
+                    (true, true) => BASH_STEADY_PROMPT_CURSOR,
+                },
                 if shell_title() { BASH_TITLE } else { "" }
             );
             let ours = BASH_PROMPT_COMMAND.replacen(
