@@ -11,7 +11,9 @@ use mux_protocol::{
     CreateSession, ErrorCode, ServerEvent, SessionAttachment, SessionSelector, SpawnCommand,
 };
 use mux_terminal::TerminalSize;
-use mux_workspace::{AgentSessionId, Direction, PaneId, Session, SessionId, WorkspaceCommand};
+use mux_workspace::{
+    AgentSessionId, Direction, PaneId, Session, SessionId, TabId, WorkspaceCommand,
+};
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -82,6 +84,18 @@ pub enum CommandMessage {
     RefreshAgentFiles {
         pane_id: PaneId,
     },
+    /// Ask what these panes are running before closing `target`.
+    CheckRunning {
+        target: CloseTarget,
+        pane_ids: Vec<PaneId>,
+    },
+}
+
+/// What a close is for: the focused pane, or the tab on screen.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CloseTarget {
+    Pane(PaneId),
+    Tab(TabId),
 }
 
 #[derive(Clone)]
@@ -303,6 +317,54 @@ impl BackendConnection {
         self.publish_sessions(events).await
     }
 
+    /// Index the files under a pane's working directory for an agent's `@`.
+    async fn refresh_agent_files(&mut self, events: &EventSender, pane_id: PaneId) -> Result<()> {
+        match self.client.pane_working_directory(pane_id).await {
+            Ok(cwd) => {
+                let scan_root = cwd.clone();
+                let files = tokio::task::spawn_blocking(move || {
+                    crate::agent_completion::index_files(&scan_root)
+                })
+                .await
+                .context("index agent reference files")?;
+                send_event(
+                    events,
+                    UserEvent::AgentFiles {
+                        pane_id,
+                        cwd,
+                        files,
+                    },
+                )
+            }
+            Err(error) => {
+                report_backend_error(events, error);
+                Ok(())
+            }
+        }
+    }
+
+    /// Ask what a close's panes are running and hand the answer back.
+    async fn check_running(
+        &mut self,
+        events: &EventSender,
+        target: CloseTarget,
+        pane_ids: Vec<PaneId>,
+    ) -> Result<()> {
+        match self.client.running_programs(pane_ids).await {
+            Ok(running) => send_event(
+                events,
+                UserEvent::RunningChecked {
+                    target,
+                    running: running.into_iter().map(|program| program.name).collect(),
+                },
+            ),
+            Err(error) => {
+                report_backend_error(events, error);
+                Ok(())
+            }
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn handle_command(
         &mut self,
@@ -428,25 +490,10 @@ impl BackendConnection {
                 );
             }
             CommandMessage::RefreshAgentFiles { pane_id } => {
-                match self.client.pane_working_directory(pane_id).await {
-                    Ok(cwd) => {
-                        let scan_root = cwd.clone();
-                        let files = tokio::task::spawn_blocking(move || {
-                            crate::agent_completion::index_files(&scan_root)
-                        })
-                        .await
-                        .context("index agent reference files")?;
-                        send_event(
-                            events,
-                            UserEvent::AgentFiles {
-                                pane_id,
-                                cwd,
-                                files,
-                            },
-                        )?;
-                    }
-                    Err(error) => report_backend_error(events, error),
-                }
+                self.refresh_agent_files(events, pane_id).await?;
+            }
+            CommandMessage::CheckRunning { target, pane_ids } => {
+                self.check_running(events, target, pane_ids).await?;
             }
         }
         Ok(())

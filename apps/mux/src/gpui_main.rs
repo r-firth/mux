@@ -39,7 +39,7 @@ use agent_completion::{
     AgentCommandArgument, AgentCompletionKind, AgentCompletionMenu, AgentCompletionProvider,
 };
 use anyhow::{Context as _, Result, anyhow};
-use backend::{BackendHandle, CommandMessage};
+use backend::{BackendHandle, CloseTarget, CommandMessage};
 use bezel::{
     theme::{self as bezel_theme, Appearance as BezelAppearance, Theme as BezelTheme},
     ui::{self as bezel_ui, icons as bezel_icons},
@@ -221,6 +221,12 @@ enum UserEvent {
         files: agent_completion::AgentFileIndex,
     },
     BackendError(String),
+    /// What the panes of a close are running, by name; empty when nothing
+    /// but their shells.
+    RunningChecked {
+        target: CloseTarget,
+        running: Vec<String>,
+    },
     /// A pane's parser has taken in output, or failed to.
     PaneParsed {
         pane_id: PaneId,
@@ -592,6 +598,9 @@ struct MuxApp {
     tab_strip_follow: Cell<bool>,
     strip_message: Option<StripMessage>,
     strip_serial: u64,
+    /// A close that found something running, and when: closing the same
+    /// thing again soon after goes ahead.
+    close_armed: Option<(CloseTarget, Instant)>,
     /// The focused pane's size shows in its head while sizes are changing
     /// (and in resize mode), then gets out of the way.
     size_readout: bool,
@@ -765,6 +774,7 @@ impl MuxApp {
             tab_strip_follow: Cell::new(true),
             strip_message: None,
             strip_serial: 0,
+            close_armed: None,
             size_readout: false,
             size_readout_pending: false,
             size_readout_serial: 0,
@@ -1250,6 +1260,10 @@ impl MuxApp {
                     self.agent_completion.set_file_index(cwd, files);
                     self.refresh_agent_completion_menu(cx);
                 }
+                Ok(())
+            }
+            UserEvent::RunningChecked { target, running } => {
+                self.finish_close(target, &running, cx);
                 Ok(())
             }
             UserEvent::BackendError(message) => {
@@ -2022,10 +2036,18 @@ impl MuxApp {
             Action::ResizePane(direction) => {
                 self.send_workspace(WorkspaceCommand::ResizePane(direction));
             }
-            Action::ClosePane => self.send_workspace(WorkspaceCommand::ClosePane),
+            Action::ClosePane => {
+                if let Some(pane_id) = self.focused_pane_id() {
+                    self.request_close(CloseTarget::Pane(pane_id));
+                }
+            }
             Action::TogglePaneZoom => self.send_workspace(WorkspaceCommand::TogglePaneZoom),
             Action::NewTab => self.send_workspace(WorkspaceCommand::NewTab),
-            Action::CloseTab => self.send_workspace(WorkspaceCommand::CloseTab),
+            Action::CloseTab => {
+                if let Some(tab_id) = self.active_tab_id() {
+                    self.request_close(CloseTarget::Tab(tab_id));
+                }
+            }
             Action::RenameTab => self.open_rename_tab(window, cx),
             Action::SelectTab(number) => {
                 if let Some(tab) = self
@@ -2047,6 +2069,83 @@ impl MuxApp {
             Action::BreakPaneToTab => self.break_pane_to_tab(cx),
         }
         cx.notify();
+    }
+
+    /// Close the focused pane or the tab on screen, once the daemon has
+    /// said what its panes are running. A second close of the same thing
+    /// soon after one that found something running goes ahead at once.
+    fn request_close(&mut self, target: CloseTarget) {
+        if self
+            .close_armed
+            .take()
+            .is_some_and(|(armed, at)| armed == target && at.elapsed() < CLOSE_AGAIN_WINDOW)
+        {
+            self.strip_message = None;
+            self.close_now(target);
+            return;
+        }
+        let pane_ids = match target {
+            CloseTarget::Pane(pane_id) => vec![pane_id],
+            CloseTarget::Tab(tab_id) => self
+                .session
+                .as_ref()
+                .and_then(|session| session.tabs.iter().find(|tab| tab.id == tab_id))
+                .map(|tab| {
+                    let mut panes = Vec::new();
+                    tab.layout.pane_ids(&mut panes);
+                    panes
+                })
+                .unwrap_or_default(),
+        };
+        // A pane whose shell has ended runs nothing.
+        let pane_ids = pane_ids
+            .into_iter()
+            .filter(|pane_id| !self.pane_exits.contains_key(pane_id))
+            .collect::<Vec<_>>();
+        if pane_ids.is_empty() {
+            self.close_now(target);
+        } else {
+            self.backend
+                .send(CommandMessage::CheckRunning { target, pane_ids });
+        }
+    }
+
+    /// The daemon has said what a close would end. Nothing but shells: it
+    /// goes ahead. Otherwise the strip names what would end, and the next
+    /// close of the same thing goes ahead.
+    fn finish_close(&mut self, target: CloseTarget, running: &[String], cx: &mut Context<Self>) {
+        if running.is_empty() {
+            self.close_now(target);
+            return;
+        }
+        self.close_armed = Some((target, Instant::now()));
+        let what = match target {
+            CloseTarget::Pane(_) => "here",
+            CloseTarget::Tab(_) => "in this tab",
+        };
+        self.say_in_strip(
+            format!(
+                "{} {} running {what}  ·  close again to end {}",
+                chrome::names_list(running),
+                if running.len() == 1 { "is" } else { "are" },
+                if running.len() == 1 { "it" } else { "them" },
+            ),
+            true,
+            cx,
+        );
+    }
+
+    /// Close the pane or tab, if it is still the one with the keys.
+    fn close_now(&mut self, target: CloseTarget) {
+        match target {
+            CloseTarget::Pane(pane_id) if self.focused_pane_id() == Some(pane_id) => {
+                self.send_workspace(WorkspaceCommand::ClosePane);
+            }
+            CloseTarget::Tab(tab_id) if self.active_tab_id() == Some(tab_id) => {
+                self.send_workspace(WorkspaceCommand::CloseTab);
+            }
+            CloseTarget::Pane(_) | CloseTarget::Tab(_) => {}
+        }
     }
 
     /// A Mac shortcut does what its Zellij keys do, from whatever mode the
@@ -4420,6 +4519,7 @@ impl UserEvent {
             Self::Agent(_) => "agent",
             Self::AgentFiles { .. } => "agent-files",
             Self::BackendError(_) => "backend-error",
+            Self::RunningChecked { .. } => "running-checked",
             Self::PaneParsed { .. } => "pane-parsed",
         }
     }
@@ -5331,6 +5431,9 @@ fn terminal_codepoint(key: &str, terminal_key: TerminalKey) -> Option<char> {
         _ => key.chars().next(),
     }
 }
+
+/// How soon a second close must follow one that found something running.
+const CLOSE_AGAIN_WINDOW: Duration = Duration::from_secs(5);
 
 /// The range of terminal text sizes, in points.
 const MIN_FONT_SIZE: f32 = 8.0;

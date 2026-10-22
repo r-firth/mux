@@ -150,6 +150,13 @@ until it is looked at. Its tab's dot turns peach with what it said beside the
 name, and in the tab on screen the pane's head says it. While Mux is in the
 background, the first call also bounces its Dock icon.
 
+## Closing what is running
+
+Closing a pane, or a tab, whose shell is running something in front of it,
+such as a build or an editor, doesn't end it straight away: the strip names
+what would end, and closing it again within a few seconds goes ahead. A pane
+at its prompt closes at once.
+
 ## Exited panes
 
 A shell that exits cleanly in the pane being typed in closes that pane, or its

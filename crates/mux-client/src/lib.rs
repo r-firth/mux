@@ -7,8 +7,8 @@ use directories::ProjectDirs;
 use mux_acp::{AgentConfigValueSelection, AgentPrompt, AgentSessionSnapshot, AgentSpec};
 use mux_protocol::{
     ClientHello, ClientMessage, CodecError, CreateSession, FrameReader, PROTOCOL_VERSION,
-    RemoteError, Request, Response, ServerEvent, ServerMessage, SessionAttachment, SessionSelector,
-    SessionSummary, UNACKNOWLEDGED_REQUEST_ID, read_frame, write_frame,
+    RemoteError, Request, Response, RunningProgram, ServerEvent, ServerMessage, SessionAttachment,
+    SessionSelector, SessionSummary, UNACKNOWLEDGED_REQUEST_ID, read_frame, write_frame,
 };
 use mux_terminal::{TerminalError, TerminalSize};
 use mux_workspace::{AgentSessionId, PaneId, SessionId, WorkspaceCommand};
@@ -261,6 +261,18 @@ impl Client {
             .await?
         {
             Response::WorkingDirectory(cwd) => Ok(cwd),
+            response => Err(ClientError::UnexpectedResponse(Box::new(response))),
+        }
+    }
+
+    /// What these panes are running in front of their shells, for those
+    /// that are running something.
+    pub async fn running_programs(
+        &mut self,
+        pane_ids: Vec<PaneId>,
+    ) -> Result<Vec<RunningProgram>, ClientError> {
+        match self.request(Request::RunningPrograms { pane_ids }).await? {
+            Response::RunningPrograms(programs) => Ok(programs),
             response => Err(ClientError::UnexpectedResponse(Box::new(response))),
         }
     }

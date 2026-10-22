@@ -9,8 +9,8 @@ use mux_acp::{
     AgentSpec,
 };
 use mux_protocol::{
-    CreateSession, ErrorCode, RemoteError, ServerEvent, SessionAttachment, SessionSelector,
-    SessionSummary, SpawnCommand,
+    CreateSession, ErrorCode, RemoteError, RunningProgram, ServerEvent, SessionAttachment,
+    SessionSelector, SessionSummary, SpawnCommand,
 };
 use mux_terminal::TerminalSize;
 use mux_workspace::{AgentSessionId, PaneId, Session, SessionId, TabId, WorkspaceCommand};
@@ -95,6 +95,24 @@ impl DaemonState {
             .ok_or_else(|| {
                 RemoteError::new(ErrorCode::NotFound, format!("pane not found: {pane_id}"))
             })
+    }
+
+    /// What these panes run in front of their shells, wherever they are.
+    pub fn running_programs(&self, pane_ids: &[PaneId]) -> Vec<RunningProgram> {
+        let sessions = self.sessions.read();
+        pane_ids
+            .iter()
+            .filter_map(|pane_id| {
+                sessions.values().find_map(|session| {
+                    let panes = session.panes.read();
+                    let name = panes.get(pane_id)?.running_program()?;
+                    Some(RunningProgram {
+                        pane_id: *pane_id,
+                        name,
+                    })
+                })
+            })
+            .collect()
     }
 
     pub fn prompt_agent(

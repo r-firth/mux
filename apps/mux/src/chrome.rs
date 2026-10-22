@@ -239,9 +239,42 @@ pub fn truncate_chars(text: &str, limit: usize) -> String {
     cut
 }
 
+/// Names as a sentence lists them, each once: `a`, `a and b`, `a, b and
+/// c`, and past three, the first two and how many more.
+#[must_use]
+pub fn names_list(names: &[String]) -> String {
+    let mut unique: Vec<&str> = Vec::new();
+    for name in names {
+        if !unique.contains(&name.as_str()) {
+            unique.push(name);
+        }
+    }
+    match unique.as_slice() {
+        [] => String::new(),
+        [only] => (*only).to_owned(),
+        [first, second] => format!("{first} and {second}"),
+        [first, second, third] => format!("{first}, {second} and {third}"),
+        [first, second, rest @ ..] => format!("{first}, {second} and {} more", rest.len()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_read_as_a_sentence() {
+        let names = |list: &[&str]| {
+            list.iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names_list(&names(&["cargo"])), "cargo");
+        assert_eq!(names_list(&names(&["cargo", "cargo"])), "cargo");
+        assert_eq!(names_list(&names(&["cargo", "nvim"])), "cargo and nvim");
+        assert_eq!(names_list(&names(&["a", "b", "c"])), "a, b and c");
+        assert_eq!(names_list(&names(&["a", "b", "c", "d"])), "a, b and 2 more");
+    }
 
     #[test]
     fn dot_matrix_draws_session_names_and_refuses_unknown_glyphs() {

@@ -183,6 +183,8 @@ async fn handle_connection(
     }
 }
 
+// One arm per request; splitting the dispatch would only scatter it.
+#[allow(clippy::too_many_lines)]
 async fn process_message<W>(
     message: ClientMessage,
     state: &DaemonState,
@@ -286,6 +288,9 @@ where
         Request::PaneWorkingDirectory { pane_id } => state
             .pane_working_directory(pane_id)
             .map(Response::WorkingDirectory),
+        Request::RunningPrograms { pane_ids } => {
+            Ok(Response::RunningPrograms(state.running_programs(&pane_ids)))
+        }
     };
 
     if unacknowledged_input && response == Ok(Response::Ack) {

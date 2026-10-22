@@ -318,6 +318,35 @@ impl PaneRuntime {
         Ok(())
     }
 
+    /// The name of the program in the terminal's foreground, when it isn't
+    /// the pane's own shell: what closing the pane would cut off.
+    #[must_use]
+    pub fn running_program(&self) -> Option<String> {
+        if self.exit_status.lock().is_some() {
+            return None;
+        }
+        let foreground = foreground_process_id(&self.master)?;
+        if Some(foreground) == self.process_id {
+            return None;
+        }
+        let pid = Pid::from_u32(foreground);
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        let name = system
+            .process(pid)
+            .map(|process| process.name().to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Some(if name.is_empty() {
+            "a program".to_owned()
+        } else {
+            name
+        })
+    }
+
     /// Ask the operating system for the shell process's live working
     /// directory. This follows `cd` without parsing prompts or shell output.
     #[must_use]

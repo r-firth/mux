@@ -25,7 +25,8 @@ use tokio::task::JoinHandle;
 /// and queued prompts to agent snapshots and events, a remembered title on
 /// each pane attachment, and a workspace command that sets a split's ratio.
 /// Version 9 adds workspace commands that move a tab along the strip and
-/// break a pane out into a tab of its own.
+/// break a pane out into a tab of its own, and a request for what is running
+/// in a pane besides its shell.
 pub const PROTOCOL_VERSION: u16 = 9;
 /// Request id zero is reserved for latency-sensitive messages whose successful
 /// completion does not require a response.
@@ -138,6 +139,11 @@ pub enum Request {
     PaneWorkingDirectory {
         pane_id: PaneId,
     },
+    /// What each of these panes is running in front of its shell, for panes
+    /// that are running something.
+    RunningPrograms {
+        pane_ids: Vec<PaneId>,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -172,6 +178,14 @@ pub enum Response {
     AgentStarted(Box<AgentSessionSnapshot>),
     WorkingDirectory(PathBuf),
     Ack,
+    RunningPrograms(Vec<RunningProgram>),
+}
+
+/// A program a pane is running in front of its shell, by its process name.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RunningProgram {
+    pub pane_id: PaneId,
+    pub name: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
