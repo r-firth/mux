@@ -960,6 +960,10 @@ pub enum Action {
     EqualizePanes,
     /// Trade places with the neighbouring pane that way.
     SwapPane(Direction),
+    /// Split the focused pane across its longer side, as Ghostty's
+    /// `new_split:auto` does, so a wide pane splits side by side and a tall
+    /// one top and bottom.
+    SplitPaneAuto,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1243,7 +1247,7 @@ impl Keymap {
             InputMode::Pane,
             KeyChord::plain(Key::Character('n')),
             Action::Sequence(vec![
-                Action::SplitPane(SplitAxis::Horizontal),
+                Action::SplitPaneAuto,
                 Action::EnterMode(InputMode::Normal),
             ]),
         );

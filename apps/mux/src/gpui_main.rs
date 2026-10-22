@@ -220,6 +220,7 @@ gpui::actions!(
         ShrinkMuxText,
         SplitMuxDown,
         SplitMuxRight,
+        SplitMuxAuto,
         FocusMuxPaneLeft,
         FocusMuxPaneRight,
         FocusMuxPaneUp,
@@ -1783,6 +1784,23 @@ impl MuxApp {
         Ok(())
     }
 
+    /// The way across the focused pane's longer side: side by side for a
+    /// wide pane, one above the other for a tall one.
+    fn longer_axis(&self) -> mux_workspace::SplitAxis {
+        let tall = self
+            .focused_pane_id()
+            .and_then(|pane_id| self.panes.get(&pane_id))
+            .is_some_and(|pane| {
+                self.metrics.cell_height * f32::from(pane.frame.rows)
+                    > self.metrics.cell_width * f32::from(pane.frame.cols)
+            });
+        if tall {
+            mux_workspace::SplitAxis::Vertical
+        } else {
+            mux_workspace::SplitAxis::Horizontal
+        }
+    }
+
     fn focused_pane_id(&self) -> Option<PaneId> {
         self.session
             .as_ref()?
@@ -2479,6 +2497,10 @@ impl MuxApp {
             Action::EnterMode(mode) => self.mode = mode,
             Action::WriteTerminal(bytes) => self.write_focused(bytes),
             Action::SplitPane(axis) => self.send_workspace(WorkspaceCommand::SplitPane(axis)),
+            Action::SplitPaneAuto => {
+                let axis = self.longer_axis();
+                self.send_workspace(WorkspaceCommand::SplitPane(axis));
+            }
             Action::FocusPane(direction) => {
                 self.send_workspace(WorkspaceCommand::FocusPane(direction));
             }
@@ -4843,6 +4865,9 @@ impl MuxApp {
                     window,
                     cx,
                 );
+            }))
+            .on_action(cx.listener(|this, _: &SplitMuxAuto, window, cx| {
+                this.run_shortcut(Action::SplitPaneAuto, window, cx);
             }))
             .on_action(cx.listener(|this, _: &SplitMuxDown, window, cx| {
                 this.run_shortcut(

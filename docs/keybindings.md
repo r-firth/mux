@@ -36,7 +36,7 @@ keybind = super+k=unbind
 `\u{e9}` as in Ghostty), `csi:` and `esc:` send an escape sequence, `unbind`
 gives the key back to the program and `ignore` swallows it. Ghostty's
 actions for what Mux has a key for do what that key does: `new_tab`,
-`new_split`, `close_surface`, `goto_split`, `resize_split`,
+`new_split` (`auto` too), `close_surface`, `goto_split`, `resize_split`,
 `equalize_splits`, `toggle_split_zoom`, `next_tab`, `previous_tab`,
 `goto_tab`, `last_tab`, the font size actions, `reload_config`,
 `open_config` (the settings), `toggle_fullscreen`, `clear_screen`, `quit`,
@@ -92,7 +92,7 @@ the last tab 9, as in Safari. A shortcut pressed before then shows nothing.
 | --- | --- |
 | `h/j/k/l` or arrows | Focus a neighboring pane |
 | `Shift+h/j/k/l` or Shift+arrows | Trade places with the neighboring pane that way; the pane keeps the keys |
-| `n` | Create a pane and return to Normal |
+| `n` | Split the focused pane across its longer side (side by side when wide, one above the other when tall) and return to Normal |
 | `d` | Split downward and return to Normal |
 | `r` | Split to the right and return to Normal |
 | `Ctrl+n` | Enter Resize mode (Normal-mode `Ctrl+n` still reaches the terminal) |

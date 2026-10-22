@@ -33,6 +33,7 @@ enum Command {
     NewTab,
     SplitRight,
     SplitDown,
+    SplitAuto,
     ClosePane,
     Focus(Direction),
     NextPane,
@@ -201,6 +202,7 @@ impl MuxApp {
             Command::NewTab => Box::new(NewMuxTab),
             Command::SplitRight => Box::new(SplitMuxRight),
             Command::SplitDown => Box::new(SplitMuxDown),
+            Command::SplitAuto => Box::new(SplitMuxAuto),
             Command::ClosePane => Box::new(CloseMuxPane),
             Command::NextPane => Box::new(NextMuxPane),
             Command::PreviousPane => Box::new(PreviousMuxPane),
@@ -359,6 +361,7 @@ fn parse_action(action: &str) -> Option<Bound> {
         "new_tab" => Command::NewTab,
         "new_split" => match parameter {
             "down" | "up" => Command::SplitDown,
+            "auto" => Command::SplitAuto,
             _ => Command::SplitRight,
         },
         "close_surface" => Command::ClosePane,
