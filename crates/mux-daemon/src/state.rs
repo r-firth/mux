@@ -408,8 +408,11 @@ impl DaemonState {
                 .map_err(internal_error);
         }
         let session = self.resolve(&SessionSelector::Id(session_id))?;
-        let closing_tab =
-            matches!(command, WorkspaceCommand::CloseTab).then(|| session.model.read().active_tab);
+        let closing_tab = match command {
+            WorkspaceCommand::CloseTab => Some(session.model.read().active_tab),
+            WorkspaceCommand::CloseTabWithId(tab_id) => Some(tab_id),
+            _ => None,
+        };
         let attachment = session
             .apply_command(command, self.replay_bytes_per_pane)
             .map_err(internal_error)?;
@@ -591,6 +594,10 @@ impl SessionRuntime {
             }
             WorkspaceCommand::CloseTab => {
                 let pane_ids = self.model.write().close_active_tab()?;
+                self.remove_panes(&pane_ids);
+            }
+            WorkspaceCommand::CloseTabWithId(tab_id) => {
+                let pane_ids = self.model.write().close_tab(tab_id)?;
                 self.remove_panes(&pane_ids);
             }
             WorkspaceCommand::RenameTab(title) => {

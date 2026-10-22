@@ -2226,7 +2226,8 @@ impl MuxApp {
         self.close_armed = Some((target, Instant::now()));
         let what = match target {
             CloseTarget::Pane(_) => "here",
-            CloseTarget::Tab(_) => "in this tab",
+            CloseTarget::Tab(tab_id) if self.active_tab_id() == Some(tab_id) => "in this tab",
+            CloseTarget::Tab(_) => "in that tab",
         };
         self.say_in_strip(
             format!(
@@ -2246,8 +2247,13 @@ impl MuxApp {
             CloseTarget::Pane(pane_id) if self.focused_pane_id() == Some(pane_id) => {
                 self.send_workspace(WorkspaceCommand::ClosePane);
             }
-            CloseTarget::Tab(tab_id) if self.active_tab_id() == Some(tab_id) => {
-                self.send_workspace(WorkspaceCommand::CloseTab);
+            CloseTarget::Tab(tab_id)
+                if self
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.tabs.iter().any(|tab| tab.id == tab_id)) =>
+            {
+                self.send_workspace(WorkspaceCommand::CloseTabWithId(tab_id));
             }
             CloseTarget::Pane(_) | CloseTarget::Tab(_) => {}
         }
@@ -3843,7 +3849,7 @@ impl MuxApp {
             _ if active => ink.color(),
             _ => ink.color().opacity(0.72),
         };
-        chip = chip.child(div().flex_none().size(px(6.0)).rounded_full().bg(dot));
+        chip = Self::with_tab_close(chip, tab_id, dot, &group, cx);
         if let Some(rename) = self
             .tab_rename
             .as_ref()
@@ -3882,6 +3888,66 @@ impl MuxApp {
             chip.hover(|style| style.bg(wash(0.05)))
                 .active(|style| style.bg(wash(0.10)))
         }
+    }
+
+    /// The tab's dot, which turns into a close mark while the pointer is
+    /// over the chip, as a Safari tab's icon does; a middle click on the
+    /// chip closes it too. Closing a tab with something running asks first,
+    /// as Cmd+W does.
+    fn with_tab_close(
+        chip: gpui::Stateful<gpui::Div>,
+        tab_id: TabId,
+        dot: Hsla,
+        group: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let close = div()
+            .id(SharedString::from(format!("tab-close-{tab_id}")))
+            .relative()
+            .flex_none()
+            .size(px(14.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(3.0))
+            .hover(|style| style.bg(wash(0.12)))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.request_close(CloseTarget::Tab(tab_id));
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(dot)
+                    .group_hover(group.clone(), |style| style.opacity(0.0)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(12.0))
+                    .line_height(px(12.0))
+                    .text_color(color(MUTED_TEXT))
+                    .opacity(0.0)
+                    .group_hover(group.clone(), |style| style.opacity(1.0))
+                    .child("×"),
+            );
+        chip.child(close).on_mouse_down(
+            gpui::MouseButton::Middle,
+            cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.request_close(CloseTarget::Tab(tab_id));
+                cx.notify();
+            }),
+        )
     }
 
     /// A chip dragged along the strip takes the place of the one it is

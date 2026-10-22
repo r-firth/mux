@@ -553,18 +553,26 @@ impl Session {
     }
 
     pub fn close_active_tab(&mut self) -> Result<Vec<PaneId>, WorkspaceError> {
-        if self.tabs.len() == 1 {
-            return Err(WorkspaceError::CannotCloseLastTab);
-        }
+        self.close_tab(self.active_tab)
+    }
+
+    /// Close a tab, giving back its panes. Closing the tab on screen shows
+    /// the one before it; closing another leaves the one on screen there.
+    pub fn close_tab(&mut self, tab_id: TabId) -> Result<Vec<PaneId>, WorkspaceError> {
         let index = self
             .tabs
             .iter()
-            .position(|tab| tab.id == self.active_tab)
-            .ok_or(WorkspaceError::UnknownTab(self.active_tab))?;
+            .position(|tab| tab.id == tab_id)
+            .ok_or(WorkspaceError::UnknownTab(tab_id))?;
+        if self.tabs.len() == 1 {
+            return Err(WorkspaceError::CannotCloseLastTab);
+        }
         let tab = self.tabs.remove(index);
         let mut panes = Vec::new();
         tab.layout.pane_ids(&mut panes);
-        self.active_tab = self.tabs[index.saturating_sub(1)].id;
+        if self.active_tab == tab_id {
+            self.active_tab = self.tabs[index.saturating_sub(1)].id;
+        }
         self.normalize_numeric_tab_titles();
         Ok(panes)
     }
@@ -724,6 +732,8 @@ pub enum WorkspaceCommand {
     BreakPaneToTab,
     /// Colour the active tab with one of the [`INK_COUNT`] inks.
     SetTabInk(u8),
+    /// Close this tab, on screen or not. See [`Session::close_tab`].
+    CloseTabWithId(TabId),
 }
 
 /// How many tab inks there are to choose from.
@@ -1297,6 +1307,27 @@ mod tests {
             session.active_tab, third,
             "moving a tab doesn't change which is shown"
         );
+    }
+
+    #[test]
+    fn closing_a_tab_out_of_sight_leaves_the_one_on_screen() {
+        let first_pane = PaneId::new();
+        let mut session = Session::with_panes("daily", &[first_pane]).expect("session");
+        let first = session.active_tab;
+        let second = session.add_tab(PaneId::new()).expect("second tab");
+        let third_pane = PaneId::new();
+        let third = session.add_tab(third_pane).expect("third tab");
+        session.select_tab(first).expect("back to the first");
+
+        assert_eq!(session.close_tab(third).expect("close"), vec![third_pane]);
+        assert_eq!(session.active_tab, first, "the tab on screen stays");
+        session.select_tab(second).expect("show the second");
+        session.close_tab(second).expect("close the tab on screen");
+        assert_eq!(session.active_tab, first, "the one before it is shown");
+        assert!(matches!(
+            session.close_tab(first),
+            Err(WorkspaceError::CannotCloseLastTab)
+        ));
     }
 
     #[test]
