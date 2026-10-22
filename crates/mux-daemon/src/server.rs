@@ -15,6 +15,7 @@ use crate::state::DaemonState;
 
 /// How often panes are looked at for programs that have finished.
 const FINISHED_COMMAND_POLL: Duration = Duration::from_secs(1);
+const SECRET_INPUT_POLL: Duration = Duration::from_millis(200);
 
 /// How many of those looks go by between writing the workspace down, to
 /// catch panes that have changed directory.
@@ -81,6 +82,17 @@ impl DaemonServer {
                     watched.save_workspace();
                     watched.save_pane_text();
                 }
+            }
+        });
+
+        // A password prompt is looked for more often, so the pane says so
+        // before the first key of the password.
+        let watched = Arc::clone(&self.state);
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(SECRET_INPUT_POLL);
+            loop {
+                ticks.tick().await;
+                watched.announce_secret_input();
             }
         });
 

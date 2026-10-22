@@ -253,6 +253,13 @@ pub enum ServerEvent {
         pane_id: PaneId,
         program: String,
     },
+    /// A pane's terminal has stopped or started showing what is typed, as
+    /// a password prompt does while it reads a password.
+    PaneSecretInput {
+        session_id: SessionId,
+        pane_id: PaneId,
+        secret: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

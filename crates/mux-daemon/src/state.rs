@@ -135,6 +135,25 @@ impl DaemonState {
         }
     }
 
+    /// Tell each session's clients about panes that have started or
+    /// stopped reading a password since the last look.
+    pub fn announce_secret_input(&self) {
+        let sessions = self.sessions.read().values().cloned().collect::<Vec<_>>();
+        for session in sessions {
+            let session_id = session.model.read().id;
+            let panes = session.panes.read().values().cloned().collect::<Vec<_>>();
+            for pane in panes {
+                if let Some(secret) = pane.look_at_secret_input() {
+                    let _ = session.events.send(ServerEvent::PaneSecretInput {
+                        session_id,
+                        pane_id: pane.id,
+                        secret,
+                    });
+                }
+            }
+        }
+    }
+
     pub fn clear_pane(&self, pane_id: PaneId) -> Result<(), RemoteError> {
         let pane = self
             .sessions

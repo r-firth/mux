@@ -210,6 +210,8 @@ pub struct PaneRuntime {
     title: Arc<Mutex<TitleScanner>>,
     /// The program in front of the shell when last looked, and since when.
     foreground_command: Mutex<Option<ForegroundCommand>>,
+    /// Whether the terminal was reading a password when last looked.
+    secret_input: Mutex<bool>,
     /// A process in front that still bears the shell's own name: either a
     /// fork that has not yet become the program it will run, or a nested
     /// shell. It is named only once seen twice.
@@ -401,6 +403,7 @@ impl PaneRuntime {
             process_id,
             title,
             foreground_command: Mutex::new(None),
+            secret_input: Mutex::new(false),
             shell_named_pending: Mutex::new(None),
             output_injector,
         }))
@@ -532,6 +535,17 @@ impl PaneRuntime {
         }
     }
 
+    /// Whether the terminal has started or stopped reading a password since
+    /// the last look: the new answer, if it changed.
+    pub fn look_at_secret_input(&self) -> Option<bool> {
+        let secret = self.exit_status.lock().is_none() && reads_secret(&self.master);
+        let mut was = self.secret_input.lock();
+        (*was != secret).then(|| {
+            *was = secret;
+            secret
+        })
+    }
+
     /// Ask the operating system for the shell process's live working
     /// directory. This follows `cd` without parsing prompts or shell output.
     #[must_use]
@@ -645,6 +659,23 @@ fn foreground_process_id(master: &Mutex<Box<dyn MasterPty + Send>>) -> Option<u3
         .lock()
         .process_group_leader()
         .and_then(|process_id| u32::try_from(process_id).ok())
+}
+
+/// Whether the terminal reads whole lines without showing them, as `sudo`
+/// and `ssh` do while they read a password. A shell at its prompt, or an
+/// editor, reads key by key, so is never taken for one.
+#[cfg(unix)]
+fn reads_secret(master: &Mutex<Box<dyn MasterPty + Send>>) -> bool {
+    use nix::sys::termios::LocalFlags;
+    master.lock().get_termios().is_some_and(|termios| {
+        let flags = termios.local_flags;
+        flags.contains(LocalFlags::ICANON) && !flags.contains(LocalFlags::ECHO)
+    })
+}
+
+#[cfg(not(unix))]
+fn reads_secret(_: &Mutex<Box<dyn MasterPty + Send>>) -> bool {
+    false
 }
 
 #[cfg(not(unix))]

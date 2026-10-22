@@ -4466,6 +4466,7 @@ dependencies = [
  "mux-terminal",
  "mux-terminal-ghostty",
  "mux-workspace",
+ "nix",
  "parking_lot",
  "portable-pty",
  "serde",

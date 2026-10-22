@@ -568,9 +568,8 @@ impl BackendConnection {
             event @ (ServerEvent::PaneOutput { .. }
             | ServerEvent::PaneExited { .. }
             | ServerEvent::PaneCommandFinished { .. }
-            | ServerEvent::PaneCommandStarted { .. }) => {
-                send_event(events, UserEvent::Server(event))
-            }
+            | ServerEvent::PaneCommandStarted { .. }
+            | ServerEvent::PaneSecretInput { .. }) => send_event(events, UserEvent::Server(event)),
             ServerEvent::ResyncRequired { session_id } => {
                 let attachment = self.client.attach(SessionSelector::Id(session_id)).await?;
                 self.publish_attachment(events, attachment)

@@ -291,6 +291,8 @@ struct PaneReplica {
     program: Option<String>,
     /// When that program started, as far as this window saw.
     program_since: Option<Instant>,
+    /// Whether the pane is reading a password, which it does not show.
+    secret_input: bool,
 }
 
 fn next_frame_serial() -> u64 {
@@ -329,6 +331,7 @@ impl PaneReplica {
             title: TitleScanner::default(),
             program: None,
             program_since: None,
+            secret_input: false,
         }
     }
 
@@ -1759,6 +1762,13 @@ impl MuxApp {
                 if let Some(pane) = self.panes.get_mut(&pane_id) {
                     pane.program = Some(program);
                     pane.program_since = Some(Instant::now());
+                }
+            }
+            ServerEvent::PaneSecretInput {
+                pane_id, secret, ..
+            } => {
+                if let Some(pane) = self.panes.get_mut(&pane_id) {
+                    pane.secret_input = secret;
                 }
             }
         }
@@ -5260,6 +5270,16 @@ impl MuxApp {
         }
         if synced {
             head = head.child(div().flex_none().text_color(ink.color()).child("sync"));
+        }
+        // What is typed into a password prompt doesn't show, so the head
+        // says it is going somewhere.
+        if pane.is_some_and(|pane| pane.secret_input) {
+            head = head.child(
+                div()
+                    .flex_none()
+                    .text_color(color(SIGNAL))
+                    .child("password hidden"),
+            );
         }
         // A dragged seam resizes every pane on either side of it, so each
         // says its size while it moves.

@@ -487,7 +487,8 @@ impl Client {
             | ServerEvent::Agent(_)
             | ServerEvent::AgentResyncRequired
             | ServerEvent::PaneCommandFinished { .. }
-            | ServerEvent::PaneCommandStarted { .. }) => Some(event),
+            | ServerEvent::PaneCommandStarted { .. }
+            | ServerEvent::PaneSecretInput { .. }) => Some(event),
         }
     }
 
@@ -521,7 +522,8 @@ fn attachment_supersedes_event(event: &ServerEvent, session_id: SessionId) -> bo
         ServerEvent::Agent(_)
         | ServerEvent::AgentResyncRequired
         | ServerEvent::PaneCommandFinished { .. }
-        | ServerEvent::PaneCommandStarted { .. } => false,
+        | ServerEvent::PaneCommandStarted { .. }
+        | ServerEvent::PaneSecretInput { .. } => false,
     }
 }
 
