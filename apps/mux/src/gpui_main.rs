@@ -33,6 +33,7 @@ mod run_clock;
 mod scrollback;
 mod seams;
 mod select_extend;
+mod select_scroll;
 mod session_sheet;
 mod settings;
 mod settings_sheet;
@@ -819,6 +820,10 @@ struct MuxApp {
     selected_pane: Option<PaneId>,
     pending_focused_pane: Option<PaneId>,
     selection_drag: Option<TerminalPointerCapture>,
+    /// A selection drag held past its pane's edge, scrolling it.
+    selection_edge: Option<select_scroll::SelectionEdge>,
+    /// Since when the held pane has been scrolling under a selection.
+    selection_scrolling: Option<Instant>,
     /// An Option-click that will move the cursor if it comes up in place.
     cursor_click: Option<cursor_click::CursorClick>,
     /// The title last given to the window.
@@ -1001,6 +1006,8 @@ impl MuxApp {
             selected_pane: None,
             pending_focused_pane: None,
             selection_drag: None,
+            selection_edge: None,
+            selection_scrolling: None,
             cursor_click: None,
             window_title: String::new(),
             mouse_reporting: None,
@@ -1121,6 +1128,7 @@ impl MuxApp {
         self.ensure_agent_pulse(cx);
         self.ensure_cursor_blink(cx);
         self.ensure_run_clock(cx);
+        self.ensure_selection_scroll(cx);
     }
 
     fn ensure_agent_pulse(&mut self, cx: &mut Context<Self>) {
@@ -4047,6 +4055,7 @@ impl MuxApp {
                 geometry: pointer.geometry,
             },
         );
+        self.note_selection_edge(event.position, event.modifiers.alt);
     }
 
     fn end_selection(&mut self, capture: TerminalPointerCapture, event: &gpui::MouseUpEvent) {

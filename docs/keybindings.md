@@ -313,7 +313,9 @@ clipboard that way is not allowed.
 ## Selecting
 
 Drag to select, double-click for a word and triple-click for a line;
-Option-drag selects a rectangle. Typing into the pane lets go of the
+Option-drag selects a rectangle. Drag past the top or bottom of the pane
+and it scrolls through the history while the pointer stays out there,
+faster the further out it is. Typing into the pane lets go of the
 selection, as in Ghostty, so a highlight never sits over text that has
 since changed.
 
