@@ -24,6 +24,7 @@ mod pane_parser;
 mod quick_select;
 mod scrollback;
 mod seams;
+mod select_extend;
 mod session_sheet;
 mod settings;
 mod settings_sheet;
@@ -3455,6 +3456,7 @@ impl MuxApp {
             return;
         }
         match event.button {
+            gpui::MouseButton::Left if self.extend_selection(pane_id, rect, event) => {}
             gpui::MouseButton::Left => {
                 self.begin_cursor_click(pane_id, rect, event);
                 self.begin_selection(pane_id, rect, event);

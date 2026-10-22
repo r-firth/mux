@@ -158,6 +158,12 @@ keys. The arrows and Return work it too; Escape or a click elsewhere puts it
 away. A program that takes the mouse, such as an editor, gets the click
 instead, unless Shift is held.
 
+## Shift-click
+
+Shift-click extends the selection to where you click, from its far end, as
+in any Mac text view: past its end grows it forward, before its start grows
+it back.
+
 ## Option-click
 
 Option-click in a pane to move the cursor to where you clicked, as in
