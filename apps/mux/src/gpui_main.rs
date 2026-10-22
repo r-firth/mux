@@ -363,6 +363,19 @@ impl PaneReplica {
         match (self.untitled_program(), place) {
             (Some(program), Some(place)) => Some(format!("{program} · {place}")),
             (Some(program), None) => Some(program.to_owned()),
+            // A shell that titles the pane with the command it runs, as
+            // Mux's zsh does, still has the directory it ran it in.
+            (None, Some(command)) if self.program.is_some() && !chrome::is_path(command) => {
+                let ran_in = self
+                    .title
+                    .previous_title()
+                    .map(chrome::terminal_place)
+                    .filter(|place| chrome::is_path(place));
+                Some(ran_in.map_or_else(
+                    || command.to_owned(),
+                    |place| format!("{command} · {place}"),
+                ))
+            }
             (None, place) => place.map(str::to_owned),
         }
     }

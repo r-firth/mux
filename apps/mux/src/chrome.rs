@@ -215,15 +215,20 @@ pub fn terminal_place(title: &str) -> &str {
     title
 }
 
+/// Whether a title's place reads as a directory: `~/src`, `/etc`, or a
+/// deep one cut as Ghostty's shell integration cuts it, `…/c/d/e`.
+#[must_use]
+pub fn is_path(place: &str) -> bool {
+    (place.starts_with('~') || place.starts_with('/') || place.starts_with("…/"))
+        && !place.contains(char::is_whitespace)
+}
+
 /// A tab-sized name for a terminal title: the last component of a directory,
 /// or the command that is running, cut to fit.
 #[must_use]
 pub fn tab_label(title: &str) -> String {
     let place = terminal_place(title);
-    // A shell titling a deep directory as Ghostty's does starts it `…/`.
-    let path_like = (place.starts_with('~') || place.starts_with('/') || place.starts_with("…/"))
-        && !place.contains(char::is_whitespace);
-    let label = if path_like {
+    let label = if is_path(place) {
         place
             .trim_end_matches('/')
             .rsplit('/')

@@ -13,6 +13,9 @@ pub struct TitleScanner {
     state: TitleScan,
     buffer: Vec<u8>,
     title: Option<String>,
+    /// The title before this one, such as a shell's directory before it
+    /// titled the pane with the command it runs.
+    previous_title: Option<String>,
     attention: Option<Attention>,
     copied: Option<String>,
     progress: Option<Progress>,
@@ -135,6 +138,12 @@ impl TitleScanner {
         self.title.as_deref()
     }
 
+    /// The title the pane had before this one.
+    #[must_use]
+    pub fn previous_title(&self) -> Option<&str> {
+        self.previous_title.as_deref()
+    }
+
     /// What the program has asked to be noticed by since this was last
     /// called. A notification outranks a bell rung alongside it.
     pub fn take_attention(&mut self) -> Option<Attention> {
@@ -252,7 +261,10 @@ impl TitleScanner {
 
     fn commit(&mut self) {
         let title = String::from_utf8_lossy(&self.buffer).trim().to_owned();
-        self.title = (!title.is_empty()).then_some(title);
+        let title = (!title.is_empty()).then_some(title);
+        if title != self.title {
+            self.previous_title = std::mem::replace(&mut self.title, title);
+        }
         self.buffer.clear();
     }
 
@@ -400,6 +412,13 @@ mod tests {
         assert_eq!(scanner.title(), Some("~/projects/mux"));
         scanner.scan(b"\x1b]2;nvim layout.rs\x1b\\");
         assert_eq!(scanner.title(), Some("nvim layout.rs"));
+        assert_eq!(scanner.previous_title(), Some("~/projects/mux"));
+        scanner.scan(b"\x1b]2;nvim layout.rs\x07");
+        assert_eq!(
+            scanner.previous_title(),
+            Some("~/projects/mux"),
+            "the same title again is no change"
+        );
     }
 
     #[test]
