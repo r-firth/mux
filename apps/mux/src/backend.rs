@@ -94,6 +94,10 @@ pub enum CommandMessage {
     ClearPane {
         pane_id: PaneId,
     },
+    /// Reset a pane's terminal.
+    ResetPane {
+        pane_id: PaneId,
+    },
     /// Ask what these panes are running before closing `target`.
     CheckRunning {
         target: CloseTarget,
@@ -527,6 +531,7 @@ impl BackendConnection {
             command @ (CommandMessage::RefreshAgentFiles { .. }
             | CommandMessage::RevealPath { .. }
             | CommandMessage::ClearPane { .. }
+            | CommandMessage::ResetPane { .. }
             | CommandMessage::CheckRunning { .. }) => {
                 self.handle_pane_question(command, events).await?;
             }
@@ -550,6 +555,9 @@ impl BackendConnection {
             }
             CommandMessage::ClearPane { pane_id } => {
                 report_client_result(events, self.client.clear_pane(pane_id).await);
+            }
+            CommandMessage::ResetPane { pane_id } => {
+                report_client_result(events, self.client.reset_pane(pane_id).await);
             }
             CommandMessage::CheckRunning { target, pane_ids } => {
                 self.check_running(events, target, pane_ids).await?;

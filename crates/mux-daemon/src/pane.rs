@@ -34,6 +34,8 @@ const OUTPUT_LULL_IDLE: Duration = Duration::from_micros(150);
 /// Home, erase the screen, erase the history.
 const CLEAR_SCREEN_AND_HISTORY: &[u8] = b"\x1b[H\x1b[2J\x1b[3J";
 const CLEAR_HISTORY: &[u8] = b"\x1b[3J";
+/// RIS: the terminal back as it started, modes, colours and screen.
+const FULL_RESET: &[u8] = b"\x1bc";
 /// Form feed, Ctrl+L: a shell at its prompt draws the prompt again.
 const REDRAW_PROMPT: &[u8] = b"\x0c";
 
@@ -501,6 +503,23 @@ impl PaneRuntime {
             // for this terminal and every attached client's.
             let _ = injector.send(clear.to_vec());
         }
+        if at_prompt {
+            self.write(REDRAW_PROMPT)?;
+        }
+        Ok(())
+    }
+
+    /// Put the terminal back as it started, for a program that left it
+    /// garbled or stuck in a mode; a shell at its prompt draws it again.
+    pub fn reset(&self) -> Result<(), PaneError> {
+        if self.exit_status.lock().is_some() {
+            return Ok(());
+        }
+        if let Some(injector) = self.output_injector.lock().as_ref() {
+            let _ = injector.send(FULL_RESET.to_vec());
+        }
+        let at_prompt = foreground_process_id(&self.master)
+            .is_none_or(|foreground| Some(foreground) == self.process_id);
         if at_prompt {
             self.write(REDRAW_PROMPT)?;
         }

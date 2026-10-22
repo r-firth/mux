@@ -90,6 +90,7 @@ enum Command {
     MoveTabLeft,
     MoveTabRight,
     Clear,
+    Reset,
     NextPane,
     BiggerText,
     SmallerText,
@@ -369,6 +370,10 @@ impl MuxApp {
             }
             Command::Clear => {
                 self.clear_pane(cx);
+                return;
+            }
+            Command::Reset => {
+                self.reset_pane(cx);
                 return;
             }
             Command::SelectOutput => {
@@ -791,7 +796,7 @@ impl MuxApp {
     /// What mux can do, each with the keys that do it and other words it
     /// answers to. Some say what they will do to the pane or tab on screen.
     #[allow(clippy::too_many_lines)] // One entry per command.
-    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 33] {
+    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 34] {
         let zoomed = self.active_tab_zoomed();
         let agent_here = self
             .active_agent_pane()
@@ -896,7 +901,13 @@ impl MuxApp {
                 Command::Clear,
                 "⌘k",
                 "clear this pane",
-                "clean wipe reset cls history scrollback",
+                "clean wipe cls history scrollback",
+            ),
+            (
+                Command::Reset,
+                "",
+                "reset this pane's terminal",
+                "reset garbled broken stuck mouse mode ris stty sane",
             ),
             (
                 Command::SelectOutput,

@@ -50,7 +50,7 @@ actions for what Mux has a key for do what that key does: `new_tab`,
 `toggle_command_palette`, `start_search`, `search_selection`,
 `copy_to_clipboard`, `paste_from_clipboard`, `paste_from_selection`, `select_all`, the scroll
 actions (`scroll_page_lines` and `scroll_page_fractional` too), `jump_to_prompt`,
-`prompt_surface_title` (names the pane), `copy_url_to_clipboard` (the link under the pointer) and `write_scrollback_file:open`
+`reset`, `prompt_surface_title` (names the pane), `copy_url_to_clipboard` (the link under the pointer) and `write_scrollback_file:open`
 (opens the pane's history in an editor). Sequences (`ctrl+a>n`), `global:` binds and
 actions Mux has nothing for are left out. `Cmd+Shift+,` picks up new and
 changed binds; one taken out of the config gives its key back to the pane.

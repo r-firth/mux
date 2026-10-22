@@ -33,6 +33,7 @@ enum Item {
     NamePane,
     BreakPane,
     Clear,
+    Reset,
     Find,
     OpenHistory,
     RevealDirectory,
@@ -249,6 +250,7 @@ impl MuxApp {
             line(Item::NamePane, "name pane…", "⌃p c", true, true),
             line(Item::BreakPane, "move to new tab", "⌃t b", split, false),
             line(Item::Clear, "clear", "⌘k", true, true),
+            line(Item::Reset, "reset terminal", "", true, false),
             line(Item::Find, "find…", "⌘f", true, false),
             line(Item::OpenHistory, "open history in editor", "", true, false),
             line(
@@ -336,6 +338,7 @@ impl MuxApp {
                 self.run_shortcut(Action::BreakPaneToTab, window, cx);
             }
             Item::Clear => self.clear_pane(cx),
+            Item::Reset => self.reset_pane(cx),
             Item::Find => self.open_find(window, cx),
             Item::OpenHistory => {
                 if let Some(pane_id) = pane_id {

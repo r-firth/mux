@@ -2829,6 +2829,19 @@ impl MuxApp {
         self.backend.send(CommandMessage::ClearPane { pane_id });
     }
 
+    /// Put the pane's terminal back as it started, as Ghostty's `reset`.
+    fn reset_pane(&mut self, cx: &mut Context<Self>) {
+        let Some(pane_id) = self
+            .terminal_input_pane_id()
+            .filter(|pane_id| self.active_agent_pane() != Some(*pane_id))
+        else {
+            return;
+        };
+        self.return_to_latest(pane_id, cx);
+        self.backend.send(CommandMessage::ResetPane { pane_id });
+        self.say_in_strip("reset the terminal", false, cx);
+    }
+
     /// A Mac shortcut does what its Zellij keys do, from whatever mode the
     /// keys were in, and leaves them in Normal; Locked stays locked until
     /// Ctrl+g.

@@ -56,6 +56,7 @@ enum Command {
     Reload,
     FullScreen,
     Clear,
+    Reset,
     Quit,
     Palette,
     Settings,
@@ -232,6 +233,7 @@ impl MuxApp {
                 return self.scroll_input_pane(TerminalViewportScroll::Delta(lines), cx);
             }
             Command::NamePane => return self.open_rename_pane(window, cx),
+            Command::Reset => return self.reset_pane(cx),
             Command::CopyUrl => return self.copy_link_under_pointer(cx),
             Command::OpenHistory => {
                 if let Some(pane_id) = self.terminal_input_pane_id() {
@@ -452,6 +454,7 @@ fn parse_action(action: &str) -> Option<Bound> {
         "open_config" => Command::Settings,
         "toggle_fullscreen" | "toggle_native_fullscreen" => Command::FullScreen,
         "clear_screen" => Command::Clear,
+        "reset" => Command::Reset,
         "quit" => Command::Quit,
         "toggle_command_palette" => Command::Palette,
         "start_search" => Command::Find,

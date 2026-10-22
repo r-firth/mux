@@ -149,6 +149,11 @@ pub enum Request {
     ClearPane {
         pane_id: PaneId,
     },
+    /// Reset a pane's terminal, as Ghostty's `reset` does, for a program
+    /// that left it in a broken state.
+    ResetPane {
+        pane_id: PaneId,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
