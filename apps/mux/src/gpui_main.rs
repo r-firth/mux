@@ -8,6 +8,7 @@ mod agent_completion;
 mod agent_view;
 mod backend;
 mod chrome;
+mod cursor_blink;
 mod cursor_click;
 mod file_drop;
 mod find;
@@ -496,6 +497,11 @@ fn restore_pane_replica(
     engine
         .set_default_cursor_style(pane_cursor_style())
         .with_context(|| format!("set the cursor of terminal pane {}", pane.pane_id))?;
+    if cursor_blink::cursor_blink_setting() == Some(true) {
+        engine
+            .set_default_cursor_blink(true)
+            .with_context(|| format!("set the cursor of terminal pane {}", pane.pane_id))?;
+    }
     // The daemon remembers the title; the sequence that set it may predate
     // the checkpoint, so the replay alone cannot be trusted to carry it.
     let mut title = TitleScanner::seeded(pane.title.clone());
@@ -668,6 +674,10 @@ struct MuxApp {
     focus_handle: FocusHandle,
     /// What a dead key or an input method has composed so far.
     ime_marked: Option<String>,
+    /// When the cursor's blink last started over, and since when a timer
+    /// has kept it blinking.
+    blink_since: Instant,
+    blink_timer: Option<Instant>,
     backend: BackendHandle,
     /// Where the window's events arrive, for the panes' parsers to say they
     /// have taken in output.
@@ -888,6 +898,8 @@ impl MuxApp {
         let mut app = Self {
             focus_handle,
             ime_marked: None,
+            blink_since: Instant::now(),
+            blink_timer: None,
             backend,
             events,
             state_dir,
@@ -1083,6 +1095,13 @@ impl MuxApp {
     /// Keep the slow pulse ticking while anything shows it: a live agent
     /// pane, or a tab chip whose agent is at work behind the scenes. It stops
     /// by itself once nothing is working, so an idle window never redraws.
+    /// Keep the timers going that draw what moves on its own: an agent's
+    /// pulse and a blinking cursor.
+    fn ensure_animations(&mut self, cx: &mut Context<Self>) {
+        self.ensure_agent_pulse(cx);
+        self.ensure_cursor_blink(cx);
+    }
+
     fn ensure_agent_pulse(&mut self, cx: &mut Context<Self>) {
         if self.agent_pulse_running || !self.agent_pulse_wanted() {
             return;
@@ -2130,6 +2149,7 @@ impl MuxApp {
         // dead key's composed letter arrives as a key, not from the input
         // method.
         self.ime_marked = None;
+        self.restart_cursor_blink();
         let pane_id = terminal_key_down_target(
             &self.terminal_key_presses,
             &keystroke.key,
@@ -5230,7 +5250,7 @@ impl MuxApp {
             font_family: self.terminal_font.clone(),
             metrics: self.metrics,
             // A dead shell has no cursor to show.
-            focused: geometry.focused && !self.pane_has_exited(pane_id),
+            focused: geometry.focused && !self.pane_has_exited(pane_id) && self.cursor_lit(pane_id),
             chrome: gpui_terminal::TerminalChrome {
                 surface: color(SURFACE),
                 cursor: self.active_ink().color(),
@@ -5386,7 +5406,7 @@ impl UserEvent {
 
 impl Render for MuxApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.ensure_agent_pulse(cx);
+        self.ensure_animations(cx);
         self.sync_window_title(window);
         let theme = BezelTheme::of(cx).clone();
         let viewport = window.viewport_size();

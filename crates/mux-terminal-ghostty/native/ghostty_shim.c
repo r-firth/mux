@@ -439,6 +439,16 @@ int32_t mux_ghostty_terminal_set_default_cursor_style(
       &value);
 }
 
+int32_t mux_ghostty_terminal_set_default_cursor_blink(
+    mux_ghostty_terminal_t terminal,
+    uint8_t blink) {
+  bool value = blink != 0;
+  return (int32_t)ghostty_terminal_set(
+      (GhosttyTerminal)terminal,
+      GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_BLINK,
+      &value);
+}
+
 int32_t mux_ghostty_terminal_apply_theme(
     mux_ghostty_terminal_t raw_terminal,
     const mux_ghostty_rgb_t *background,

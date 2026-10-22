@@ -178,6 +178,35 @@ fn parse_cursor_style(contents: &str, style: &mut CursorStyle) {
     }
 }
 
+/// Whether the cursor blinks: `cursor-style-blink` from the user's Ghostty
+/// config. `None` when it is not set, when a cursor blinks only if its
+/// program asks.
+#[must_use]
+pub fn user_cursor_blink() -> Option<bool> {
+    let mut blink = None;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_cursor_blink(&contents, &mut blink);
+            }
+        }
+    }
+    blink
+}
+
+fn parse_cursor_blink(contents: &str, blink: &mut Option<bool>) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "cursor-style-blink" {
+            match value.as_str() {
+                "" => *blink = None,
+                "true" => *blink = Some(true),
+                "false" => *blink = Some(false),
+                _ => {}
+            }
+        }
+    }
+}
+
 /// How much of an unfocused split shows through: `unfocused-split-opacity`
 /// from the user's Ghostty config, kept between 0.15 and 1 as Ghostty keeps
 /// it, 0.7 by default as in Ghostty.
@@ -1050,6 +1079,7 @@ mod linked {
         ) -> i32;
         fn mux_ghostty_terminal_set_history_limit(terminal: *mut c_void, max_bytes: usize) -> i32;
         fn mux_ghostty_terminal_set_default_cursor_style(terminal: *mut c_void, style: u8) -> i32;
+        fn mux_ghostty_terminal_set_default_cursor_blink(terminal: *mut c_void, blink: u8) -> i32;
         fn mux_ghostty_terminal_screen_text(
             terminal: *mut c_void,
             out_bytes: *mut *mut u8,
@@ -1446,6 +1476,18 @@ mod linked {
             // SAFETY: the terminal is owned and the style is passed by value.
             check(unsafe {
                 mux_ghostty_terminal_set_default_cursor_style(self.terminal.as_ptr(), style)
+            })
+        }
+
+        /// Whether the cursor blinks until the program says otherwise, and
+        /// again when it resets its choice.
+        pub fn set_default_cursor_blink(&mut self, blink: bool) -> Result<(), GhosttyError> {
+            // SAFETY: the terminal is owned and the flag is passed by value.
+            check(unsafe {
+                mux_ghostty_terminal_set_default_cursor_blink(
+                    self.terminal.as_ptr(),
+                    u8::from(blink),
+                )
             })
         }
 
@@ -3340,6 +3382,19 @@ mod theme_tests {
         assert_eq!(action, RightClick::Ignore);
         parse_right_click("right-click-action =\n", &mut action);
         assert_eq!(action, RightClick::Menu);
+    }
+
+    #[test]
+    fn cursor_blink_is_set_unset_or_left_to_the_program() {
+        let mut blink = None;
+        parse_cursor_blink("cursor-style-blink = true\n", &mut blink);
+        assert_eq!(blink, Some(true));
+        parse_cursor_blink("cursor-style-blink = maybe\n", &mut blink);
+        assert_eq!(blink, Some(true));
+        parse_cursor_blink("cursor-style-blink = false\n", &mut blink);
+        assert_eq!(blink, Some(false));
+        parse_cursor_blink("cursor-style-blink =\n", &mut blink);
+        assert_eq!(blink, None);
     }
 
     #[test]

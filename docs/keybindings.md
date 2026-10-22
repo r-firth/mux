@@ -155,6 +155,11 @@ Selected text takes `selection-background` and `selection-foreground` from
 your Ghostty config or theme when they are set, and a warm wash over the
 text's own colours when not.
 
+The cursor blinks when its program asks it to, as Vim's insert-mode bar
+can, or always with `cursor-style-blink = true` in your Ghostty config;
+`false` keeps it steady whatever the program asks. Only the pane with the
+keys blinks, and typing shows the cursor again at once.
+
 With `focus-follows-mouse = true` in your Ghostty config, the pane under
 the pointer takes the keys as the pointer moves onto it.
 
