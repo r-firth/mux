@@ -80,6 +80,8 @@ a double click evens the split out.
 
 Clearing a tab's name hands it back to whatever its shell shows. A moved
 tab keeps its name; a numbered tab takes the number of its new place.
+With the mouse, drag a tab's chip along the strip to move it, and
+double-click the chip of the tab on screen to rename it.
 
 Zellij's `Ctrl+o` session prefix intentionally has no Normal-mode binding yet.
 This keeps foreground Control-key input untouched except for `Ctrl+p` and

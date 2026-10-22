@@ -3701,7 +3701,7 @@ impl MuxApp {
             (None, None) => label.clone(),
         }
         .into();
-        let mut chip = h_flex()
+        let chip = h_flex()
             .id(SharedString::from(format!("tab-{tab_id}")))
             .group(group.clone())
             .flex_none()
@@ -3712,9 +3712,17 @@ impl MuxApp {
             .rounded(px(6.0))
             .cursor_pointer()
             .tooltip(move |_, cx| strip_tooltip(tooltip.clone(), None, cx))
-            .on_click(cx.listener(move |this, _, _, _| {
-                this.send_workspace(WorkspaceCommand::SelectTab(tab_id));
-            }));
+            .on_click(
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    // A second click on the tab, now on screen, names it.
+                    if event.click_count() == 2 && active {
+                        this.open_rename_tab(window, cx);
+                    } else {
+                        this.send_workspace(WorkspaceCommand::SelectTab(tab_id));
+                    }
+                }),
+            );
+        let mut chip = Self::with_tab_drag(chip, tab_id, position, label.clone(), ink, cx);
         if tab_mode && position < 9 {
             chip = chip.child(kbd(
                 (position + 1).to_string(),
@@ -3771,6 +3779,45 @@ impl MuxApp {
             chip.hover(|style| style.bg(wash(0.05)))
                 .active(|style| style.bg(wash(0.10)))
         }
+    }
+
+    /// A chip dragged along the strip takes the place of the one it is
+    /// dropped on, and is shown. The chip it is over shows an edge in the
+    /// dragged tab's ink on the side it will land.
+    fn with_tab_drag(
+        chip: gpui::Stateful<gpui::Div>,
+        tab_id: TabId,
+        position: usize,
+        label: String,
+        ink: Ink,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        chip.on_drag(
+            DraggedTab {
+                tab_id,
+                from: position,
+                label,
+                ink,
+            },
+            |dragged, _, _, cx| cx.new(|_| dragged.clone()),
+        )
+        .drag_over::<DraggedTab>(move |style, dragged, _, _| {
+            let edge = dragged.ink.color();
+            match dragged.from.cmp(&position) {
+                std::cmp::Ordering::Greater => style.bg(wash(0.08)).border_l_2().border_color(edge),
+                std::cmp::Ordering::Less => style.bg(wash(0.08)).border_r_2().border_color(edge),
+                std::cmp::Ordering::Equal => style,
+            }
+        })
+        .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, _| {
+            if dragged.tab_id != tab_id {
+                this.send_workspace(WorkspaceCommand::MoveTab {
+                    tab: dragged.tab_id,
+                    to: position,
+                });
+            }
+            this.send_workspace(WorkspaceCommand::SelectTab(dragged.tab_id));
+        }))
     }
 
     /// The chip's name as a field while it is being renamed, set exactly
@@ -4679,6 +4726,35 @@ impl Render for StripTooltip {
                     tip.child(kbd(keys, color(TEXT)))
                 }),
         )
+    }
+}
+
+/// A tab chip on its way to another place in the strip.
+#[derive(Clone)]
+struct DraggedTab {
+    tab_id: TabId,
+    from: usize,
+    label: String,
+    ink: Ink,
+}
+
+impl Render for DraggedTab {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .h(px(26.0))
+            .px(px(10.0))
+            .gap(px(8.0))
+            .items_center()
+            .rounded(px(6.0))
+            .bg(color(SURFACE))
+            .border_1()
+            .border_color(self.ink.color().opacity(0.6))
+            .shadow_md()
+            .font_family(EMBEDDED_TERMINAL_FONT)
+            .text_size(px(12.5))
+            .text_color(color(TEXT))
+            .child(div().size(px(6.0)).rounded_full().bg(self.ink.color()))
+            .child(self.label.clone())
     }
 }
 
