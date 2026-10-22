@@ -4821,8 +4821,11 @@ impl MuxApp {
         };
         // When the strip is short of room, hints that don't fit wrap onto a
         // second line that is clipped away, so none is ever cut in half.
+        // In a mode its keys are what the strip is for, so a long row of
+        // tabs scrolls rather than crowd them out.
         let mut row = h_flex()
             .min_w(px(0.0))
+            .when(!normal, |row| row.flex_none().max_w(gpui::relative(0.72)))
             .h(px(24.0))
             .flex_wrap()
             .when(normal, Styled::flex_row_reverse)
