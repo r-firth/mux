@@ -3789,6 +3789,16 @@ impl MuxApp {
             .map_or_else(|| "shell".to_owned(), chrome::tab_label)
     }
 
+    /// A tab's name as its tooltip gives it: the chip's short name, then
+    /// in full what its focused pane's head says, when that says more.
+    fn tab_tooltip_name(&self, tab: &mux_workspace::Tab, label: &str) -> String {
+        self.panes
+            .get(&tab.focused_pane)
+            .and_then(PaneReplica::head_title)
+            .filter(|full| full != label)
+            .map_or_else(|| label.to_owned(), |full| format!("{label} — {full}"))
+    }
+
     /// One tab in gofer's strip voice: an ink dot, then the name. The active
     /// tab is lifted onto a wash and set bold; the rest stay quiet until
     /// hovered. Jump numbers only appear while tab mode is listening for them.
@@ -3816,11 +3826,12 @@ impl MuxApp {
             .any(|agent| agent.tab_id == Some(tab_id) && self.agent_unseen.contains(&agent.id));
         // The tab on screen shows its panes' calls in their own heads.
         let call = self.tab_call(tab).filter(|_| !active);
+        let named = self.tab_tooltip_name(tab, &label);
         let tooltip: SharedString = match (activity, call) {
-            (_, Some(call)) => format!("{label} · {}", pane_calls::call_words(call)),
-            (Some(AgentTabActivity::Idle), None) if unseen => format!("{label} · agent finished"),
-            (Some(activity), None) => format!("{label} · {}", agent_tab_activity_label(activity)),
-            (None, None) => label.clone(),
+            (_, Some(call)) => format!("{named} · {}", pane_calls::call_words(call)),
+            (Some(AgentTabActivity::Idle), None) if unseen => format!("{named} · agent finished"),
+            (Some(activity), None) => format!("{named} · {}", agent_tab_activity_label(activity)),
+            (None, None) => named,
         }
         .into();
         let chip = h_flex()
