@@ -306,6 +306,7 @@ where
         Request::RunningPrograms { pane_ids } => {
             Ok(Response::RunningPrograms(state.running_programs(&pane_ids)))
         }
+        Request::ClearPane { pane_id } => state.clear_pane(pane_id).map(|()| Response::Ack),
     };
 
     if unacknowledged_input && response == Ok(Response::Ack) {

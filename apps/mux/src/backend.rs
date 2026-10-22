@@ -84,6 +84,10 @@ pub enum CommandMessage {
     RefreshAgentFiles {
         pane_id: PaneId,
     },
+    /// Clear a pane's screen and history, as Cmd+K does.
+    ClearPane {
+        pane_id: PaneId,
+    },
     /// Ask what these panes are running before closing `target`.
     CheckRunning {
         target: CloseTarget,
@@ -491,6 +495,9 @@ impl BackendConnection {
             }
             CommandMessage::RefreshAgentFiles { pane_id } => {
                 self.refresh_agent_files(events, pane_id).await?;
+            }
+            CommandMessage::ClearPane { pane_id } => {
+                report_client_result(events, self.client.clear_pane(pane_id).await);
             }
             CommandMessage::CheckRunning { target, pane_ids } => {
                 self.check_running(events, target, pane_ids).await?;

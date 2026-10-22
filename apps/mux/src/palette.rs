@@ -74,6 +74,7 @@ enum Command {
     BreakPane,
     MoveTabLeft,
     MoveTabRight,
+    Clear,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -283,6 +284,10 @@ impl MuxApp {
             }
             Command::QuickSelect => {
                 self.toggle_quick_select(window, cx);
+                return;
+            }
+            Command::Clear => {
+                self.clear_pane(cx);
                 return;
             }
             Command::NewSession => {
@@ -614,7 +619,7 @@ impl MuxApp {
     /// What mux can do, each with the keys that do it and other words it
     /// answers to. Some say what they will do to the pane or tab on screen.
     #[allow(clippy::too_many_lines)] // One entry per command.
-    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 18] {
+    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 19] {
         let zoomed = self
             .session
             .as_ref()
@@ -678,6 +683,12 @@ impl MuxApp {
                 "⌘f",
                 "find in this pane",
                 "search look grep history scrollback",
+            ),
+            (
+                Command::Clear,
+                "⌘k",
+                "clear this pane",
+                "clean wipe reset cls history scrollback",
             ),
             (
                 Command::QuickSelect,

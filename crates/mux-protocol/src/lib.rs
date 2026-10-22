@@ -26,7 +26,8 @@ use tokio::task::JoinHandle;
 /// each pane attachment, and a workspace command that sets a split's ratio.
 /// Version 9 adds workspace commands that move a tab along the strip and
 /// break a pane out into a tab of its own, a request for what is running in
-/// a pane besides its shell, and an event when such a program finishes.
+/// a pane besides its shell, an event when such a program finishes, and a
+/// request to clear a pane.
 pub const PROTOCOL_VERSION: u16 = 9;
 /// Request id zero is reserved for latency-sensitive messages whose successful
 /// completion does not require a response.
@@ -143,6 +144,10 @@ pub enum Request {
     /// that are running something.
     RunningPrograms {
         pane_ids: Vec<PaneId>,
+    },
+    /// Clear a pane's screen and history, as Cmd+K does.
+    ClearPane {
+        pane_id: PaneId,
     },
 }
 

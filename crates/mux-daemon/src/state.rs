@@ -117,6 +117,18 @@ impl DaemonState {
         }
     }
 
+    pub fn clear_pane(&self, pane_id: PaneId) -> Result<(), RemoteError> {
+        let pane = self
+            .sessions
+            .read()
+            .values()
+            .find_map(|session| session.panes.read().get(&pane_id).cloned())
+            .ok_or_else(|| {
+                RemoteError::new(ErrorCode::NotFound, format!("pane not found: {pane_id}"))
+            })?;
+        pane.clear().map_err(internal_error)
+    }
+
     /// What these panes run in front of their shells, wherever they are.
     pub fn running_programs(&self, pane_ids: &[PaneId]) -> Vec<RunningProgram> {
         let sessions = self.sessions.read();

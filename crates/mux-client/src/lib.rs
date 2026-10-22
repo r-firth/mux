@@ -265,6 +265,13 @@ impl Client {
         }
     }
 
+    pub async fn clear_pane(&mut self, pane_id: PaneId) -> Result<(), ClientError> {
+        expect_acknowledgement(
+            self.request(Request::ClearPane { pane_id }).await?,
+            &Response::Ack,
+        )
+    }
+
     /// What these panes are running in front of their shells, for those
     /// that are running something.
     pub async fn running_programs(

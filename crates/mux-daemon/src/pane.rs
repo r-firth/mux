@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 #[cfg(feature = "ghostty")]
 use std::sync::OnceLock;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, sync_channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -31,6 +31,15 @@ const OUTPUT_STREAM_GAP: Duration = Duration::from_millis(2);
 /// How long output after a lull waits for more: long enough that a screen
 /// drawn in one go is sent whole, short enough not to hold up a key's echo.
 const OUTPUT_LULL_IDLE: Duration = Duration::from_micros(150);
+/// Home, erase the screen, erase the history.
+const CLEAR_SCREEN_AND_HISTORY: &[u8] = b"\x1b[H\x1b[2J\x1b[3J";
+const CLEAR_HISTORY: &[u8] = b"\x1b[3J";
+/// Form feed, Ctrl+L: a shell at its prompt draws the prompt again.
+const REDRAW_PROMPT: &[u8] = b"\x0c";
+
+/// A way into the pane's output stream, behind what the PTY has said, for
+/// bytes Mux itself has for the terminal. It closes with the PTY.
+type OutputInjector = Arc<Mutex<Option<SyncSender<Vec<u8>>>>>;
 
 #[derive(Debug)]
 struct ForegroundProcessTracker {
@@ -195,6 +204,7 @@ pub struct PaneRuntime {
     title: Arc<Mutex<TitleScanner>>,
     /// The program in front of the shell when last looked, and since when.
     foreground_command: Mutex<Option<ForegroundCommand>>,
+    output_injector: OutputInjector,
 }
 
 struct ForegroundCommand {
@@ -236,7 +246,7 @@ impl PaneRuntime {
         let exit_status = Arc::new(Mutex::new(None));
         let master = Arc::new(Mutex::new(pair.master));
         let title = Arc::new(Mutex::new(TitleScanner::default()));
-        spawn_reader(
+        let output_injector = spawn_reader(
             reader,
             PaneOutputWorker {
                 session_id,
@@ -282,6 +292,7 @@ impl PaneRuntime {
             process_id,
             title,
             foreground_command: Mutex::new(None),
+            output_injector,
         }))
     }
 
@@ -338,6 +349,32 @@ impl PaneRuntime {
             return None;
         }
         Some(process_name(foreground))
+    }
+
+    /// Clear the pane, as Cmd+K does in a Mac terminal. At the shell's
+    /// prompt the screen and its history are wiped and the shell draws its
+    /// prompt again at the top. With a program in front, only the history
+    /// goes: an editor or a pager keeps the screen it drew.
+    pub fn clear(&self) -> Result<(), PaneError> {
+        if self.exit_status.lock().is_some() {
+            return Ok(());
+        }
+        let at_prompt = foreground_process_id(&self.master)
+            .is_none_or(|foreground| Some(foreground) == self.process_id);
+        let clear = if at_prompt {
+            CLEAR_SCREEN_AND_HISTORY
+        } else {
+            CLEAR_HISTORY
+        };
+        if let Some(injector) = self.output_injector.lock().as_ref() {
+            // Behind the output already read, so the clear lands in order
+            // for this terminal and every attached client's.
+            let _ = injector.send(clear.to_vec());
+        }
+        if at_prompt {
+            self.write(REDRAW_PROMPT)?;
+        }
+        Ok(())
     }
 
     /// Look at what is in front of the shell. When a program the shell ran
@@ -420,8 +457,10 @@ fn create_terminal_engine(
 fn spawn_reader(
     mut reader: Box<dyn Read + Send>,
     output: PaneOutputWorker,
-) -> Result<(), PaneError> {
+) -> Result<OutputInjector, PaneError> {
     let (output_sender, output_receiver) = sync_channel::<Vec<u8>>(256);
+    let injector: OutputInjector = Arc::new(Mutex::new(Some(output_sender.clone())));
+    let closing = Arc::clone(&injector);
     let session_id = output.session_id;
     let pane_id = output.pane_id;
     thread::Builder::new()
@@ -447,12 +486,14 @@ fn spawn_reader(
                     }
                 }
             }
+            // The output stream ends with the PTY's.
+            closing.lock().take();
         })?;
 
     thread::Builder::new()
         .name(format!("mux-pane-output-{pane_id}"))
         .spawn(move || output.run(&output_receiver))?;
-    Ok(())
+    Ok(injector)
 }
 
 /// A process's name as the system knows it, or a stand-in when it has none.

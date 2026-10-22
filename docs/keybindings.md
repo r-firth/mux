@@ -33,6 +33,7 @@ from an agent pane too. They are in the menu bar's Shell and Window menus.
 | `Cmd+Shift+D` | Split downward |
 | `Cmd+Shift+Return` | Toggle focused-pane zoom |
 | `Cmd+W` | Close the focused pane |
+| `Cmd+K` | Clear the focused pane: its screen and history at the prompt, only its history with a program in front |
 | `Cmd+1` through `Cmd+8` | Select a numbered tab |
 | `Cmd+9` | Select the last tab |
 | `Cmd+Shift+]` / `Ctrl+Tab` | Next tab |

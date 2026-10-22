@@ -156,6 +156,7 @@ gpui::actions!(
         AcceptAgentCompletion,
         CancelAgentTurn,
         ChoosePaletteRow,
+        ClearMuxPane,
         CloseFind,
         CloseMuxPane,
         ClosePalette,
@@ -2158,6 +2159,19 @@ impl MuxApp {
         }
     }
 
+    /// Clear the terminal pane with the keys, its history too, and show
+    /// it from the top. An agent pane has nothing to clear.
+    fn clear_pane(&mut self, cx: &mut Context<Self>) {
+        let Some(pane_id) = self.terminal_input_pane_id() else {
+            return;
+        };
+        if self.active_agent_pane() == Some(pane_id) {
+            return;
+        }
+        self.return_to_latest(pane_id, cx);
+        self.backend.send(CommandMessage::ClearPane { pane_id });
+    }
+
     /// A Mac shortcut does what its Zellij keys do, from whatever mode the
     /// keys were in, and leaves them in Normal.
     fn run_shortcut(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
@@ -4081,6 +4095,7 @@ impl MuxApp {
             .on_action(cx.listener(|this, _: &ResetMuxText, _, cx| {
                 this.set_font_size(this.configured_font_size, cx);
             }))
+            .on_action(cx.listener(|this, _: &ClearMuxPane, _, cx| this.clear_pane(cx)))
             .on_action(cx.listener(|this, _: &NewMuxTab, window, cx| {
                 this.run_shortcut(Action::NewTab, window, cx);
             }))
@@ -5490,6 +5505,7 @@ fn configure_application_menu(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Find…", OpenFind),
                 MenuItem::action("Quick Select", OpenQuickSelect),
+                MenuItem::action("Clear", ClearMuxPane),
                 MenuItem::separator(),
                 MenuItem::action("Close Pane", CloseMuxPane),
             ],
@@ -5517,6 +5533,7 @@ fn bind_mac_shortcuts(cx: &mut App) {
         KeyBinding::new("cmd-shift-d", SplitMuxDown, None),
         KeyBinding::new("cmd-shift-enter", ZoomMuxPane, None),
         KeyBinding::new("cmd-w", CloseMuxPane, None),
+        KeyBinding::new("cmd-k", ClearMuxPane, None),
         KeyBinding::new("cmd-}", NextMuxTab, None),
         KeyBinding::new("cmd-{", PreviousMuxTab, None),
         KeyBinding::new("ctrl-tab", NextMuxTab, None),
