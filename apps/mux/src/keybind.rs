@@ -79,6 +79,35 @@ fn read_keybinds() -> Vec<(String, Bound)> {
         .collect()
 }
 
+/// What the settings say of the user's keybinds: how many Mux follows, and
+/// the triggers of any it leaves to Ghostty. None when there are none.
+pub(super) fn keybind_summary() -> Option<String> {
+    summarize(&mux_terminal_ghostty::user_keybinds())
+}
+
+fn summarize(lines: &[String]) -> Option<String> {
+    if lines.is_empty() {
+        return None;
+    }
+    let left: Vec<&str> = lines
+        .iter()
+        .filter(|line| parse_keybind(line).is_none())
+        .map(|line| line.split('=').next().unwrap_or(line).trim())
+        .collect();
+    let used = lines.len() - left.len();
+    let followed = if used == 1 {
+        "1 followed".to_owned()
+    } else {
+        format!("{used} followed")
+    };
+    let summary = if left.is_empty() {
+        followed
+    } else {
+        format!("{followed}; left to Ghostty: {}", left.join(", "))
+    };
+    Some(summary)
+}
+
 /// Bind the keys the user's Ghostty config binds, over Mux's own. Run
 /// after Mux's bindings so these win, and again after a reload.
 pub(super) fn bind_ghostty_keys(cx: &mut App) {
@@ -461,6 +490,20 @@ mod tests {
         );
         assert_eq!(parse_keybind("cmd+j=toggle_quick_terminal"), None);
         assert_eq!(parse_keybind("no action"), None);
+    }
+
+    #[test]
+    fn the_settings_name_the_binds_left_to_ghostty() {
+        assert_eq!(summarize(&[]), None);
+        let lines = [
+            "shift+enter=text:\\r".to_owned(),
+            "ctrl+a>n=new_tab".to_owned(),
+            "cmd+j=toggle_quick_terminal".to_owned(),
+        ];
+        assert_eq!(
+            summarize(&lines).as_deref(),
+            Some("1 followed; left to Ghostty: ctrl+a>n, cmd+j")
+        );
     }
 
     #[test]

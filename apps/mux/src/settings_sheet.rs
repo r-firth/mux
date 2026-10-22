@@ -442,6 +442,7 @@ impl MuxApp {
             .child(line("config", read))
             .child(line("font", font))
             .child(line("theme", theme))
+            .children(super::keybind::keybind_summary().map(|summary| line("keybinds", summary)))
             .child(
                 h_flex()
                     .pl(px(24.0))
