@@ -2,7 +2,8 @@
 //! OSC 133 marks a shell prints; zsh and bash print none of their own, so a
 //! pane's shell is started with a little that does. zsh is pointed at a
 //! `.zshenv` of Mux's that hands over to the user's own startup files, and
-//! bash is given a `PROMPT_COMMAND`. Other shells start as they are.
+//! bash is given a `PROMPT_COMMAND`, which also says how each command ended.
+//! Other shells start as they are.
 
 use std::{
     ffi::OsString,
@@ -13,7 +14,13 @@ use std::{
 use tracing::warn;
 
 const ZSHENV: &str = include_str!("shell_integration/zshenv");
-const BASH_PROMPT_COMMAND: &str = r"builtin printf '\033]133;A\007'";
+/// How the last command ended and where the prompt begins, keeping `$?` for
+/// a `PROMPT_COMMAND` of the user's that runs after it.
+const BASH_PROMPT_COMMAND: &str = concat!(
+    "__mux_status=$?; ",
+    r"builtin printf '\033]133;D;%s\007\033]133;A\007' $__mux_status; ",
+    "__mux_keep_status() { return $1; }; __mux_keep_status $__mux_status",
+);
 
 static ROOT: OnceLock<PathBuf> = OnceLock::new();
 

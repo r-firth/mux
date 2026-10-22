@@ -302,8 +302,9 @@ A pane out of sight that rings the bell, or sends a desktop notification
 until it is looked at. Its tab's dot turns peach with what it said beside the
 name, and in the tab on screen the pane's head says it. A program that ran for
 ten seconds or more and finishes out of sight, such as a build or a test run,
-calls the same way, with how long it took: `cargo done in 3m`. While Mux is in the
-background, the first call also bounces its Dock icon. A bell in the pane you
+calls the same way, with how long it took: `cargo done in 3m`, or
+`cargo failed (101) after 3m` when the shell says it failed (zsh and bash do,
+as Mux starts them). While Mux is in the background, the first call also bounces its Dock icon. A bell in the pane you
 are looking at flashes it for a moment in the tab's ink instead.
 
 A program that reports its progress with OSC 9;4, as Ghostty shows, gets a

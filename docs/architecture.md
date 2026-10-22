@@ -125,8 +125,8 @@ writes a `.zshenv` to `shell-integration/zsh` in the state directory and
 starts zsh with `ZDOTDIR` there; it restores the user's `ZDOTDIR` (passed in
 `MUX_USER_ZDOTDIR`), sources their own `.zshenv`, and adds precmd and preexec
 hooks that print the marks, so the rest of their startup files load as
-usual. bash is given a `PROMPT_COMMAND` that prints the prompt mark ahead of
-any the user exported.
+usual. bash is given a `PROMPT_COMMAND` that prints the prompt mark, and how the
+last command ended, ahead of any the user exported, keeping `$?` for it.
 
 The daemon also owns ACP processes. Closing the native agent surface only
 detaches that view; explicit `/end` closes the selected process and the GUI

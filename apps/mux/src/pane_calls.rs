@@ -9,7 +9,8 @@
 //!
 //! A long program finishing calls the same way: a build or a test run that
 //! ends in a pane out of sight, or while mux is in the background, says it
-//! is done and how long it took.
+//! is done and how long it took, or that it failed when the shell's marks
+//! say it did.
 //!
 //! A bell in the pane you are looking at has nothing to mark, so the pane
 //! flashes instead, washed for a moment in its tab's ink.
@@ -27,8 +28,12 @@ impl MuxApp {
     /// A program has finished in a pane: one that ran long enough is a call,
     /// gathered with the rest.
     pub(super) fn note_finished_command(&mut self, pane_id: PaneId, program: &str, seconds: u64) {
+        let exit_status = self
+            .panes
+            .get_mut(&pane_id)
+            .and_then(|pane| pane.title.take_exit_status());
         if seconds >= LONG_COMMAND_SECONDS {
-            let words = format!("{program} done in {}", duration_words(seconds));
+            let words = finished_words(program, seconds, exit_status);
             self.finished_commands.push((pane_id, words));
         }
     }
@@ -170,6 +175,17 @@ impl MuxApp {
 
 /// A length of time as a tab chip has room for: seconds under a minute,
 /// then whole minutes, then hours and minutes.
+/// What a long program finishing says: done, or failed with the status the
+/// shell gave, or stopped by a signal such as Ctrl+C's.
+fn finished_words(program: &str, seconds: u64, exit_status: Option<i32>) -> String {
+    let took = duration_words(seconds);
+    match exit_status {
+        None | Some(0) => format!("{program} done in {took}"),
+        Some(130 | 143) => format!("{program} stopped after {took}"),
+        Some(status) => format!("{program} failed ({status}) after {took}"),
+    }
+}
+
 fn duration_words(seconds: u64) -> String {
     match seconds {
         0..60 => format!("{seconds}s"),
@@ -189,7 +205,21 @@ pub(super) fn call_words(call: &Attention) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::duration_words;
+    use super::{duration_words, finished_words};
+
+    #[test]
+    fn a_finished_program_says_how_it_ended() {
+        assert_eq!(finished_words("make", 120, Some(0)), "make done in 2m");
+        assert_eq!(finished_words("make", 120, None), "make done in 2m");
+        assert_eq!(
+            finished_words("make", 42, Some(2)),
+            "make failed (2) after 42s"
+        );
+        assert_eq!(
+            finished_words("tail", 60, Some(130)),
+            "tail stopped after 1m"
+        );
+    }
 
     #[test]
     fn durations_read_in_their_largest_units() {

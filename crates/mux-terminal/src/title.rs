@@ -6,7 +6,8 @@
 /// which shares the same escape grammar: the bell, and the desktop
 /// notifications of OSC 9 (iTerm2) and OSC 777 (rxvt, Ghostty). Sequences may
 /// be split across output chunks. A program copying to the clipboard with OSC
-/// 52, as Neovim, tmux and programs over ssh do, uses it too.
+/// 52, as Neovim, tmux and programs over ssh do, uses it too, and so do the
+/// shell's OSC 133 marks, which say how the last command ended.
 #[derive(Debug, Default)]
 pub struct TitleScanner {
     state: TitleScan,
@@ -15,6 +16,7 @@ pub struct TitleScanner {
     attention: Option<Attention>,
     copied: Option<String>,
     progress: Option<Progress>,
+    exit_status: Option<i32>,
 }
 
 /// A program asking to be noticed.
@@ -122,6 +124,12 @@ impl TitleScanner {
         self.copied.take()
     }
 
+    /// How the last command ended, as the shell said with OSC 133;D, unless
+    /// another has started since.
+    pub fn take_exit_status(&mut self) -> Option<i32> {
+        self.exit_status.take()
+    }
+
     pub fn scan(&mut self, bytes: &[u8]) {
         let mut rest = bytes;
         while let Some((&byte, after)) = rest.split_first() {
@@ -190,7 +198,7 @@ impl TitleScanner {
                     self.buffer.clear();
                     TitleScan::Clipboard
                 }
-                (TitleScan::Number(number @ (9 | 777)), b';') => {
+                (TitleScan::Number(number @ (9 | 133 | 777)), b';') => {
                     self.buffer.clear();
                     TitleScan::Notice(number)
                 }
@@ -238,6 +246,10 @@ impl TitleScanner {
     fn commit_notice(&mut self, number: u16) {
         let text = String::from_utf8_lossy(&self.buffer).into_owned();
         self.buffer.clear();
+        if number == 133 {
+            self.commit_shell_mark(&text);
+            return;
+        }
         let said = if number == 9 {
             // ConEmu numbers its own OSC 9 extensions (9;4 is progress); only
             // iTerm2's free text is a notification.
@@ -273,6 +285,21 @@ impl TitleScanner {
         } else {
             Attention::Notification(said)
         });
+    }
+}
+
+impl TitleScanner {
+    /// OSC 133: `C` as a command starts, `D ; status` as it ends. A command
+    /// starting forgets how the one before ended.
+    fn commit_shell_mark(&mut self, text: &str) {
+        let mut parts = text.split(';');
+        match parts.next() {
+            Some("C") => self.exit_status = None,
+            Some("D") => {
+                self.exit_status = parts.next().and_then(|status| status.trim().parse().ok());
+            }
+            _ => {}
+        }
     }
 }
 
@@ -376,6 +403,18 @@ mod tests {
         scanner.scan(b"\x1b]9;4;7;1\x07\x1b]9;5\x07");
         assert_eq!(scanner.take_progress(), None, "not progress");
         assert_eq!(scanner.take_attention(), None);
+    }
+
+    #[test]
+    fn the_shell_says_how_the_last_command_ended() {
+        let mut scanner = TitleScanner::default();
+        scanner.scan(b"\x1b]133;C\x07out\r\n\x1b]133;D;2\x07\x1b]133;A\x07$ ");
+        assert_eq!(scanner.take_exit_status(), Some(2));
+        assert_eq!(scanner.take_exit_status(), None);
+        scanner.scan(b"\x1b]133;D;0\x1b\\\x1b]133;C\x07");
+        assert_eq!(scanner.take_exit_status(), None, "a new command forgets it");
+        scanner.scan(b"\x1b]133;D\x07");
+        assert_eq!(scanner.take_exit_status(), None);
     }
 
     #[test]
