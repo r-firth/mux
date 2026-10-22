@@ -52,7 +52,10 @@ actions for what Mux has a key for do what that key does: `new_tab`,
 actions (`scroll_page_lines` and `scroll_page_fractional` too), `jump_to_prompt`,
 `reset`, `prompt_surface_title` (names the pane), `copy_url_to_clipboard` (the link under the pointer) and `write_scrollback_file:open`
 (opens the pane's history in an editor). Sequences (`ctrl+a>n`), `global:` binds and
-actions Mux has nothing for are left out. `Cmd+Shift+,` picks up new and
+actions Mux has nothing for are left out. `performable:` works as in
+Ghostty, so `performable:ctrl+c=copy_to_clipboard` copies a selection and
+otherwise lets `Ctrl+C` interrupt the program, and `unconsumed:` sends the
+key to the program as well. `Cmd+Shift+,` picks up new and
 changed binds; one taken out of the config gives its key back to the pane.
 
 Option composes characters, `Option+e` an accent and `Option+b` a `∫`, unless

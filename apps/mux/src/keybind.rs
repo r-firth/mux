@@ -77,20 +77,57 @@ enum Command {
     CopyUrl,
 }
 
-static KEYBINDS: ghostty_config::Reloadable<Vec<(String, Bound)>> =
+/// A bind from the user's config, with Ghostty's prefixes that change how
+/// it runs: `performable:` leaves the key to the program when the action
+/// has nothing to act on (`copy_to_clipboard` with nothing selected), and
+/// `unconsumed:` sends the key to the program as well.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Keybind {
+    trigger: String,
+    bound: Bound,
+    performable: bool,
+    unconsumed: bool,
+}
+
+static KEYBINDS: ghostty_config::Reloadable<Vec<Keybind>> =
     ghostty_config::Reloadable::new(read_keybinds);
 
-fn read_keybinds() -> Vec<(String, Bound)> {
+fn read_keybinds() -> Vec<Keybind> {
     mux_terminal_ghostty::user_keybinds()
         .iter()
         .filter_map(|line| {
-            let parsed = parse_keybind(line);
-            if parsed.is_none() {
+            let Some((trigger, bound)) = parse_keybind(line) else {
                 warn!(keybind = %line, "Ghostty keybind not understood; left to Mux");
-            }
-            parsed
+                return None;
+            };
+            let (performable, unconsumed) = prefixes(line);
+            Some(Keybind {
+                trigger,
+                bound,
+                performable,
+                unconsumed,
+            })
         })
         .collect()
+}
+
+/// Whether a bind's trigger carries `performable:` and `unconsumed:`.
+fn prefixes(line: &str) -> (bool, bool) {
+    let (mut performable, mut unconsumed) = (false, false);
+    let mut trigger = line.trim_start();
+    loop {
+        if let Some(rest) = trigger.strip_prefix("performable:") {
+            performable = true;
+            trigger = rest;
+        } else if let Some(rest) = trigger.strip_prefix("unconsumed:") {
+            unconsumed = true;
+            trigger = rest;
+        } else if let Some(rest) = trigger.strip_prefix("all:") {
+            trigger = rest;
+        } else {
+            return (performable, unconsumed);
+        }
+    }
 }
 
 /// What the settings say of the user's keybinds: how many Mux follows, and
@@ -128,7 +165,7 @@ pub(super) fn bind_ghostty_keys(cx: &mut App) {
     let bindings: Vec<KeyBinding> = KEYBINDS
         .get()
         .into_iter()
-        .map(|(trigger, bound)| {
+        .map(|Keybind { trigger, bound, .. }| {
             if bound == Bound::Unbind {
                 KeyBinding::new(&trigger, NoAction, None)
             } else {
@@ -150,12 +187,16 @@ pub(super) fn unbinds(keystroke: &Keystroke) -> bool {
         function: false,
         ..modifiers
     };
-    KEYBINDS.get().into_iter().any(|(trigger, bound)| {
-        bound == Bound::Unbind
-            && Keystroke::parse(&trigger).is_ok_and(|unbound| {
-                unbound.key == keystroke.key && held(unbound.modifiers) == held(keystroke.modifiers)
-            })
-    })
+    KEYBINDS
+        .get()
+        .into_iter()
+        .any(|Keybind { trigger, bound, .. }| {
+            bound == Bound::Unbind
+                && Keystroke::parse(&trigger).is_ok_and(|unbound| {
+                    unbound.key == keystroke.key
+                        && held(unbound.modifiers) == held(keystroke.modifiers)
+                })
+        })
 }
 
 impl MuxApp {
@@ -165,23 +206,45 @@ impl MuxApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let bound = KEYBINDS
+        let found = KEYBINDS
             .get()
             .into_iter()
             .rev()
-            .find(|(trigger, _)| *trigger == bind.trigger)
-            .map(|(_, bound)| bound);
-        match bound {
-            Some(Bound::Write(bytes)) => self.write_bound_bytes(&bytes, cx),
-            Some(Bound::Run(command)) => self.run_bound_command(command, window, cx),
-            Some(Bound::Ignore | Bound::Unbind) => {}
-            // Taken out of the config since the last reload: the key is
-            // the pane's again.
-            None => {
-                if let Ok(keystroke) = Keystroke::parse(&bind.trigger) {
-                    self.send_terminal_key_down(&keystroke, false, false, cx);
-                }
+            .find(|found| found.trigger == bind.trigger);
+        let key_to_pane = |this: &mut Self, cx: &mut Context<Self>| {
+            if let Ok(keystroke) = Keystroke::parse(&bind.trigger) {
+                this.send_terminal_key_down(&keystroke, false, false, cx);
             }
+        };
+        // Taken out of the config since the last reload: the key is the
+        // pane's again.
+        let Some(found) = found else {
+            return key_to_pane(self, cx);
+        };
+        if found.performable && !self.can_perform(&found.bound) {
+            return key_to_pane(self, cx);
+        }
+        match found.bound {
+            Bound::Write(bytes) => self.write_bound_bytes(&bytes, cx),
+            Bound::Run(command) => self.run_bound_command(command, window, cx),
+            Bound::Ignore | Bound::Unbind => {}
+        }
+        if found.unconsumed {
+            key_to_pane(self, cx);
+        }
+    }
+
+    /// Whether a `performable:` bind has something to act on; when not,
+    /// its key goes to the program, as Ghostty's does.
+    fn can_perform(&self, bound: &Bound) -> bool {
+        match bound {
+            Bound::Run(Command::Copy) => self.selected_text().is_some(),
+            Bound::Run(Command::PasteSelection) => self.selection_clipboard.is_some(),
+            Bound::Run(Command::CopyUrl) => self
+                .link_pointer
+                .and_then(|(pane_id, rect, position)| self.link_under(pane_id, rect, position))
+                .is_some(),
+            _ => true,
         }
     }
 
@@ -608,6 +671,19 @@ mod tests {
         assert_eq!(parse_keybind("cmd+shift+left=move_tab:0"), None);
         assert_eq!(parse_keybind("cmd+j=toggle_quick_terminal"), None);
         assert_eq!(parse_keybind("no action"), None);
+    }
+
+    #[test]
+    fn performable_and_unconsumed_are_kept() {
+        assert_eq!(
+            prefixes("performable:ctrl+c=copy_to_clipboard"),
+            (true, false)
+        );
+        assert_eq!(
+            prefixes("unconsumed:all:ctrl+a=reload_config"),
+            (false, true)
+        );
+        assert_eq!(prefixes("ctrl+c=copy_to_clipboard"), (false, false));
     }
 
     #[test]
