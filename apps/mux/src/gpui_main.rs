@@ -689,6 +689,8 @@ struct MuxApp {
     selected_pane: Option<PaneId>,
     pending_focused_pane: Option<PaneId>,
     selection_drag: Option<TerminalPointerCapture>,
+    /// The title last given to the window.
+    window_title: String,
     mouse_reporting: Option<TerminalPointerCapture>,
     terminal_key_presses: HashMap<String, PaneId>,
     terminal_resync_pending: Option<SessionId>,
@@ -852,6 +854,7 @@ impl MuxApp {
             selected_pane: None,
             pending_focused_pane: None,
             selection_drag: None,
+            window_title: String::new(),
             mouse_reporting: None,
             terminal_key_presses: HashMap::new(),
             terminal_resync_pending: None,
@@ -4329,6 +4332,24 @@ impl MuxApp {
         }))
     }
 
+    /// Name the window for the tab on screen and its session, as the
+    /// Window menu, Mission Control and the Dock list it.
+    fn sync_window_title(&mut self, window: &mut Window) {
+        let title = self.session.as_ref().map_or_else(
+            || "Mux".to_owned(),
+            |session| {
+                session.active_tab().map_or_else(
+                    || session.name.clone(),
+                    |tab| format!("{} — {}", self.tab_label(tab), session.name),
+                )
+            },
+        );
+        if title != self.window_title {
+            window.set_window_title(&title);
+            self.window_title = title;
+        }
+    }
+
     /// Show the next pane of the tab, or the one before, in the order the
     /// layout reads, coming round at the ends.
     fn cycle_pane(&mut self, forward: bool, cx: &mut Context<Self>) {
@@ -4745,6 +4766,7 @@ impl UserEvent {
 impl Render for MuxApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_agent_pulse(cx);
+        self.sync_window_title(window);
         let theme = BezelTheme::of(cx).clone();
         let viewport = window.viewport_size();
         let geometry =
@@ -6091,6 +6113,9 @@ fn run_graphical_application(
                     titlebar: Some(TitlebarOptions {
                         // Centre the traffic lights in the single top strip.
                         traffic_light_position: Some(point(px(14.0), px(11.0))),
+                        // Until a session is shown, which names it after
+                        // the tab on screen.
+                        title: Some("Mux".into()),
                         ..TitleBar::title_bar_options()
                     }),
                     window_background: BezelTheme::of(cx).window_background_appearance(),
@@ -6116,12 +6141,7 @@ fn run_graphical_application(
                 },
             );
             match window {
-                Ok(window) => {
-                    window
-                        .update(cx, |_, window, _| window.set_window_title("Mux"))
-                        .ok();
-                    cx.activate(true);
-                }
+                Ok(_) => cx.activate(true),
                 Err(error) => {
                     error!(%error, "failed to open GPUI window");
                     cx.quit();
