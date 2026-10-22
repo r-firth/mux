@@ -698,7 +698,7 @@ impl MuxApp {
     }
 
     /// The pane's prompt rows, read again only when its screen has changed.
-    fn cached_prompt_rows(&self, pane_id: PaneId) -> Option<Rc<Vec<usize>>> {
+    pub(super) fn cached_prompt_rows(&self, pane_id: PaneId) -> Option<Rc<Vec<usize>>> {
         let pane = self.panes.get(&pane_id)?;
         let mut cache = self.prompt_rows.borrow_mut();
         if let Some((serial, rows)) = cache.get(&pane_id)

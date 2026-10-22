@@ -3813,6 +3813,7 @@ impl MuxApp {
         event: &gpui::MouseDownEvent,
         cx: &mut Context<Self>,
     ) {
+        let had_keys = self.terminal_input_pane_id() == Some(pane_id);
         self.request_pane_focus(pane_id);
         let button = terminal_mouse_button(event.button);
         if !event.modifiers.shift
@@ -3835,7 +3836,7 @@ impl MuxApp {
                 self.copy_on_select();
             }
             gpui::MouseButton::Left => {
-                self.begin_cursor_click(pane_id, rect, event);
+                self.begin_cursor_click(pane_id, rect, event, had_keys);
                 self.begin_selection(pane_id, rect, event);
             }
             gpui::MouseButton::Right => self.right_click(pane_id, rect, event.position, cx),

@@ -425,6 +425,34 @@ fn parse_focus_follows_mouse(contents: &str, follows: &mut bool) {
     }
 }
 
+/// Whether a plain click on the line being typed at a shell's prompt moves
+/// the cursor there: `cursor-click-to-move` from the user's Ghostty config,
+/// on by default as in Ghostty.
+#[must_use]
+pub fn user_cursor_click_to_move() -> bool {
+    let mut moves = true;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_cursor_click_to_move(&contents, &mut moves);
+            }
+        }
+    }
+    moves
+}
+
+fn parse_cursor_click_to_move(contents: &str, moves: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "cursor-click-to-move" {
+            match value.as_str() {
+                "" | "true" => *moves = true,
+                "false" => *moves = false,
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Whether a selection goes on the clipboard as it is made:
 /// `copy-on-select = clipboard` in the user's Ghostty config. Ghostty's
 /// default, `true`, copies to a selection clipboard a Mac does not have, so
@@ -3682,6 +3710,15 @@ mod theme_tests {
         assert!(follows);
         parse_focus_follows_mouse("focus-follows-mouse =\n", &mut follows);
         assert!(!follows);
+    }
+
+    #[test]
+    fn cursor_click_to_move_unless_turned_off() {
+        let mut moves = true;
+        parse_cursor_click_to_move("cursor-click-to-move = false\n", &mut moves);
+        assert!(!moves);
+        parse_cursor_click_to_move("cursor-click-to-move =\n", &mut moves);
+        assert!(moves);
     }
 
     #[test]

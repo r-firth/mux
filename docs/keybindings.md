@@ -337,6 +337,12 @@ Terminal: Mux presses the arrows that walk it there, so it works at a
 shell's prompt, in an editor, anywhere the arrows move the cursor.
 Option-drag still selects a rectangle.
 
+At a shell's prompt a plain click does it too, as in Ghostty: click into
+the command you are typing to put the cursor there. It needs the shell's
+prompt marks, so a click on what a command printed only selects, and it
+keeps to what is typed, never walking into the prompt or past the end.
+`cursor-click-to-move = false` in your Ghostty config turns it off.
+
 ## Dropping files
 
 Drop files from the Finder on a pane to type their paths at its cursor,
