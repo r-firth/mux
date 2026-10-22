@@ -5088,7 +5088,17 @@ impl MuxApp {
     /// Name the window for the tab on screen and its session, as the
     /// Window menu, Mission Control and the Dock list it.
     fn sync_window_title(&mut self, window: &mut Window) {
-        let title = self.session.as_ref().map_or_else(
+        static FIXED: ghostty_config::Reloadable<Option<String>> =
+            ghostty_config::Reloadable::new(mux_terminal_ghostty::user_window_title);
+        let title = FIXED.get().unwrap_or_else(|| self.window_title_for_tab());
+        if title != self.window_title {
+            window.set_window_title(&title);
+            self.window_title = title;
+        }
+    }
+
+    fn window_title_for_tab(&self) -> String {
+        self.session.as_ref().map_or_else(
             || "Mux".to_owned(),
             |session| {
                 session.active_tab().map_or_else(
@@ -5096,11 +5106,7 @@ impl MuxApp {
                     |tab| format!("{} — {}", self.tab_label(tab), session.name),
                 )
             },
-        );
-        if title != self.window_title {
-            window.set_window_title(&title);
-            self.window_title = title;
-        }
+        )
     }
 
     /// What the Window menu does to the window itself.

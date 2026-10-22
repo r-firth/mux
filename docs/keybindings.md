@@ -177,7 +177,8 @@ Mux starts zsh and bash titling their pane with the directory they are in
 as Ghostty's shell integration does, since neither titles a pane on a Mac by
 itself. A title set by your own prompt or plugins wins, and
 `shell-integration-features = no-title` in your Ghostty config leaves the
-title to them.
+title to them. The window is titled for the tab on screen and its session
+(`mux — main`), unless your Ghostty config fixes one with `title`.
 With the mouse, drag a tab's chip along the strip to move it, and
 double-click the chip of the tab on screen to rename it. A chip's dot turns
 into a close mark under the pointer; click it, or middle-click the chip, to

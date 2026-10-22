@@ -1007,6 +1007,27 @@ fn parse_keybinds(contents: &str, binds: &mut Vec<String>) {
     }
 }
 
+/// The window title the user's Ghostty config fixes with `title`, in place
+/// of the one programs and tabs set.
+#[must_use]
+pub fn user_window_title() -> Option<String> {
+    let mut title = None;
+    for config in user_config_files() {
+        if let Ok(contents) = read_config(&config) {
+            parse_window_title(&contents, &mut title);
+        }
+    }
+    title
+}
+
+fn parse_window_title(contents: &str, title: &mut Option<String>) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "title" {
+            *title = Some(value).filter(|value| !value.is_empty());
+        }
+    }
+}
+
 /// The theme the user's Ghostty config names, its dark one when it names a
 /// light and a dark.
 #[must_use]
@@ -3847,6 +3868,15 @@ mod theme_tests {
         assert!(!allowed);
         parse_clipboard_write("clipboard-write = ask\n", &mut allowed);
         assert!(allowed);
+    }
+
+    #[test]
+    fn a_title_fixes_the_window_title_until_emptied() {
+        let mut title = None;
+        parse_window_title("title = \"Work\"\n", &mut title);
+        assert_eq!(title.as_deref(), Some("Work"));
+        parse_window_title("title =\n", &mut title);
+        assert_eq!(title, None);
     }
 
     #[test]
