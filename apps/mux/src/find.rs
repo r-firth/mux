@@ -137,6 +137,11 @@ impl MuxApp {
             self.say_in_strip("select some text to find it", false, cx);
             return;
         };
+        self.find_text(query, window, cx);
+    }
+
+    /// Open find with this text in it, found.
+    pub(super) fn find_text(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
         self.open_find(window, cx);
         let Some(find) = &self.find else {
             return;

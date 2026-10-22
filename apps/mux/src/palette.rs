@@ -58,6 +58,9 @@ enum Destination {
     Agent(usize),
     /// A command run in a pane, by its prompt's row.
     Ran(PaneId, usize),
+    /// What was typed, found in the pane with the keys, when nothing else
+    /// matches it.
+    FindInPane,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -289,6 +292,10 @@ impl MuxApp {
     }
 
     fn go_to(&mut self, destination: Destination, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self
+            .palette
+            .as_ref()
+            .map(|palette| palette.query.trim().to_owned());
         self.close_palette(window, cx);
         let active = self.active_tab_id();
         match destination {
@@ -309,6 +316,11 @@ impl MuxApp {
             Destination::Command(command) => self.run_palette_command(command, window, cx),
             Destination::Agent(index) => self.open_agent_from_palette(index, window, cx),
             Destination::Ran(pane_id, row) => self.go_to_command(pane_id, row),
+            Destination::FindInPane => {
+                if let Some(query) = query {
+                    self.find_text(query, window, cx);
+                }
+            }
         }
         cx.notify();
     }
@@ -454,6 +466,21 @@ impl MuxApp {
             true
         });
         rank(&mut rows);
+        if rows.is_empty()
+            && self
+                .terminal_input_pane_id()
+                .is_some_and(|pane_id| self.active_agent_pane() != Some(pane_id))
+        {
+            let mut row = Row::new(
+                Destination::FindInPane,
+                "find",
+                format!("find “{}” in this pane", query.trim()),
+                3,
+            );
+            row.tone = MUTED_TEXT;
+            row.hint = Some(("⌘f".to_owned(), FAINT_TEXT));
+            rows.push(row);
+        }
         rows
     }
 

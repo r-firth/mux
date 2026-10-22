@@ -433,6 +433,8 @@ and each once, with `exit 2` beside one that failed and how long each ran
 (`exit 2 · 3m`): `cargo t` then Return
 scrolls back to where `cargo test` was run, and Shift+Return types it at
 the prompt instead, to run again or change first.
+When nothing matches, the one row left finds what you typed in the pane
+with the keys, as `Cmd+F` would.
 
 | Keys | Action |
 | --- | --- |
