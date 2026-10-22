@@ -4792,6 +4792,7 @@ impl MuxApp {
                 ],
                 InputMode::Session => &[("w", "switch"), ("d", "detach")],
                 InputMode::Resize => &[("hjkl", "resize"), ("=", "even"), ("enter", "done")],
+                InputMode::Locked => &[("⌃g", "unlock")],
             }
         };
         let key_color = if normal {
@@ -4849,6 +4850,7 @@ impl MuxApp {
                 InputMode::Tab => "TAB",
                 InputMode::Session => "SESSION",
                 InputMode::Resize => "RESIZE",
+                InputMode::Locked => "LOCKED",
             }
         };
         let pill = h_flex()

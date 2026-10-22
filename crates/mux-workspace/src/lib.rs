@@ -928,6 +928,8 @@ pub enum InputMode {
     Tab,
     Session,
     Resize,
+    /// Every key goes to the program, Mux's own prefixes too, until Ctrl+g.
+    Locked,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1203,6 +1205,21 @@ impl Keymap {
                 );
             }
         }
+        // Zellij's Locked mode, reached here from a mode (Ctrl+p or Ctrl+t
+        // first) so that Normal input keeps Ctrl+g for the program, hands
+        // every key to the program until Ctrl+g.
+        for mode in modes.into_iter().filter(|mode| *mode != InputMode::Normal) {
+            self.bind(
+                mode,
+                KeyChord::control('g'),
+                Action::EnterMode(InputMode::Locked),
+            );
+        }
+        self.bind(
+            InputMode::Locked,
+            KeyChord::control('g'),
+            Action::EnterMode(InputMode::Normal),
+        );
         for mode in modes.into_iter().filter(|mode| *mode != InputMode::Normal) {
             for key in [Key::Escape, Key::Enter] {
                 self.bind(

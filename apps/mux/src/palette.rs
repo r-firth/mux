@@ -71,6 +71,7 @@ enum Command {
     SplitDown,
     Zoom,
     Resize,
+    Lock,
     RenameTab,
     TabInk,
     Find,
@@ -339,6 +340,7 @@ impl MuxApp {
             Command::SplitDown => Action::SplitPane(mux_workspace::SplitAxis::Vertical),
             Command::Zoom => Action::TogglePaneZoom,
             Command::Resize => Action::EnterMode(InputMode::Resize),
+            Command::Lock => Action::EnterMode(InputMode::Locked),
             Command::RenameTab => Action::RenameTab,
             Command::Agent => Action::OpenAgentSurface,
             Command::Sessions => Action::OpenSessionSwitcher,
@@ -784,7 +786,7 @@ impl MuxApp {
     /// What mux can do, each with the keys that do it and other words it
     /// answers to. Some say what they will do to the pane or tab on screen.
     #[allow(clippy::too_many_lines)] // One entry per command.
-    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 31] {
+    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 32] {
         let zoomed = self.active_tab_zoomed();
         let agent_here = self
             .active_agent_pane()
@@ -814,6 +816,12 @@ impl MuxApp {
                 "maximise maximize fullscreen unzoom",
             ),
             (Command::Resize, "⌃p ⌃n", "resize panes", "size grow shrink"),
+            (
+                Command::Lock,
+                "⌃p ⌃g",
+                "lock: every key to the program",
+                "locked passthrough ctrl prefix",
+            ),
             (
                 Command::EqualizePanes,
                 "⌘⌃=",

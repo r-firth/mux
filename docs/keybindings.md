@@ -17,7 +17,14 @@ the GUI and daemon do not hardcode key behavior into workspace mutations.
 | `Ctrl+p`, `a` | Turn the focused pane into its native ACP agent surface |
 
 `Alt` is the same modifier as `Option` on macOS. Shared bindings remain active
-inside the supported modes, matching Zellij. Enter or Escape returns from a
+inside the supported modes, matching Zellij.
+
+`Ctrl+g` from Pane or Tab mode (`Ctrl+p Ctrl+g`) locks Mux, as Zellij's
+Locked mode does: every key goes to the program, `Ctrl+p`, `Ctrl+t`,
+`Ctrl+a` and `Option` with an arrow too, for shell history, fzf's `Ctrl+t`
+or a Mux or tmux inside a pane, until `Ctrl+g` unlocks it. The strip says
+`LOCKED` meanwhile, and the Mac shortcuts still work. Normal input leaves
+`Ctrl+g` to the program. Enter or Escape returns from a
 mode to normal terminal input. All other Normal-mode keys, including
 `Ctrl+n`, `Ctrl+o`, and `:`, pass through to the foreground program.
 
