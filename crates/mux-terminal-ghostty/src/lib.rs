@@ -546,6 +546,33 @@ fn parse_inherit_working_directory(contents: &str, inherit: &mut Inherit) {
     }
 }
 
+/// Whether typing into a pane lets go of its selection: Ghostty's
+/// `selection-clear-on-typing`, on by default.
+#[must_use]
+pub fn user_selection_clear_on_typing() -> bool {
+    let mut clear = true;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_selection_clear_on_typing(&contents, &mut clear);
+            }
+        }
+    }
+    clear
+}
+
+fn parse_selection_clear_on_typing(contents: &str, clear: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "selection-clear-on-typing" {
+            match value.as_str() {
+                "" | "true" => *clear = true,
+                "false" => *clear = false,
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Whether copied text loses the spaces at the ends of its lines: Ghostty's
 /// `clipboard-trim-trailing-spaces`, on by default.
 #[must_use]
@@ -4165,6 +4192,15 @@ mod theme_tests {
         assert_eq!(inherit.tab, None);
         parse_inherit_working_directory("window-inherit-working-directory =\n", &mut inherit);
         assert_eq!(inherit.window, None);
+    }
+
+    #[test]
+    fn typing_lets_go_of_a_selection_unless_told_not_to() {
+        let mut clear = true;
+        parse_selection_clear_on_typing("selection-clear-on-typing = false\n", &mut clear);
+        assert!(!clear);
+        parse_selection_clear_on_typing("selection-clear-on-typing =\n", &mut clear);
+        assert!(clear);
     }
 
     #[test]

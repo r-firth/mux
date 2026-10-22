@@ -497,6 +497,13 @@ fn focus_follows_mouse() -> bool {
     FOLLOWS.get()
 }
 
+/// Whether typing lets go of a selection, as in the user's Ghostty.
+fn selection_clear_on_typing() -> bool {
+    static CLEARS: ghostty_config::Reloadable<bool> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_selection_clear_on_typing);
+    CLEARS.get()
+}
+
 /// Where a selection goes as it is made, as in the user's Ghostty.
 fn copy_on_select() -> mux_terminal_ghostty::CopyOnSelect {
     static COPIES: ghostty_config::Reloadable<mux_terminal_ghostty::CopyOnSelect> =
@@ -2351,9 +2358,10 @@ impl MuxApp {
     }
 
     /// Typing into a pane lets go of what was selected in it, as Ghostty
-    /// does, so a highlight never sits over text that has since changed.
+    /// does, so a highlight never sits over text that has since changed,
+    /// unless `selection-clear-on-typing = false` keeps it.
     fn clear_selection_on_typing(&mut self, pane_id: PaneId) {
-        if self.selected_pane != Some(pane_id) {
+        if self.selected_pane != Some(pane_id) || !selection_clear_on_typing() {
             return;
         }
         self.selected_pane = None;
