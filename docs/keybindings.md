@@ -445,7 +445,8 @@ Finder rather than opened.
 A path written in the output, such as a compiler's `src/main.rs:12:5` or
 `~/notes.md`, is a link too: `Cmd`-click shows it in Finder, found from the
 directory the pane's shell is in now (a folder opens). The strip says when
-there is nothing there.
+there is nothing there. `link-url = false` in your Ghostty config leaves
+written URLs and paths as text; OSC 8 links still work.
 
 ## Panes that call
 

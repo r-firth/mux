@@ -546,6 +546,34 @@ fn parse_inherit_working_directory(contents: &str, inherit: &mut Inherit) {
     }
 }
 
+/// Whether URLs and paths written out in plain text are links: Ghostty's
+/// `link-url`, on by default. A program's OSC 8 hyperlinks are links
+/// whatever it says.
+#[must_use]
+pub fn user_link_url() -> bool {
+    let mut links = true;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_link_url(&contents, &mut links);
+            }
+        }
+    }
+    links
+}
+
+fn parse_link_url(contents: &str, links: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "link-url" {
+            match value.as_str() {
+                "" | "true" => *links = true,
+                "false" => *links = false,
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Whether typing into a pane lets go of its selection: Ghostty's
 /// `selection-clear-on-typing`, on by default.
 #[must_use]
@@ -4192,6 +4220,15 @@ mod theme_tests {
         assert_eq!(inherit.tab, None);
         parse_inherit_working_directory("window-inherit-working-directory =\n", &mut inherit);
         assert_eq!(inherit.window, None);
+    }
+
+    #[test]
+    fn written_urls_are_links_unless_told_not_to() {
+        let mut links = true;
+        parse_link_url("link-url = false\n", &mut links);
+        assert!(!links);
+        parse_link_url("link-url = true\n", &mut links);
+        assert!(links);
     }
 
     #[test]
