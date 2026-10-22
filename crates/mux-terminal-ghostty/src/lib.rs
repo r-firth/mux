@@ -16,6 +16,10 @@ pub struct GhosttyTheme {
     pub background: Option<Rgb>,
     pub foreground: Option<Rgb>,
     pub cursor: Option<Rgb>,
+    /// Ghostty's `selection-background` and `selection-foreground`, for
+    /// selected text in place of Mux's own warm wash.
+    pub selection_background: Option<Rgb>,
+    pub selection_foreground: Option<Rgb>,
     pub palette: [Option<Rgb>; 256],
 }
 
@@ -25,6 +29,8 @@ impl Default for GhosttyTheme {
             background: None,
             foreground: None,
             cursor: None,
+            selection_background: None,
+            selection_foreground: None,
             palette: [None; 256],
         }
     }
@@ -565,6 +571,8 @@ fn parse_theme_file(
             "background" => theme.background = parse_rgb(&value),
             "foreground" => theme.foreground = parse_rgb(&value),
             "cursor-color" => theme.cursor = parse_rgb(&value),
+            "selection-background" => theme.selection_background = parse_rgb(&value),
+            "selection-foreground" => theme.selection_foreground = parse_rgb(&value),
             "palette" => {
                 if let Some((index, color)) = parse_palette_entry(&value) {
                     theme.palette[usize::from(index)] = Some(color);
@@ -2439,7 +2447,7 @@ mod linked {
                     b: 0xf4,
                 }),
                 cursor: None,
-                palette: [None; 256],
+                ..GhosttyTheme::default()
             };
             let red = Rgb {
                 r: 0xf3,
@@ -3022,13 +3030,15 @@ mod theme_tests {
         fs::create_dir(&themes).expect("themes directory");
         fs::write(
             themes.join("calm.conf"),
-            "background = 101020\nforeground = #c0c0d0\npalette = 4=#1122ee\n",
+            "background = 101020\nforeground = #c0c0d0\npalette = 4=#1122ee\n\
+             selection-background = 334455\n",
         )
         .expect("theme");
         let config = directory.path().join("config");
         fs::write(
             &config,
-            "foreground = ffffff\ntheme = calm.conf\npalette = 4=#abcdef\n",
+            "foreground = ffffff\ntheme = calm.conf\npalette = 4=#abcdef\n\
+             selection-foreground = #eeeeee\n",
         )
         .expect("config");
 
@@ -3037,6 +3047,8 @@ mod theme_tests {
         assert_eq!(theme.background, parse_rgb("101020"));
         assert_eq!(theme.foreground, parse_rgb("ffffff"));
         assert_eq!(theme.palette[4], parse_rgb("abcdef"));
+        assert_eq!(theme.selection_background, parse_rgb("334455"));
+        assert_eq!(theme.selection_foreground, parse_rgb("eeeeee"));
     }
 
     #[test]

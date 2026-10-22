@@ -20,12 +20,15 @@ pub struct GridMetrics {
     pub padding_y: f32,
 }
 
-/// Colours the window chrome lends the terminal: the slab it sits on, and the
-/// tab's ink for the cursor.
+/// Colours the window chrome lends the terminal: the slab it sits on, the
+/// tab's ink for the cursor, and any selection colours the user's Ghostty
+/// config chose.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TerminalChrome {
     pub surface: Hsla,
     pub cursor: Hsla,
+    pub selection: Option<Rgb>,
+    pub selection_text: Option<Rgb>,
 }
 
 /// Places marked on the grid, such as what a find turned up. The current one
@@ -353,6 +356,7 @@ pub fn terminal_canvas(
                 &font_family,
                 metrics,
                 &prepaint_marks,
+                chrome.selection_text,
                 window,
             )
         },
@@ -379,6 +383,7 @@ fn prepare_runs(
     font_family: &str,
     metrics: GridMetrics,
     marks: &TerminalMarks,
+    selection_text: Option<Rgb>,
     window: &mut Window,
 ) -> PreparedTerminal {
     let columns = usize::from(frame.cols);
@@ -397,7 +402,11 @@ fn prepare_runs(
 
             let start = column;
             let foreground_at = |column: usize, cell: &RenderCell| {
-                marks.text_at(row, column, effective_foreground(cell))
+                let foreground = match selection_text {
+                    Some(text) if cell.selected => text,
+                    _ => effective_foreground(cell),
+                };
+                marks.text_at(row, column, foreground)
             };
             let run_style = RunStyle {
                 foreground: foreground_at(column, cell),
@@ -488,7 +497,7 @@ fn paint_terminal(
             }
             let (background, selected) = run;
             let color = if selected {
-                selection_color(background)
+                selection_color(background, chrome.selection)
             } else {
                 terminal_color(background)
             };
@@ -633,7 +642,10 @@ fn terminal_color(color: Rgb) -> Hsla {
     gpui::rgb((u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)).into()
 }
 
-fn selection_color(background: Rgb) -> Hsla {
+fn selection_color(background: Rgb, chosen: Option<Rgb>) -> Hsla {
+    if let Some(chosen) = chosen {
+        return terminal_color(chosen);
+    }
     let base = terminal_color(background);
     // A warm translucent selection remains legible across arbitrary terminal
     // themes without replacing the application's actual ANSI colours.
