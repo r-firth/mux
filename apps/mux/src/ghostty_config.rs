@@ -75,6 +75,7 @@ impl super::MuxApp {
             let _ = pane.publish_frame();
         }
         self.terminal_views.clear();
+        super::configure_pointer_hiding(cx);
         self.say_in_strip("reloaded the Ghostty config", false, cx);
         cx.notify();
     }

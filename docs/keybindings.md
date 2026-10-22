@@ -160,6 +160,10 @@ can, or always with `cursor-style-blink = true` in your Ghostty config;
 `false` keeps it steady whatever the program asks. Only the pane with the
 keys blinks, and typing shows the cursor again at once.
 
+The pointer stays put while you type, as in Ghostty, unless
+`mouse-hide-while-typing = true` in your Ghostty config hides it until it
+next moves.
+
 With `focus-follows-mouse = true` in your Ghostty config, the pane under
 the pointer takes the keys as the pointer moves onto it.
 

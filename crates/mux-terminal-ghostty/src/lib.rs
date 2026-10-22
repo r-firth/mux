@@ -178,6 +178,33 @@ fn parse_cursor_style(contents: &str, style: &mut CursorStyle) {
     }
 }
 
+/// Whether the mouse pointer hides while typing: `mouse-hide-while-typing`
+/// from the user's Ghostty config, off by default as in Ghostty.
+#[must_use]
+pub fn user_mouse_hide_while_typing() -> bool {
+    let mut hide = false;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_mouse_hide(&contents, &mut hide);
+            }
+        }
+    }
+    hide
+}
+
+fn parse_mouse_hide(contents: &str, hide: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "mouse-hide-while-typing" {
+            match value.as_str() {
+                "true" => *hide = true,
+                "" | "false" => *hide = false,
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Whether the cursor blinks: `cursor-style-blink` from the user's Ghostty
 /// config. `None` when it is not set, when a cursor blinks only if its
 /// program asks.
@@ -3420,6 +3447,17 @@ mod theme_tests {
         assert_eq!(blink, Some(false));
         parse_cursor_blink("cursor-style-blink =\n", &mut blink);
         assert_eq!(blink, None);
+    }
+
+    #[test]
+    fn the_pointer_hides_while_typing_only_when_asked() {
+        let mut hide = false;
+        parse_mouse_hide("mouse-hide-while-typing = true\n", &mut hide);
+        assert!(hide);
+        parse_mouse_hide("mouse-hide-while-typing = sometimes\n", &mut hide);
+        assert!(hide);
+        parse_mouse_hide("mouse-hide-while-typing =\n", &mut hide);
+        assert!(!hide);
     }
 
     #[test]

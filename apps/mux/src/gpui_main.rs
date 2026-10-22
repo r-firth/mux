@@ -6704,6 +6704,16 @@ fn mux_bezel_palette(appearance: BezelAppearance) -> BezelTheme {
     theme
 }
 
+/// The pointer hides while typing only when the user's Ghostty asks for it
+/// with `mouse-hide-while-typing`; GPUI would hide it otherwise.
+fn configure_pointer_hiding(cx: &mut App) {
+    cx.set_cursor_hide_mode(if mux_terminal_ghostty::user_mouse_hide_while_typing() {
+        gpui::CursorHideMode::OnTyping
+    } else {
+        gpui::CursorHideMode::Never
+    });
+}
+
 fn configure_theme(cx: &mut App) {
     ComponentTheme::change(ThemeMode::Dark, None, cx);
     let bezel = BezelTheme::of(cx).clone();
@@ -6824,6 +6834,7 @@ fn initialize_graphical_application(cx: &mut App) {
         Some("MuxAgentPane"),
     )]);
     configure_theme(cx);
+    configure_pointer_hiding(cx);
     if let Err(error) = cx.text_system().add_fonts(vec![
         Cow::Borrowed(
             include_bytes!("../assets/fonts/JetBrainsMonoNerdFontMono-Regular.ttf").as_slice(),
