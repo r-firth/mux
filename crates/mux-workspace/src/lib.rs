@@ -160,6 +160,25 @@ impl PaneLayout {
         }
     }
 
+    /// Split `target` and put `new_pane` on its `side`: left or above it
+    /// as well as right or below, where [`Self::split`] always puts it after.
+    pub fn split_beside(
+        &mut self,
+        target: PaneId,
+        new_pane: PaneId,
+        side: Direction,
+    ) -> Result<(), WorkspaceError> {
+        let axis = match side {
+            Direction::Left | Direction::Right => SplitAxis::Horizontal,
+            Direction::Up | Direction::Down => SplitAxis::Vertical,
+        };
+        self.split(target, new_pane, axis)?;
+        if matches!(side, Direction::Left | Direction::Up) {
+            self.swap(target, new_pane);
+        }
+        Ok(())
+    }
+
     pub fn remove(&mut self, target: PaneId) -> Result<(), WorkspaceError> {
         match self {
             Self::Leaf(_) => Err(WorkspaceError::CannotCloseLastPane),
@@ -496,6 +515,27 @@ impl Tab {
         } else {
             Some(self.focused_pane)
         };
+    }
+
+    /// Take `pane` from where it is and put it on `side` of `target`,
+    /// sharing `target`'s room, with the keys.
+    pub fn move_pane_beside(
+        &mut self,
+        pane: PaneId,
+        target: PaneId,
+        side: Direction,
+    ) -> Result<(), WorkspaceError> {
+        if pane == target {
+            return Ok(());
+        }
+        if !self.layout.contains(target) {
+            return Err(WorkspaceError::UnknownPane(target));
+        }
+        self.layout.remove(pane)?;
+        self.layout.split_beside(target, pane, side)?;
+        self.focused_pane = pane;
+        self.zoomed_pane = None;
+        Ok(())
     }
 
     /// Trade places with the pane next to the focused one toward
@@ -938,6 +978,13 @@ pub enum WorkspaceCommand {
     MovePaneToTab {
         pane: PaneId,
         tab: TabId,
+    },
+    /// Put a pane of the tab on screen on one side of another. See
+    /// [`Tab::move_pane_beside`].
+    MovePaneBeside {
+        pane: PaneId,
+        target: PaneId,
+        side: Direction,
     },
 }
 
@@ -1659,6 +1706,34 @@ mod tests {
             .map(|tab| tab.title.as_str())
             .collect::<Vec<_>>();
         assert_eq!(titles, vec!["1", "build", "3"]);
+    }
+
+    #[test]
+    fn a_pane_moves_beside_another() {
+        let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+        // a | b | c, then c goes above a.
+        let mut tab = Tab::with_panes("t", &[a, b, c]).expect("tab");
+        tab.move_pane_beside(c, a, Direction::Up).expect("move");
+        assert_eq!(tab.focused_pane, c);
+        let PaneLayout::Split { axis, first, .. } = &tab.layout else {
+            panic!("a split")
+        };
+        assert_eq!(*axis, SplitAxis::Horizontal);
+        let PaneLayout::Split {
+            axis,
+            first,
+            second,
+            ..
+        } = first.as_ref()
+        else {
+            panic!("a split")
+        };
+        assert_eq!(*axis, SplitAxis::Vertical);
+        assert_eq!(**first, PaneLayout::Leaf(c));
+        assert_eq!(**second, PaneLayout::Leaf(a));
+        let mut order = Vec::new();
+        tab.layout.pane_ids(&mut order);
+        assert_eq!(order, [c, a, b]);
     }
 
     #[test]

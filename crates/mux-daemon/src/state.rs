@@ -569,6 +569,13 @@ impl SessionRuntime {
                 tab.focus(moved)?;
                 tab.layout.swap(moved, with);
             }
+            WorkspaceCommand::MovePaneBeside { pane, target, side } => {
+                self.model
+                    .write()
+                    .active_tab_mut()
+                    .ok_or(SessionMutationError::NoActiveTab)?
+                    .move_pane_beside(pane, target, side)?;
+            }
             WorkspaceCommand::MovePaneToTab { pane, tab } => {
                 self.model.write().move_pane_to_tab(pane, tab)?;
             }

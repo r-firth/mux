@@ -5180,7 +5180,7 @@ impl MuxApp {
         let pointer_app = cx.weak_entity();
         let hover_app = pointer_app.clone();
         let scroll_app = pointer_app.clone();
-        let surface = Self::with_pane_drop(div(), pane_id, cx)
+        let surface = Self::with_pane_drop(div(), pane_id, body, cx)
             .absolute()
             .left(px(body.x))
             .top(px(body.y))

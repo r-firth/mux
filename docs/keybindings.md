@@ -77,8 +77,10 @@ pane's name. The name stays with the pane when it moves to another tab and
 after a restart. Clearing it hands the head back to the shell. Double-click
 a pane's head to name it with the mouse.
 
-A pane's head can also be dragged onto another pane of the tab; the two
-trade places and the dragged pane keeps the keys. Dropped on another tab's
+A pane's head can also be dragged onto another pane of the tab. Dropped in
+the middle, the two trade places; dropped near an edge, which the pane
+marks in the tab's ink, the dragged pane moves to that side and they share
+the room. Either way the dragged pane keeps the keys. Dropped on another tab's
 chip, the pane moves into that tab, beside its focused pane, and a tab left
 empty goes; dropped on the strip's `+`, it gets a tab of its own.
 
