@@ -211,6 +211,12 @@ gpui::actions!(
         ResizeMuxPaneRight,
         ResizeMuxPaneUp,
         ResizeMuxPaneDown,
+        HideMux,
+        HideOtherApps,
+        ShowAllApps,
+        MinimizeMuxWindow,
+        ZoomMuxWindow,
+        ToggleMuxFullScreen,
         ToggleAgentPane,
         ZoomMuxPane
     ]
@@ -4359,6 +4365,20 @@ impl MuxApp {
         }
     }
 
+    /// What the Window menu does to the window itself.
+    fn with_window_actions(
+        root: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        root.on_action(cx.listener(|_, _: &MinimizeMuxWindow, window, _| {
+            window.minimize_window();
+        }))
+        .on_action(cx.listener(|_, _: &ZoomMuxWindow, window, _| window.zoom_window()))
+        .on_action(cx.listener(|_, _: &ToggleMuxFullScreen, window, _| {
+            window.toggle_fullscreen();
+        }))
+    }
+
     /// Show the next pane of the tab, or the one before, in the order the
     /// layout reads, coming round at the ends.
     fn cycle_pane(&mut self, forward: bool, cx: &mut Context<Self>) {
@@ -4817,7 +4837,10 @@ impl Render for MuxApp {
         let drawn = self.draw_layout(&geometry, viewport, window);
         self.publish_ground(&drawn, viewport, window, cx);
         let mut root = Self::with_pointer_capture(
-            Self::with_pane_shortcut_actions(Self::with_shortcut_actions(root, cx), cx),
+            Self::with_window_actions(
+                Self::with_pane_shortcut_actions(Self::with_shortcut_actions(root, cx), cx),
+                cx,
+            ),
             cx,
         )
         .font_family(EMBEDDED_TERMINAL_FONT)
@@ -5746,6 +5769,10 @@ fn configure_application_menu(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
+                MenuItem::action("Hide Mux", HideMux),
+                MenuItem::action("Hide Others", HideOtherApps),
+                MenuItem::action("Show All", ShowAllApps),
+                MenuItem::separator(),
                 MenuItem::action("Quit Mux", QuitMux),
             ],
         },
@@ -5770,6 +5797,9 @@ fn configure_application_menu(cx: &mut App) {
             name: "Window".into(),
             disabled: false,
             items: vec![
+                MenuItem::action("Minimize", MinimizeMuxWindow),
+                MenuItem::action("Zoom", ZoomMuxWindow),
+                MenuItem::separator(),
                 MenuItem::action("Bigger Text", GrowMuxText),
                 MenuItem::action("Smaller Text", ShrinkMuxText),
                 MenuItem::action("Actual Size", ResetMuxText),
@@ -5825,8 +5855,15 @@ fn bind_mac_shortcuts(cx: &mut App) {
 
 fn configure_application_actions(cx: &mut App) {
     cx.on_action(quit_mux);
+    cx.on_action(|_: &HideMux, cx| cx.hide());
+    cx.on_action(|_: &HideOtherApps, cx| cx.hide_other_apps());
+    cx.on_action(|_: &ShowAllApps, cx| cx.unhide_other_apps());
     cx.bind_keys([
         KeyBinding::new("cmd-q", QuitMux, None),
+        KeyBinding::new("cmd-h", HideMux, None),
+        KeyBinding::new("cmd-alt-h", HideOtherApps, None),
+        KeyBinding::new("cmd-m", MinimizeMuxWindow, None),
+        KeyBinding::new("cmd-ctrl-f", ToggleMuxFullScreen, None),
         KeyBinding::new("cmd-,", OpenMuxSettings, None),
         KeyBinding::new("cmd-p", OpenMuxPalette, None),
         KeyBinding::new("cmd-shift-p", OpenMuxPalette, None),
