@@ -34,6 +34,8 @@ enum Command {
     NewSession,
     SplitRight,
     SplitDown,
+    /// A split with the new pane on the left, or above.
+    SplitBefore(mux_workspace::SplitAxis),
     SplitAuto,
     ClosePane,
     CloseTab,
@@ -305,6 +307,16 @@ impl MuxApp {
                 return;
             }
             Command::Prompt(older) => return self.jump_to_prompt(older, cx),
+            Command::SplitBefore(axis) => {
+                // The new pane opens after the focused one and takes the
+                // keys; trading places puts it first, as Ghostty does.
+                let toward = match axis {
+                    mux_workspace::SplitAxis::Horizontal => Direction::Left,
+                    mux_workspace::SplitAxis::Vertical => Direction::Up,
+                };
+                self.run_shortcut(Action::SplitPane(axis), window, cx);
+                return self.run_shortcut(Action::SwapPane(toward), window, cx);
+            }
             Command::MoveTab(by) => {
                 let direction = if by < 0 {
                     Direction::Left
@@ -510,7 +522,9 @@ fn parse_action(action: &str) -> Option<Bound> {
         "new_tab" => Command::NewTab,
         "new_window" => Command::NewSession,
         "new_split" => match parameter {
-            "down" | "up" => Command::SplitDown,
+            "down" => Command::SplitDown,
+            "up" => Command::SplitBefore(mux_workspace::SplitAxis::Vertical),
+            "left" => Command::SplitBefore(mux_workspace::SplitAxis::Horizontal),
             "auto" => Command::SplitAuto,
             _ => Command::SplitRight,
         },
@@ -703,6 +717,13 @@ mod tests {
             ))
         );
         assert_eq!(parse_keybind("cmd+shift+left=move_tab:0"), None);
+        assert_eq!(
+            parse_keybind("cmd+shift+d=new_split:up"),
+            Some((
+                "cmd-shift-d".to_owned(),
+                Bound::Run(Command::SplitBefore(mux_workspace::SplitAxis::Vertical))
+            ))
+        );
         assert_eq!(parse_keybind("cmd+j=toggle_quick_terminal"), None);
         assert_eq!(parse_keybind("no action"), None);
     }
