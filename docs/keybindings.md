@@ -80,6 +80,9 @@ a double click evens the split out.
 
 Clearing a tab's name hands it back to whatever its shell shows. A moved
 tab keeps its name; a numbered tab takes the number of its new place.
+A tab without a name of its own is named for the program running in its
+focused pane, `htop` or `npm`, while one runs, even under a shell that
+leaves the title alone, and the pane's head says it beside the directory.
 With the mouse, drag a tab's chip along the strip to move it, and
 double-click the chip of the tab on screen to rename it.
 

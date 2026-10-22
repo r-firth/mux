@@ -526,11 +526,8 @@ impl MuxApp {
         }
         self.panes
             .get(&pane_id)
-            .and_then(|pane| pane.title.title())
-            .map_or_else(
-                || format!("pane {number}"),
-                |title| chrome::terminal_place(title).to_owned(),
-            )
+            .and_then(PaneReplica::head_title)
+            .unwrap_or_else(|| format!("pane {number}"))
     }
 
     /// The agent a tab's agent pane shows, as `active_agent` finds it for

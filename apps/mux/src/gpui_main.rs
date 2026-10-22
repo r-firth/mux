@@ -249,6 +249,8 @@ struct PaneReplica {
     frame_serial: u64,
     render_cache: Rc<RefCell<TerminalRenderCache>>,
     title: TitleScanner,
+    /// The program in front of the pane's shell, as the daemon last said.
+    program: Option<String>,
 }
 
 fn next_frame_serial() -> u64 {
@@ -285,6 +287,33 @@ impl PaneReplica {
             frame_serial: next_frame_serial(),
             render_cache: Rc::new(RefCell::new(TerminalRenderCache::default())),
             title: TitleScanner::default(),
+            program: None,
+        }
+    }
+
+    /// The program in front of the shell, when the pane's title doesn't
+    /// already name it. Shells that don't set a title while a program runs,
+    /// as macOS's zsh doesn't, would otherwise leave the pane named for its
+    /// directory; a program that sets its own title, as an editor does, is
+    /// left to say it.
+    fn untitled_program(&self) -> Option<&str> {
+        let program = self.program.as_deref()?;
+        let named = self.title.title().is_some_and(|title| {
+            title
+                .to_lowercase()
+                .contains(program.to_lowercase().as_str())
+        });
+        (!named).then_some(program)
+    }
+
+    /// What the pane's head says: its place, after the program running
+    /// there if the title doesn't name it.
+    fn head_title(&self) -> Option<String> {
+        let place = self.title.title().map(chrome::terminal_place);
+        match (self.untitled_program(), place) {
+            (Some(program), Some(place)) => Some(format!("{program} · {place}")),
+            (Some(program), None) => Some(program.to_owned()),
+            (None, place) => place.map(str::to_owned),
         }
     }
 
@@ -404,6 +433,7 @@ fn restore_pane_replica(
     }
     let mut replica = PaneReplica::new(engine, frame);
     replica.title = title;
+    replica.program.clone_from(&pane.program);
     Ok(replica)
 }
 
@@ -452,6 +482,8 @@ fn reconcile_pane_replicas(
                     || (output_continues
                         && replica.next_sequence < pane.terminal.next_sequence) =>
             {
+                let mut replica = replica;
+                replica.program.clone_from(&pane.program);
                 replica
             }
             Some(_) | None => restore_pane_replica(pane, ghostty_theme)?,
@@ -1509,7 +1541,19 @@ impl MuxApp {
                 program,
                 seconds,
                 ..
-            } => self.note_finished_command(pane_id, &program, seconds),
+            } => {
+                if let Some(pane) = self.panes.get_mut(&pane_id) {
+                    pane.program = None;
+                }
+                self.note_finished_command(pane_id, &program, seconds);
+            }
+            ServerEvent::PaneCommandStarted {
+                pane_id, program, ..
+            } => {
+                if let Some(pane) = self.panes.get_mut(&pane_id) {
+                    pane.program = Some(program);
+                }
+            }
         }
         Ok(())
     }
@@ -3689,9 +3733,11 @@ impl MuxApp {
         if !title.is_empty() && title.parse::<u64>().is_err() {
             return chrome::truncate_chars(title, 24);
         }
-        self.panes
-            .get(&tab.focused_pane)
-            .and_then(|pane| pane.title.title())
+        let pane = self.panes.get(&tab.focused_pane);
+        if let Some(program) = pane.and_then(PaneReplica::untitled_program) {
+            return chrome::truncate_chars(program, 24);
+        }
+        pane.and_then(|pane| pane.title.title())
             .map_or_else(|| "shell".to_owned(), chrome::tab_label)
     }
 
@@ -4317,10 +4363,8 @@ impl MuxApp {
                 |agent| agent_view::agent_title(agent).into(),
             )
         } else {
-            pane.and_then(|pane| pane.title.title()).map_or_else(
-                || format!("pane {number}").into(),
-                |title| chrome::terminal_place(title).to_owned().into(),
-            )
+            pane.and_then(PaneReplica::head_title)
+                .map_or_else(|| format!("pane {number}").into(), Into::into)
         };
         let call = self
             .pane_call(geometry.pane_id)
@@ -6399,6 +6443,7 @@ mod tests {
             terminal: daemon_engine.attachment().expect("daemon attachment"),
             exit_status: None,
             title: None,
+            program: None,
         };
         let reconciled = reconcile_pane_replicas(
             HashMap::from([(pane_id, local_replica)]),
@@ -6444,6 +6489,7 @@ mod tests {
             terminal: daemon_engine.attachment().expect("daemon attachment"),
             exit_status: None,
             title: None,
+            program: None,
         };
 
         let mut reconciled = reconcile_pane_replicas(
@@ -6491,6 +6537,7 @@ mod tests {
             terminal: daemon_engine.attachment().expect("daemon attachment"),
             exit_status: None,
             title: None,
+            program: None,
         };
 
         let mut reconciled = reconcile_pane_replicas(
@@ -6562,6 +6609,7 @@ mod tests {
             terminal,
             exit_status: None,
             title: None,
+            program: None,
         };
 
         let Err(error) = super::restore_pane_replica(&pane, &GhosttyTheme::default()) else {

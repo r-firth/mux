@@ -213,6 +213,8 @@ pub struct PaneAttachment {
     pub exit_status: Option<ProcessExit>,
     /// The last window title the pane's program set, if any.
     pub title: Option<String>,
+    /// The program in front of the pane's shell, if one is.
+    pub program: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -244,6 +246,12 @@ pub enum ServerEvent {
         pane_id: PaneId,
         program: String,
         seconds: u64,
+    },
+    /// A pane's shell has handed the terminal to a program.
+    PaneCommandStarted {
+        session_id: SessionId,
+        pane_id: PaneId,
+        program: String,
     },
 }
 

@@ -212,6 +212,15 @@ struct ForegroundCommand {
     name: String,
 }
 
+/// What changed in front of a pane's shell between two looks.
+#[derive(Debug, Eq, PartialEq)]
+pub enum ForegroundChange {
+    /// This program has taken the terminal.
+    Started(String),
+    /// This program has given the terminal back after running this long.
+    Finished(String, Duration),
+}
+
 impl PaneRuntime {
     pub fn spawn(
         session_id: SessionId,
@@ -324,11 +333,14 @@ impl PaneRuntime {
     pub fn attachment(&self) -> Result<mux_protocol::PaneAttachment, PaneError> {
         let terminal = self.terminal.lock().attachment()?;
         terminal.validate_sequence_contract()?;
+        // Asked apart: the exit status is held while the attachment is built.
+        let program = self.running_program();
         Ok(mux_protocol::PaneAttachment {
             pane_id: self.id,
             terminal,
             exit_status: *self.exit_status.lock(),
             title: self.title.lock().title().map(str::to_owned),
+            program,
         })
     }
 
@@ -377,11 +389,11 @@ impl PaneRuntime {
         Ok(())
     }
 
-    /// Look at what is in front of the shell. When a program the shell ran
-    /// has handed the terminal back since the last look, say which and how
-    /// long it ran. A pipeline or a program that starts others counts as the
-    /// one it started with.
-    pub fn take_finished_command(&self) -> Option<(String, Duration)> {
+    /// Look at what is in front of the shell, and say what has changed since
+    /// the last look: a program the shell ran has taken the terminal, or has
+    /// handed it back, and how long it ran. A pipeline or a program that
+    /// starts others counts as the one it started with.
+    pub fn look_at_foreground(&self) -> Option<ForegroundChange> {
         let shell = self.process_id?;
         let foreground = if self.exit_status.lock().is_some() {
             None
@@ -391,17 +403,19 @@ impl PaneRuntime {
         let mut command = self.foreground_command.lock();
         match foreground {
             Some(process_id) if process_id != shell => {
-                if command.is_none() {
-                    *command = Some(ForegroundCommand {
-                        since: Instant::now(),
-                        name: process_name(process_id),
-                    });
+                if command.is_some() {
+                    return None;
                 }
-                None
+                let name = process_name(process_id);
+                *command = Some(ForegroundCommand {
+                    since: Instant::now(),
+                    name: name.clone(),
+                });
+                Some(ForegroundChange::Started(name))
             }
-            _ => command
-                .take()
-                .map(|finished| (finished.name, finished.since.elapsed())),
+            _ => command.take().map(|finished| {
+                ForegroundChange::Finished(finished.name, finished.since.elapsed())
+            }),
         }
     }
 

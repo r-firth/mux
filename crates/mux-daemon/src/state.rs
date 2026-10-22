@@ -18,7 +18,7 @@ use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use tokio::sync::broadcast;
 
-use crate::pane::PaneRuntime;
+use crate::pane::{ForegroundChange, PaneRuntime};
 
 pub struct DaemonState {
     state_dir: PathBuf,
@@ -105,14 +105,23 @@ impl DaemonState {
             let session_id = session.model.read().id;
             let panes = session.panes.read().values().cloned().collect::<Vec<_>>();
             for pane in panes {
-                if let Some((program, took)) = pane.take_finished_command() {
-                    let _ = session.events.send(ServerEvent::PaneCommandFinished {
+                let event = match pane.look_at_foreground() {
+                    Some(ForegroundChange::Started(program)) => ServerEvent::PaneCommandStarted {
                         session_id,
                         pane_id: pane.id,
                         program,
-                        seconds: took.as_secs(),
-                    });
-                }
+                    },
+                    Some(ForegroundChange::Finished(program, took)) => {
+                        ServerEvent::PaneCommandFinished {
+                            session_id,
+                            pane_id: pane.id,
+                            program,
+                            seconds: took.as_secs(),
+                        }
+                    }
+                    None => continue,
+                };
+                let _ = session.events.send(event);
             }
         }
     }
@@ -884,6 +893,54 @@ mod tests {
         assert_eq!(state.list_sessions(), vec![first.clone()]);
         state.kill_session(first.id).expect("kill first session");
         assert!(state.list_sessions().is_empty());
+    }
+
+    #[test]
+    fn a_program_the_shell_runs_is_seen_starting_and_finishing() {
+        let state_directory = tempfile::tempdir().expect("state directory");
+        let state = DaemonState::new(state_directory.path().to_path_buf(), 64 * 1024);
+        let session = state
+            .create_session(CreateSession {
+                name: "foreground".to_owned(),
+                cwd: state_directory.path().to_path_buf(),
+                command: SpawnCommand {
+                    program: PathBuf::from("/bin/sh"),
+                    args: Vec::new(),
+                    environment: Vec::new(),
+                },
+                initial_panes: 1,
+                initial_size: TerminalSize::default(),
+            })
+            .expect("create session");
+        let runtime = state
+            .resolve(&SessionSelector::Id(session.id))
+            .expect("session runtime");
+        let pane = runtime.panes.read().values().next().expect("pane").clone();
+        pane.write(b"sleep 1\n").expect("run sleep");
+
+        let started = wait_for_change(&pane);
+        assert_eq!(started, ForegroundChange::Started("sleep".to_owned()));
+        let attachment = runtime.attachment().expect("attachment while it runs");
+        assert_eq!(attachment.panes[0].program.as_deref(), Some("sleep"));
+
+        let ForegroundChange::Finished(program, took) = wait_for_change(&pane) else {
+            panic!("expected sleep to finish");
+        };
+        assert_eq!(program, "sleep");
+        assert!(took >= Duration::from_millis(500), "ran for {took:?}");
+        let attachment = runtime.attachment().expect("attachment at the prompt");
+        assert_eq!(attachment.panes[0].program, None);
+    }
+
+    fn wait_for_change(pane: &PaneRuntime) -> ForegroundChange {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(change) = pane.look_at_foreground() {
+                return change;
+            }
+            assert!(Instant::now() < deadline, "the foreground never changed");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     fn wait_for_cwd(pane: &PaneRuntime, expected: &std::path::Path) {
