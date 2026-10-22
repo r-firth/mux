@@ -8,6 +8,7 @@ mod agent_completion;
 mod agent_view;
 mod backend;
 mod chrome;
+mod cursor_click;
 mod file_drop;
 mod find;
 mod gpui_terminal;
@@ -689,6 +690,8 @@ struct MuxApp {
     selected_pane: Option<PaneId>,
     pending_focused_pane: Option<PaneId>,
     selection_drag: Option<TerminalPointerCapture>,
+    /// An Option-click that will move the cursor if it comes up in place.
+    cursor_click: Option<cursor_click::CursorClick>,
     /// The title last given to the window.
     window_title: String,
     mouse_reporting: Option<TerminalPointerCapture>,
@@ -854,6 +857,7 @@ impl MuxApp {
             selected_pane: None,
             pending_focused_pane: None,
             selection_drag: None,
+            cursor_click: None,
             window_title: String::new(),
             mouse_reporting: None,
             terminal_key_presses: HashMap::new(),
@@ -3433,7 +3437,10 @@ impl MuxApp {
             return;
         }
         match event.button {
-            gpui::MouseButton::Left => self.begin_selection(pane_id, rect, event),
+            gpui::MouseButton::Left => {
+                self.begin_cursor_click(pane_id, rect, event);
+                self.begin_selection(pane_id, rect, event);
+            }
             gpui::MouseButton::Right => self.open_pane_menu(pane_id, event.position),
             _ => {}
         }
@@ -3461,6 +3468,7 @@ impl MuxApp {
         let Some(capture) = self.selection_drag else {
             return false;
         };
+        self.follow_cursor_click(event.position);
         self.drag_selection(capture, event);
         true
     }
@@ -3539,6 +3547,7 @@ impl MuxApp {
             && let Some(capture) = self.selection_drag.take()
         {
             self.end_selection(capture, event);
+            self.finish_cursor_click();
             return true;
         }
         false

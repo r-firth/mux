@@ -152,6 +152,13 @@ keys. The arrows and Return work it too; Escape or a click elsewhere puts it
 away. A program that takes the mouse, such as an editor, gets the click
 instead, unless Shift is held.
 
+## Option-click
+
+Option-click in a pane to move the cursor to where you clicked, as in
+Terminal: Mux presses the arrows that walk it there, so it works at a
+shell's prompt, in an editor, anywhere the arrows move the cursor.
+Option-drag still selects a rectangle.
+
 ## Dropping files
 
 Drop files from the Finder on a pane to type their paths at its cursor,
