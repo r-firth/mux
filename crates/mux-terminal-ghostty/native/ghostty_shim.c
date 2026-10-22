@@ -1180,6 +1180,88 @@ int32_t mux_ghostty_terminal_prompt_rows(
   return (int32_t)GHOSTTY_SUCCESS;
 }
 
+static size_t mux_utf8_encode(uint32_t codepoint, uint8_t *out) {
+  if (codepoint < 0x80) {
+    out[0] = (uint8_t)codepoint;
+    return 1;
+  }
+  if (codepoint < 0x800) {
+    out[0] = (uint8_t)(0xC0 | (codepoint >> 6));
+    out[1] = (uint8_t)(0x80 | (codepoint & 0x3F));
+    return 2;
+  }
+  if (codepoint < 0x10000) {
+    out[0] = (uint8_t)(0xE0 | (codepoint >> 12));
+    out[1] = (uint8_t)(0x80 | ((codepoint >> 6) & 0x3F));
+    out[2] = (uint8_t)(0x80 | (codepoint & 0x3F));
+    return 3;
+  }
+  out[0] = (uint8_t)(0xF0 | (codepoint >> 18));
+  out[1] = (uint8_t)(0x80 | ((codepoint >> 12) & 0x3F));
+  out[2] = (uint8_t)(0x80 | ((codepoint >> 6) & 0x3F));
+  out[3] = (uint8_t)(0x80 | (codepoint & 0x3F));
+  return 4;
+}
+
+/* One row of the screen as UTF-8 text, counted from the top of the history:
+ * a space for each empty cell, nothing for the tail of a wide character,
+ * trailing spaces left on. The caller frees *out_bytes with
+ * mux_ghostty_buffer_free. */
+int32_t mux_ghostty_terminal_row_text(
+    mux_ghostty_terminal_t raw_terminal,
+    uint32_t y,
+    uint8_t **out_bytes,
+    size_t *out_len) {
+  if (out_bytes == NULL || out_len == NULL) {
+    return (int32_t)GHOSTTY_INVALID_VALUE;
+  }
+  *out_bytes = NULL;
+  *out_len = 0;
+  GhosttyTerminal terminal = (GhosttyTerminal)raw_terminal;
+  uint16_t cols = 0;
+  GhosttyResult result =
+      ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_COLS, &cols);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+  size_t capacity = (size_t)cols * 4 * 16 + 1;
+  uint8_t *text = malloc(capacity);
+  if (text == NULL) return (int32_t)GHOSTTY_OUT_OF_MEMORY;
+  size_t len = 0;
+  uint32_t graphemes[16];
+  for (uint16_t x = 0; x < cols; x++) {
+    GhosttyPoint point = {
+        .tag = GHOSTTY_POINT_TAG_SCREEN,
+        .value = {.coordinate = {.x = x, .y = y}},
+    };
+    GhosttyGridRef ref = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+    result = ghostty_terminal_grid_ref(terminal, point, &ref);
+    if (result != GHOSTTY_SUCCESS) {
+      free(text);
+      return (int32_t)result;
+    }
+    GhosttyCell cell = 0;
+    GhosttyCellWide wide = GHOSTTY_CELL_WIDE_NARROW;
+    if (ghostty_grid_ref_cell(&ref, &cell) == GHOSTTY_SUCCESS &&
+        ghostty_cell_get(cell, GHOSTTY_CELL_DATA_WIDE, &wide) == GHOSTTY_SUCCESS &&
+        (wide == GHOSTTY_CELL_WIDE_SPACER_TAIL ||
+         wide == GHOSTTY_CELL_WIDE_SPACER_HEAD)) {
+      continue;
+    }
+    size_t count = 0;
+    if (ghostty_grid_ref_graphemes(&ref, graphemes, 16, &count) !=
+            GHOSTTY_SUCCESS ||
+        count == 0) {
+      text[len++] = ' ';
+      continue;
+    }
+    for (size_t i = 0; i < count && len + 4 < capacity; i++) {
+      len += mux_utf8_encode(graphemes[i], text + len);
+    }
+  }
+  *out_bytes = text;
+  *out_len = len;
+  return (int32_t)GHOSTTY_SUCCESS;
+}
+
 void mux_ghostty_buffer_free(uint8_t *bytes) {
   free(bytes);
 }

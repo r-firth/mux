@@ -1145,6 +1145,12 @@ mod linked {
             out_len: *mut usize,
         ) -> i32;
         fn mux_ghostty_buffer_free(bytes: *mut u8);
+        fn mux_ghostty_terminal_row_text(
+            terminal: *mut c_void,
+            y: u32,
+            out_bytes: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32;
         fn mux_ghostty_terminal_prompt_rows(
             terminal: *mut c_void,
             out_rows: *mut *mut u32,
@@ -1564,6 +1570,32 @@ mod linked {
                     .into_owned();
             // SAFETY: the pointer is the allocation returned by the shim, and
             // freeing null for an empty screen is supported.
+            unsafe { mux_ghostty_buffer_free(bytes) };
+            Ok(text)
+        }
+
+        /// One row's text, counted from the top of the history as
+        /// `screen_text`'s lines are, its trailing blanks left off.
+        pub fn row_text(&self, row: usize) -> Result<String, GhosttyError> {
+            let mut bytes = ptr::null_mut();
+            let mut length = 0_usize;
+            let row = u32::try_from(row).unwrap_or(u32::MAX);
+            // SAFETY: output pointers are valid; the returned allocation is
+            // copied before it is released with the matching shim function.
+            let result = unsafe {
+                mux_ghostty_terminal_row_text(
+                    self.terminal.as_ptr(),
+                    row,
+                    &raw mut bytes,
+                    &raw mut length,
+                )
+            };
+            check(result)?;
+            let text =
+                String::from_utf8_lossy(borrowed_slice(bytes.cast_const(), length, "row text")?)
+                    .trim_end()
+                    .to_owned();
+            // SAFETY: the pointer is the allocation returned by the shim.
             unsafe { mux_ghostty_buffer_free(bytes) };
             Ok(text)
         }
@@ -2811,6 +2843,8 @@ mod linked {
                 )
                 .expect("terminal output");
             assert_eq!(engine.prompt_rows().expect("prompt rows"), vec![0, 4, 6]);
+            assert_eq!(engine.row_text(4).expect("row text"), "$ pwd");
+            assert_eq!(engine.row_text(1).expect("row text"), "a");
         }
 
         #[test]

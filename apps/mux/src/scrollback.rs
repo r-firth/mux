@@ -6,7 +6,9 @@
 //! somewhere out of sight. While a pane is scrolled back, a thin thumb on its
 //! right edge says where in its history it is; drag it to move through the
 //! history, or click above or below it to jump there. A pill at the bottom
-//! says how much is below the view, and a click on it goes back down.
+//! says how much is below the view, and a click on it goes back down. Above
+//! output whose prompt is out of sight, that prompt's line stays pinned to
+//! the pane's top.
 
 use super::*;
 use mux_terminal::TerminalScrollState;
@@ -74,6 +76,14 @@ fn prompt_jump(
         None if !older && !bottom => Some(TerminalViewportScroll::Bottom),
         None => None,
     }
+}
+
+/// The prompt of the command whose output starts the view: the last one
+/// above the view's top. None when the view starts on a prompt, or before
+/// any.
+fn command_above(prompts: &[usize], scroll: TerminalScrollState) -> Option<usize> {
+    let top = usize::try_from(scroll.offset).unwrap_or(usize::MAX);
+    prompts.iter().rev().find(|&&row| row < top).copied()
 }
 
 /// Each pane's prompt rows, with the frame they were read for.
@@ -386,14 +396,16 @@ impl MuxApp {
         )
     }
 
-    /// What a scrolled-back pane shows over its right edge: prompt ticks,
-    /// the thumb, and the pill saying how much is below.
+    /// What a scrolled-back pane shows over its edges: the command whose
+    /// output is in view, prompt ticks, the thumb, and the pill saying how
+    /// much is below.
     pub(super) fn render_scrollback_marks(
         &self,
         geometry: layout::PaneGeometry,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
         [
+            self.render_command_header(geometry, cx),
             self.render_prompt_ticks(geometry),
             self.render_scroll_thumb(geometry),
             self.render_latest_pill(geometry, cx),
@@ -401,6 +413,87 @@ impl MuxApp {
         .into_iter()
         .flatten()
         .collect()
+    }
+
+    /// The pane's prompt rows, read again only when its screen has changed.
+    fn cached_prompt_rows(&self, pane_id: PaneId) -> Option<Rc<Vec<usize>>> {
+        let pane = self.panes.get(&pane_id)?;
+        let mut cache = self.prompt_rows.borrow_mut();
+        if let Some((serial, rows)) = cache.get(&pane_id)
+            && *serial == pane.frame_serial
+        {
+            return Some(Rc::clone(rows));
+        }
+        let rows = Rc::new(
+            pane.with_engine(|engine| engine.prompt_rows())
+                .unwrap_or_default(),
+        );
+        cache.insert(pane_id, (pane.frame_serial, Rc::clone(&rows)));
+        Some(rows)
+    }
+
+    /// While a pane is scrolled back into a command's output with its
+    /// prompt above the view, that prompt line pinned to the pane's top, so
+    /// the output in view says what made it. A click goes to the prompt.
+    pub(super) fn render_command_header(
+        &self,
+        geometry: layout::PaneGeometry,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let pane_id = geometry.pane_id;
+        let pane = self.panes.get(&pane_id)?;
+        let scroll = pane.frame.scroll;
+        let finding = self
+            .find
+            .as_ref()
+            .is_some_and(|find| find.pane_id == pane_id);
+        if finding || !scroll.is_scrolled() {
+            return None;
+        }
+        let prompts = self.cached_prompt_rows(pane_id)?;
+        let row = command_above(&prompts, scroll)?;
+        let text = pane
+            .with_engine(|engine| engine.row_text(row))
+            .ok()
+            .filter(|text| !text.trim().is_empty())?;
+        let metrics = self.metrics;
+        let rect = geometry.rect;
+        let padding =
+            metrics.balanced_padding(rect.width, rect.height, pane.frame.cols, pane.frame.rows);
+        let delta = i64::try_from(row).unwrap_or(i64::MAX)
+            - i64::try_from(scroll.offset).unwrap_or(i64::MAX);
+        Some(
+            h_flex()
+                .id(SharedString::from(format!("command-header-{pane_id}")))
+                .absolute()
+                .left(px(rect.x))
+                .top(px(rect.y))
+                .w(px(rect.width - THUMB_GRIP))
+                .h(px(metrics.cell_height + 8.0))
+                .pl(px(padding.left))
+                .pr(px(8.0))
+                .items_center()
+                .overflow_hidden()
+                .bg(color(SURFACE))
+                .border_b_1()
+                .border_color(hairline(0.12))
+                .shadow_sm()
+                .block_mouse_except_scroll()
+                .cursor_pointer()
+                .font_family(self.terminal_font.clone())
+                .text_size(px(metrics.font_size))
+                .text_color(color(MUTED_TEXT))
+                .whitespace_nowrap()
+                .hover(|style| style.text_color(color(TEXT)))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if this.scroll_viewport(pane_id, TerminalViewportScroll::Delta(delta)) {
+                        cx.notify();
+                    }
+                }))
+                .child(text)
+                .into_any_element(),
+        )
     }
 
     /// While a pane is scrolled back, a faint tick beside the thumb for
@@ -419,20 +512,7 @@ impl MuxApp {
             return None;
         }
         let pane = self.panes.get(&pane_id)?;
-        let prompts = {
-            let mut cache = self.prompt_rows.borrow_mut();
-            match cache.get(&pane_id) {
-                Some((serial, rows)) if *serial == pane.frame_serial => Rc::clone(rows),
-                _ => {
-                    let rows = Rc::new(
-                        pane.with_engine(|engine| engine.prompt_rows())
-                            .unwrap_or_default(),
-                    );
-                    cache.insert(pane_id, (pane.frame_serial, Rc::clone(&rows)));
-                    rows
-                }
-            }
-        };
+        let prompts = self.cached_prompt_rows(pane_id)?;
         if prompts.is_empty() {
             return None;
         }
@@ -528,6 +608,29 @@ mod tests {
         assert_eq!(prompt_key(&keystroke("up", true, false)), Some(true));
         assert_eq!(prompt_key(&keystroke("down", true, true)), Some(false));
         assert_eq!(prompt_key(&keystroke("up", false, false)), None);
+    }
+
+    #[test]
+    fn the_header_names_the_command_whose_output_is_in_view() {
+        let prompts = [10, 120, 300];
+        let scroll = |offset| TerminalScrollState {
+            total: 500,
+            offset,
+            len: 40,
+        };
+        assert_eq!(
+            command_above(&prompts, scroll(5)),
+            None,
+            "before any prompt"
+        );
+        assert_eq!(
+            command_above(&prompts, scroll(10)),
+            None,
+            "on the prompt itself"
+        );
+        assert_eq!(command_above(&prompts, scroll(11)), Some(10));
+        assert_eq!(command_above(&prompts, scroll(299)), Some(120));
+        assert_eq!(command_above(&prompts, scroll(460)), Some(300));
     }
 
     #[test]
