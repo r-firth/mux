@@ -1,12 +1,38 @@
 //! Shift-click extends a selection to where you click, as it does in every
 //! Mac text view: from the selection's far end, so clicking past its end
-//! grows it forward and clicking before its start grows it back.
+//! grows it forward and clicking before its start grows it back. Cmd+A
+//! selects everything a pane holds, its history too.
 
 use mux_terminal::{RenderFrame, TerminalInteraction as _, TerminalPoint, TerminalSelection};
 
 use super::{MuxApp, PaneId, layout};
 
 impl MuxApp {
+    /// Select all of the pane with the keys, history and screen, ready for
+    /// Cmd+C.
+    pub(super) fn select_all(&mut self) {
+        let Some(pane_id) = self.terminal_input_pane_id() else {
+            return;
+        };
+        if self.selected_pane != Some(pane_id)
+            && let Some(previous) = self.selected_pane.take()
+            && let Some(pane) = self.panes.get_mut(&previous)
+        {
+            let _ = pane.with_engine(|engine| engine.set_selection(None));
+            let _ = pane.publish_frame();
+        }
+        let Some(pane) = self.panes.get_mut(&pane_id) else {
+            return;
+        };
+        if pane
+            .with_engine(mux_terminal_ghostty::GhosttyEngine::select_all)
+            .is_ok()
+        {
+            let _ = pane.publish_frame();
+            self.selected_pane = Some(pane_id);
+        }
+    }
+
     /// Extend the pane's selection to a Shift-click, if it has one on
     /// screen. Returns whether the click was taken.
     pub(super) fn extend_selection(

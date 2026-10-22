@@ -2001,6 +2001,11 @@ impl MuxApp {
             self.copy_selection(cx);
             return;
         }
+        if keystroke.modifiers.platform && !keystroke.modifiers.shift && keystroke.key == "a" {
+            self.select_all();
+            cx.notify();
+            return;
+        }
         if self.exited_pane_key(keystroke, held) || self.scrollback_key_down(keystroke, cx) {
             return;
         }

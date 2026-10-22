@@ -463,6 +463,7 @@ mod linked {
             rectangular: bool,
         ) -> i32;
         fn mux_ghostty_terminal_clear_selection(terminal: *mut c_void) -> i32;
+        fn mux_ghostty_terminal_select_all(terminal: *mut c_void) -> i32;
         fn mux_ghostty_selection_gesture_new(out_gesture: *mut *mut c_void) -> i32;
         fn mux_ghostty_selection_gesture_free(gesture: *mut c_void, terminal: *mut c_void);
         fn mux_ghostty_selection_gesture_reset(gesture: *mut c_void, terminal: *mut c_void) -> i32;
@@ -658,6 +659,23 @@ mod linked {
     unsafe impl Send for GhosttyEngine {}
 
     impl GhosttyEngine {
+        /// Select everything the terminal holds, its history and the screen,
+        /// as Cmd+A does in a Mac terminal.
+        pub fn select_all(&mut self) -> Result<(), TerminalError> {
+            // SAFETY: both handles are exclusively borrowed; resetting first
+            // keeps a later click from continuing an earlier click sequence.
+            let reset = unsafe {
+                mux_ghostty_selection_gesture_reset(
+                    self.selection_gesture.as_ptr(),
+                    self.terminal.as_ptr(),
+                )
+            };
+            check(reset).map_err(|error| TerminalError::Engine(error.to_string()))?;
+            // SAFETY: the terminal is exclusively borrowed for this call.
+            let result = unsafe { mux_ghostty_terminal_select_all(self.terminal.as_ptr()) };
+            check(result).map_err(|error| TerminalError::Engine(error.to_string()))
+        }
+
         pub fn new(size: TerminalSize) -> Result<Self, GhosttyError> {
             let size = size.validate()?;
             let mut terminal = ptr::null_mut();

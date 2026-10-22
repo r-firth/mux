@@ -33,6 +33,7 @@ from an agent pane too. They are in the menu bar's Shell and Window menus.
 | `Cmd+Shift+D` | Split downward |
 | `Cmd+Shift+Return` | Toggle focused-pane zoom |
 | `Cmd+W` | Close the focused pane |
+| `Cmd+A` | Select everything in the focused pane, its history too |
 | `Cmd+K` | Clear the focused pane: its screen and history at the prompt, only its history with a program in front |
 | `Cmd+1` through `Cmd+8` | Select a numbered tab |
 | `Cmd+9` | Select the last tab |
@@ -152,8 +153,8 @@ keys stay put while output moves underneath them.
 
 ## Right click
 
-A right click on a terminal pane opens a menu by the pointer: copy and
-paste, split right or down, zoom, clear, find and close, each beside its
+A right click on a terminal pane opens a menu by the pointer: copy, paste
+and select all, split right or down, zoom, clear, find and close, each beside its
 keys. The arrows and Return work it too; Escape or a click elsewhere puts it
 away. A program that takes the mouse, such as an editor, gets the click
 instead, unless Shift is held.

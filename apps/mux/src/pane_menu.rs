@@ -17,6 +17,7 @@ const RULE_GAP: f32 = 9.0;
 enum Item {
     Copy,
     Paste,
+    SelectAll,
     SplitRight,
     SplitDown,
     Zoom,
@@ -82,6 +83,7 @@ impl MuxApp {
                 false,
             ),
             line(Item::Paste, "paste", "⌘v", true, false),
+            line(Item::SelectAll, "select all", "⌘a", true, false),
             line(Item::SplitRight, "split right", "⌘d", true, true),
             line(Item::SplitDown, "split down", "⌘⇧d", true, false),
             line(
@@ -102,6 +104,7 @@ impl MuxApp {
         match item {
             Item::Copy => self.copy_selection(cx),
             Item::Paste => self.paste_clipboard(cx),
+            Item::SelectAll => self.select_all(),
             Item::SplitRight => self.run_shortcut(
                 Action::SplitPane(mux_workspace::SplitAxis::Horizontal),
                 window,
