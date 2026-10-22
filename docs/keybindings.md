@@ -21,6 +21,23 @@ inside the supported modes, matching Zellij. Enter or Escape returns from a
 mode to normal terminal input. All other Normal-mode keys, including
 `Ctrl+n`, `Ctrl+o`, and `:`, pass through to the foreground program.
 
+## Mac shortcuts
+
+The keys a Mac terminal answers to work beside Zellij's, from any mode and
+from an agent pane too. They are in the menu bar's Shell and Window menus.
+
+| Keys | Action |
+| --- | --- |
+| `Cmd+T` | Create a tab |
+| `Cmd+D` | Split to the right |
+| `Cmd+Shift+D` | Split downward |
+| `Cmd+Shift+Return` | Toggle focused-pane zoom |
+| `Cmd+W` | Close the focused pane |
+| `Cmd+1` through `Cmd+8` | Select a numbered tab |
+| `Cmd+9` | Select the last tab |
+| `Cmd+Shift+]` / `Ctrl+Tab` | Next tab |
+| `Cmd+Shift+[` / `Ctrl+Shift+Tab` | Previous tab |
+
 ## Pane mode
 
 | Keys | Action |

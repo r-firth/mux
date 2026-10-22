@@ -157,29 +157,48 @@ gpui::actions!(
         CancelAgentTurn,
         ChoosePaletteRow,
         CloseFind,
+        CloseMuxPane,
         ClosePalette,
         DismissAgentCompletion,
         FindNewer,
         FindOlder,
         ForwardTerminalBacktab,
+        GrowMuxText,
         ForwardTerminalTab,
         InsertAgentCompletion,
         NavigateAgentDown,
         NavigateAgentLeft,
         NavigateAgentRight,
         NavigateAgentUp,
+        NewMuxTab,
         NextAgentChoice,
+        NextMuxTab,
         NextPaletteRow,
         OpenFind,
         OpenMuxPalette,
         OpenMuxSettings,
         OpenQuickSelect,
         PreviousAgentChoice,
+        PreviousMuxTab,
         PreviousPaletteRow,
         QuitMux,
+        ResetMuxText,
+        SelectMuxTab1,
+        SelectMuxTab2,
+        SelectMuxTab3,
+        SelectMuxTab4,
+        SelectMuxTab5,
+        SelectMuxTab6,
+        SelectMuxTab7,
+        SelectMuxTab8,
+        SelectLastMuxTab,
         SelectNextAgentCompletion,
         SelectPreviousAgentCompletion,
-        ToggleAgentPane
+        ShrinkMuxText,
+        SplitMuxDown,
+        SplitMuxRight,
+        ToggleAgentPane,
+        ZoomMuxPane
     ]
 );
 
@@ -621,6 +640,8 @@ struct MuxApp {
     mode: InputMode,
     motion: MotionPreference,
     metrics: GridMetrics,
+    /// The size Ghostty's config asks for, which `Cmd+0` goes back to.
+    configured_font_size: f32,
     terminal_font: String,
     ghostty_theme: GhosttyTheme,
     clipboard: Option<arboard::Clipboard>,
@@ -780,6 +801,7 @@ impl MuxApp {
             mode: InputMode::Normal,
             motion,
             metrics,
+            configured_font_size: metrics.font_size,
             terminal_font,
             ghostty_theme: GhosttyTheme::load_user().unwrap_or_default(),
             clipboard: arboard::Clipboard::new().ok(),
@@ -794,7 +816,10 @@ impl MuxApp {
     /// and the grid it measures out to.
     fn resolve_terminal_font(cx: &mut Context<Self>) -> (String, GridMetrics) {
         let font_config = GhosttyFont::load_user().unwrap_or_default();
-        let font_size = font_config.size.unwrap_or(14.0).clamp(8.0, 36.0);
+        let font_size = font_config
+            .size
+            .unwrap_or(14.0)
+            .clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
         let requested_font = font_config.family.as_deref().unwrap_or_default().trim();
         let available_fonts = cx.text_system().all_font_names();
         let terminal_font = available_fonts
@@ -815,6 +840,37 @@ impl MuxApp {
             "measured terminal grid"
         );
         (terminal_font, metrics)
+    }
+
+    /// Set the terminal text's size for every pane in the window, within
+    /// the range Ghostty's config is held to. The panes take their new grids
+    /// at the next frame, and the strip says the size.
+    fn set_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
+        let size = size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+        if (size - self.metrics.font_size).abs() < f32::EPSILON {
+            let edge = if size >= MAX_FONT_SIZE {
+                "text is as large as it goes"
+            } else if size <= MIN_FONT_SIZE {
+                "text is as small as it goes"
+            } else {
+                return;
+            };
+            self.say_in_strip(edge, false, cx);
+            return;
+        }
+        self.metrics = GridMetrics::from_font(&self.terminal_font, size, cx.text_system());
+        let said = if (size - self.configured_font_size).abs() < f32::EPSILON {
+            format!("text back to {}", font_size_words(size))
+        } else {
+            format!("text {}  ·  ⌘0 resets", font_size_words(size))
+        };
+        self.say_in_strip(said, false, cx);
+        cx.notify();
+    }
+
+    fn step_font_size(&mut self, steps: f32, cx: &mut Context<Self>) {
+        let size = (self.metrics.font_size + steps).round();
+        self.set_font_size(size, cx);
     }
 
     /// Look for each agent's launcher off the UI thread: finding it can mean
@@ -1989,6 +2045,13 @@ impl MuxApp {
             Action::OpenCommandPalette => self.toggle_palette(window, cx),
         }
         cx.notify();
+    }
+
+    /// A Mac shortcut does what its Zellij keys do, from whatever mode the
+    /// keys were in, and leaves them in Normal.
+    fn run_shortcut(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
+        self.mode = InputMode::Normal;
+        self.perform_action(action, window, cx);
     }
 
     /// Rename the active tab in its own chip: the name turns into a field
@@ -3724,7 +3787,7 @@ impl MuxApp {
                     ("⌃n", "resize"),
                 ],
                 InputMode::Tab => &[
-                    ("hl", "move"),
+                    ("hl", "go"),
                     ("1-9", "jump"),
                     ("n", "new"),
                     ("r", "rename"),
@@ -3852,6 +3915,84 @@ impl MuxApp {
     /// The root's pointer listeners. A drag or a mouse report that started
     /// in a pane follows the pointer wherever it goes and ends on a release
     /// anywhere; ⌘ pressed or let go over a link shows or hides it.
+    /// The Mac shortcuts' actions, which work from anywhere in the window.
+    fn with_shortcut_actions(
+        root: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        root.on_action(cx.listener(|this, _: &GrowMuxText, _, cx| this.step_font_size(1.0, cx)))
+            .on_action(cx.listener(|this, _: &ShrinkMuxText, _, cx| {
+                this.step_font_size(-1.0, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ResetMuxText, _, cx| {
+                this.set_font_size(this.configured_font_size, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewMuxTab, window, cx| {
+                this.run_shortcut(Action::NewTab, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SplitMuxRight, window, cx| {
+                this.run_shortcut(
+                    Action::SplitPane(mux_workspace::SplitAxis::Horizontal),
+                    window,
+                    cx,
+                );
+            }))
+            .on_action(cx.listener(|this, _: &SplitMuxDown, window, cx| {
+                this.run_shortcut(
+                    Action::SplitPane(mux_workspace::SplitAxis::Vertical),
+                    window,
+                    cx,
+                );
+            }))
+            .on_action(cx.listener(|this, _: &ZoomMuxPane, window, cx| {
+                this.run_shortcut(Action::TogglePaneZoom, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CloseMuxPane, window, cx| {
+                this.run_shortcut(Action::ClosePane, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextMuxTab, window, cx| {
+                this.run_shortcut(Action::NextTab, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PreviousMuxTab, window, cx| {
+                this.run_shortcut(Action::PreviousTab, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectMuxTab1, window, cx| {
+                this.run_shortcut(Action::SelectTab(1), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectMuxTab2, window, cx| {
+                this.run_shortcut(Action::SelectTab(2), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectMuxTab3, window, cx| {
+                this.run_shortcut(Action::SelectTab(3), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectMuxTab4, window, cx| {
+                this.run_shortcut(Action::SelectTab(4), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectMuxTab5, window, cx| {
+                this.run_shortcut(Action::SelectTab(5), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectMuxTab6, window, cx| {
+                this.run_shortcut(Action::SelectTab(6), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectMuxTab7, window, cx| {
+                this.run_shortcut(Action::SelectTab(7), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectMuxTab8, window, cx| {
+                this.run_shortcut(Action::SelectTab(8), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectLastMuxTab, window, cx| {
+                let last = this
+                    .session
+                    .as_ref()
+                    .map_or(0, |session| session.tabs.len());
+                this.run_shortcut(
+                    Action::SelectTab(u8::try_from(last).unwrap_or(u8::MAX)),
+                    window,
+                    cx,
+                );
+            }))
+    }
+
     fn with_pointer_capture(
         root: gpui::Stateful<gpui::Div>,
         cx: &mut Context<Self>,
@@ -4282,7 +4423,7 @@ impl Render for MuxApp {
             }));
         let drawn = self.draw_layout(&geometry, viewport, window);
         self.publish_ground(&drawn, viewport, window, cx);
-        let mut root = Self::with_pointer_capture(root, cx)
+        let mut root = Self::with_pointer_capture(Self::with_shortcut_actions(root, cx), cx)
             .font_family(EMBEDDED_TERMINAL_FONT)
             .text_color(theme.text)
             .child(self.render_tabs(cx));
@@ -5146,6 +5287,19 @@ fn terminal_codepoint(key: &str, terminal_key: TerminalKey) -> Option<char> {
     }
 }
 
+/// The range of terminal text sizes, in points.
+const MIN_FONT_SIZE: f32 = 8.0;
+const MAX_FONT_SIZE: f32 = 36.0;
+
+/// A text size as the strip says it: whole points without a fraction.
+fn font_size_words(size: f32) -> String {
+    if size.fract().abs() < f32::EPSILON {
+        format!("{size:.0} pt")
+    } else {
+        format!("{size:.1} pt")
+    }
+}
+
 fn quit_mux(_: &QuitMux, cx: &mut App) {
     // The daemon owns terminal and ACP process lifetime. Quitting this native
     // client deliberately detaches the GUI without touching the workspace.
@@ -5153,18 +5307,76 @@ fn quit_mux(_: &QuitMux, cx: &mut App) {
 }
 
 fn configure_application_menu(cx: &mut App) {
-    cx.set_menus(vec![Menu {
-        name: "Mux".into(),
-        disabled: false,
-        items: vec![
-            MenuItem::action("Go to…", OpenMuxPalette),
-            MenuItem::action("Settings…", OpenMuxSettings),
-            MenuItem::separator(),
-            MenuItem::os_submenu("Services", SystemMenuType::Services),
-            MenuItem::separator(),
-            MenuItem::action("Quit Mux", QuitMux),
-        ],
-    }]);
+    cx.set_menus(vec![
+        Menu {
+            name: "Mux".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("Go to…", OpenMuxPalette),
+                MenuItem::action("Settings…", OpenMuxSettings),
+                MenuItem::separator(),
+                MenuItem::os_submenu("Services", SystemMenuType::Services),
+                MenuItem::separator(),
+                MenuItem::action("Quit Mux", QuitMux),
+            ],
+        },
+        Menu {
+            name: "Shell".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("New Tab", NewMuxTab),
+                MenuItem::separator(),
+                MenuItem::action("Split Right", SplitMuxRight),
+                MenuItem::action("Split Down", SplitMuxDown),
+                MenuItem::action("Zoom Pane", ZoomMuxPane),
+                MenuItem::separator(),
+                MenuItem::action("Find…", OpenFind),
+                MenuItem::action("Quick Select", OpenQuickSelect),
+                MenuItem::separator(),
+                MenuItem::action("Close Pane", CloseMuxPane),
+            ],
+        },
+        Menu {
+            name: "Window".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("Bigger Text", GrowMuxText),
+                MenuItem::action("Smaller Text", ShrinkMuxText),
+                MenuItem::action("Actual Size", ResetMuxText),
+                MenuItem::separator(),
+                MenuItem::action("Show Next Tab", NextMuxTab),
+                MenuItem::action("Show Previous Tab", PreviousMuxTab),
+            ],
+        },
+    ]);
+}
+
+/// The keys a Mac terminal answers to, beside Zellij's.
+fn bind_mac_shortcuts(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-t", NewMuxTab, None),
+        KeyBinding::new("cmd-d", SplitMuxRight, None),
+        KeyBinding::new("cmd-shift-d", SplitMuxDown, None),
+        KeyBinding::new("cmd-shift-enter", ZoomMuxPane, None),
+        KeyBinding::new("cmd-w", CloseMuxPane, None),
+        KeyBinding::new("cmd-}", NextMuxTab, None),
+        KeyBinding::new("cmd-{", PreviousMuxTab, None),
+        KeyBinding::new("ctrl-tab", NextMuxTab, None),
+        KeyBinding::new("ctrl-shift-tab", PreviousMuxTab, None),
+        KeyBinding::new("cmd-1", SelectMuxTab1, None),
+        KeyBinding::new("cmd-2", SelectMuxTab2, None),
+        KeyBinding::new("cmd-3", SelectMuxTab3, None),
+        KeyBinding::new("cmd-4", SelectMuxTab4, None),
+        KeyBinding::new("cmd-5", SelectMuxTab5, None),
+        KeyBinding::new("cmd-6", SelectMuxTab6, None),
+        KeyBinding::new("cmd-7", SelectMuxTab7, None),
+        KeyBinding::new("cmd-8", SelectMuxTab8, None),
+        KeyBinding::new("cmd-9", SelectLastMuxTab, None),
+        KeyBinding::new("cmd-=", GrowMuxText, None),
+        KeyBinding::new("cmd-+", GrowMuxText, None),
+        KeyBinding::new("cmd--", ShrinkMuxText, None),
+        KeyBinding::new("cmd-0", ResetMuxText, None),
+    ]);
 }
 
 fn configure_application_actions(cx: &mut App) {
@@ -5179,6 +5391,7 @@ fn configure_application_actions(cx: &mut App) {
         KeyBinding::new("cmd-shift-g", FindNewer, None),
         KeyBinding::new("cmd-shift-space", OpenQuickSelect, None),
     ]);
+    bind_mac_shortcuts(cx);
     // The palette's field keeps typing; the keys that move through the
     // list, choose from it and close it are the palette's.
     let palette = Some("MuxPalette > Input");
@@ -6119,5 +6332,11 @@ mod tests {
         session.active_tab_mut().expect("active tab").zoomed_pane = Some(left);
         assert!(!pane_needs_live_frame(&session, None, right));
         assert!(pane_needs_live_frame(&session, None, left));
+    }
+
+    #[test]
+    fn text_sizes_read_in_whole_points() {
+        assert_eq!(super::font_size_words(14.0), "14 pt");
+        assert_eq!(super::font_size_words(13.5), "13.5 pt");
     }
 }
