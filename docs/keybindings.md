@@ -328,6 +328,10 @@ faster the further out it is. Typing into the pane lets go of the
 selection, as in Ghostty, so a highlight never sits over text that has
 since changed.
 
+Shift with an arrow moves the end of a selection a character or a row, as
+Ghostty's does, to take in a little more or less before copying. With
+nothing selected, the keys go to the program.
+
 With `copy-on-select = clipboard` in your Ghostty config, a selection goes on
 the clipboard as you make it. Ghostty's default copies to a selection
 clipboard a Mac does not have, so Mux leaves the clipboard alone unless

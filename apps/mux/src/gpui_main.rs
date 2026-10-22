@@ -35,6 +35,7 @@ mod run_clock;
 mod scrollback;
 mod seams;
 mod select_extend;
+mod select_keys;
 mod select_scroll;
 mod session_sheet;
 mod settings;
@@ -820,6 +821,7 @@ struct MuxApp {
     call_order: Vec<PaneId>,
     /// The prompt row gone to last, washed for a moment.
     prompt_flash: Option<prompt_flash::PromptFlash>,
+    keyed_selection: select_keys::KeyedSelection,
     /// How far along each pane's program last said it was, and when.
     pane_progress: HashMap<PaneId, (mux_terminal::Progress, Instant)>,
     /// When stale progress reports will next be looked for, if they will.
@@ -1028,6 +1030,7 @@ impl MuxApp {
             pane_calls: HashMap::new(),
             call_order: Vec::new(),
             prompt_flash: None,
+            keyed_selection: None,
             pane_progress: HashMap::new(),
             progress_sweep: None,
             finished_commands: Vec::new(),
@@ -2228,7 +2231,10 @@ impl MuxApp {
             cx.notify();
             return;
         }
-        if self.exited_pane_key(keystroke, held) || self.scrollback_key_down(keystroke, cx) {
+        if self.exited_pane_key(keystroke, held)
+            || self.scrollback_key_down(keystroke, cx)
+            || self.adjust_selection_key(keystroke, cx)
+        {
             return;
         }
         if keystroke.modifiers.platform && keystroke.key == "v" {
