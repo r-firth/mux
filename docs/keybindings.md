@@ -227,6 +227,11 @@ Option-drag selects a rectangle. Typing into the pane lets go of the
 selection, as in Ghostty, so a highlight never sits over text that has
 since changed.
 
+With `copy-on-select = clipboard` in your Ghostty config, a selection goes on
+the clipboard as you make it. Ghostty's default copies to a selection
+clipboard a Mac does not have, so Mux leaves the clipboard alone unless
+asked.
+
 ## Shift-click
 
 Shift-click extends the selection to where you click, from its far end, as

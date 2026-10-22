@@ -441,6 +441,13 @@ fn focus_follows_mouse() -> bool {
     *FOLLOWS.get_or_init(mux_terminal_ghostty::user_focus_follows_mouse)
 }
 
+/// Whether a selection goes on the clipboard as it is made, as in the
+/// user's Ghostty.
+fn copy_on_select() -> bool {
+    static COPIES: OnceLock<bool> = OnceLock::new();
+    *COPIES.get_or_init(mux_terminal_ghostty::user_copy_on_select)
+}
+
 fn restore_pane_replica(
     pane: &PaneAttachment,
     ghostty_theme: &GhosttyTheme,
@@ -2179,6 +2186,18 @@ impl MuxApp {
         }
     }
 
+    /// With `copy-on-select = clipboard` in the user's Ghostty config, a
+    /// selection made with the pointer goes on the clipboard as it is made,
+    /// without a word in the strip.
+    fn copy_on_select(&mut self) {
+        if copy_on_select()
+            && let Some(text) = self.selected_text()
+            && let Some(clipboard) = &mut self.clipboard
+        {
+            let _ = clipboard.set_text(text);
+        }
+    }
+
     /// Paste the clipboard into the pane with the keys, as its program
     /// asks for pastes, and show the pane's latest output.
     fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
@@ -3688,7 +3707,9 @@ impl MuxApp {
             return;
         }
         match event.button {
-            gpui::MouseButton::Left if self.extend_selection(pane_id, rect, event) => {}
+            gpui::MouseButton::Left if self.extend_selection(pane_id, rect, event) => {
+                self.copy_on_select();
+            }
             gpui::MouseButton::Left => {
                 self.begin_cursor_click(pane_id, rect, event);
                 self.begin_selection(pane_id, rect, event);
@@ -3820,6 +3841,7 @@ impl MuxApp {
         {
             self.end_selection(capture, event);
             self.finish_cursor_click();
+            self.copy_on_select();
             return true;
         }
         false

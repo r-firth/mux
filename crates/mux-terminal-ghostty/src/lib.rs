@@ -260,6 +260,31 @@ fn parse_focus_follows_mouse(contents: &str, follows: &mut bool) {
     }
 }
 
+/// Whether a selection goes on the clipboard as it is made:
+/// `copy-on-select = clipboard` in the user's Ghostty config. Ghostty's
+/// default, `true`, copies to a selection clipboard a Mac does not have, so
+/// it leaves the clipboard alone, and so does Mux.
+#[must_use]
+pub fn user_copy_on_select() -> bool {
+    let mut copies = false;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_copy_on_select(&contents, &mut copies);
+            }
+        }
+    }
+    copies
+}
+
+fn parse_copy_on_select(contents: &str, copies: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "copy-on-select" {
+            *copies = value == "clipboard";
+        }
+    }
+}
+
 /// Whether a paste that would run commands is held for a second ⌘V:
 /// `clipboard-paste-protection` from the user's Ghostty config, on by
 /// default as in Ghostty.
@@ -2891,6 +2916,15 @@ mod theme_tests {
         assert!(follows);
         parse_focus_follows_mouse("focus-follows-mouse =\n", &mut follows);
         assert!(!follows);
+    }
+
+    #[test]
+    fn copy_on_select_only_for_the_clipboard() {
+        let mut copies = false;
+        parse_copy_on_select("copy-on-select = clipboard\n", &mut copies);
+        assert!(copies);
+        parse_copy_on_select("copy-on-select = true\n", &mut copies);
+        assert!(!copies);
     }
 
     #[test]
