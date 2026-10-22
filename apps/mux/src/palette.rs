@@ -1189,7 +1189,9 @@ fn match_row(row: &Row, terms: &[&str], number: Option<usize>) -> Option<(i32, V
     let mut score = 0;
     let mut matched = Vec::new();
     for term in terms {
-        if let Some((points, positions)) = fuzzy_match(term, &row.label) {
+        if let Some((points, positions)) = fuzzy_match(term, &row.label)
+            .filter(|(_, positions)| reads_as_typed(&row.label, positions))
+        {
             score += points;
             if is_a_word_of(term, &row.label) {
                 score += WHOLE_WORD;
@@ -1202,6 +1204,26 @@ fn match_row(row: &Row, terms: &[&str], number: Option<usize>) -> Option<(i32, V
     matched.sort_unstable();
     matched.dedup();
     Some((score, matched))
+}
+
+/// Whether matched letters read as something typed for this text: each run
+/// of them after the first starts a word, or goes on in the word the run
+/// before it ended in. `sr` reads as split right and `splt` as split, but
+/// `palet` is not "reopen the tab closed last", its letters strewn through
+/// the middles of four words.
+fn reads_as_typed(text: &str, positions: &[usize]) -> bool {
+    let chars = text.chars().collect::<Vec<_>>();
+    let word = |index: usize| {
+        chars[..=index]
+            .iter()
+            .enumerate()
+            .filter(|&(at, _)| word_start_bonus(&chars, at) > 0)
+            .count()
+    };
+    positions.windows(2).all(|pair| {
+        let (previous, at) = (pair[0], pair[1]);
+        at == previous + 1 || word_start_bonus(&chars, at) > 0 || word(at) == word(previous)
+    })
 }
 
 /// How well `query` matches `text`, the way fzf finds it: every character
@@ -1391,6 +1413,19 @@ mod tests {
         assert_eq!(positions("CW", "cargo watch"), Some(vec![0, 6]));
         assert_eq!(positions("ba", "abc"), None);
         assert_eq!(positions("", "anything"), Some(vec![]));
+    }
+
+    #[test]
+    fn strewn_letters_do_not_match() {
+        let reads = |query, text| {
+            let (_, positions) = fuzzy_match(query, text).unwrap();
+            reads_as_typed(text, &positions)
+        };
+        assert!(reads("sr", "split right"));
+        assert!(reads("splt", "split right"));
+        assert!(reads("oad", "reload config"));
+        assert!(reads("cw", "cargo watch"));
+        assert!(!reads("palet", "reopen the tab closed last"));
     }
 
     #[test]
