@@ -2,8 +2,11 @@
 //!
 //! What can be done to the pane, each beside the keys that do it, as a Mac
 //! app's context menu offers: copy and paste, splits, zoom, evening out,
-//! naming the pane or moving it to a tab of its own, clear, find and close, and on a link, opening or copying it. A program that takes the mouse, such as an editor, gets the click
-//! instead, unless Shift is held. Escape, a click elsewhere or a key that
+//! naming the pane or moving it to a tab of its own, clear, find and close;
+//! on a link, opening or copying it; and on a command or what it printed,
+//! when the shell marks its prompts, copying the command or its output. A
+//! program that takes the mouse, such as an editor, gets the click instead,
+//! unless Shift is held. Escape, a click elsewhere or a key that
 //! isn't the menu's puts it away.
 
 use super::*;
@@ -17,6 +20,8 @@ const RULE_GAP: f32 = 9.0;
 enum Item {
     OpenLink,
     CopyLink,
+    CopyCommand,
+    CopyOutput,
     Copy,
     Paste,
     SelectAll,
@@ -45,6 +50,8 @@ pub(super) struct PaneMenu {
     position: gpui::Point<gpui::Pixels>,
     /// The link that was right-clicked, if one was.
     link: Option<links::Link>,
+    /// The prompt of the command whose line or output was right-clicked.
+    command: Option<usize>,
     /// The item the keys or the pointer are on.
     chosen: Option<usize>,
 }
@@ -67,11 +74,13 @@ impl MuxApp {
         position: gpui::Point<gpui::Pixels>,
     ) {
         let link = self.link_under(pane_id, rect, position);
+        let command = self.prompt_under(pane_id, rect, position);
         self.pane_menu = Some(PaneMenu {
             pane_id,
             tab: None,
             position,
             link,
+            command,
             chosen: None,
         });
     }
@@ -96,6 +105,7 @@ impl MuxApp {
             // Under the strip, so the chip stays in sight.
             position: gpui::point(position.x, position.y.max(px(30.0))),
             link: None,
+            command: None,
             chosen: None,
         });
     }
@@ -184,6 +194,11 @@ impl MuxApp {
             lines.push(line(Item::OpenLink, open, "⌘click", true, false));
             lines.push(line(Item::CopyLink, copy, "", true, false));
         }
+        if menu.command.is_some() {
+            let rule = !lines.is_empty();
+            lines.push(line(Item::CopyCommand, "copy command", "", true, rule));
+            lines.push(line(Item::CopyOutput, "copy its output", "", true, false));
+        }
         let linked = !lines.is_empty();
         lines.extend([
             line(
@@ -216,7 +231,11 @@ impl MuxApp {
 
     fn run_pane_menu_item(&mut self, item: Item, window: &mut Window, cx: &mut Context<Self>) {
         let Some(PaneMenu {
-            pane_id, tab, link, ..
+            pane_id,
+            tab,
+            link,
+            command,
+            ..
         }) = self.pane_menu.take()
         else {
             return;
@@ -246,6 +265,16 @@ impl MuxApp {
                         "copied the link"
                     };
                     self.say_in_strip(what, false, cx);
+                }
+            }
+            Item::CopyCommand => {
+                if let (Some(pane_id), Some(prompt)) = (pane_id, command) {
+                    self.copy_command(pane_id, prompt, cx);
+                }
+            }
+            Item::CopyOutput => {
+                if let (Some(pane_id), Some(prompt)) = (pane_id, command) {
+                    self.copy_output(pane_id, prompt, cx);
                 }
             }
             Item::Copy => self.copy_selection(cx),

@@ -143,6 +143,28 @@ pub(super) struct CommandRan {
 /// How many of a pane's latest commands the palette offers.
 const COMMANDS_OFFERED: usize = 200;
 
+/// The prompt a history row's command was run from: the row's own, or the
+/// last above it.
+fn prompt_owning(prompts: &[usize], row: usize) -> Option<usize> {
+    prompts.iter().rev().find(|&&prompt| prompt <= row).copied()
+}
+
+/// The rows a command printed, between its prompt and the next (or the end
+/// of the history), its trailing blank lines left out. None when it printed
+/// nothing.
+fn output_rows(prompts: &[usize], prompt: usize, lines: &[&str]) -> Option<(usize, usize)> {
+    let next = prompts
+        .iter()
+        .find(|&&row| row > prompt)
+        .copied()
+        .unwrap_or(lines.len());
+    let first = prompt + 1;
+    let last = (first..next)
+        .rev()
+        .find(|&row| lines.get(row).is_some_and(|line| !line.trim().is_empty()))?;
+    Some((first, last))
+}
+
 /// Each pane's prompt rows, with the frame they were read for.
 pub(super) type PromptRows = std::cell::RefCell<HashMap<PaneId, (u64, Rc<Vec<usize>>)>>;
 
@@ -538,6 +560,73 @@ impl MuxApp {
         })
     }
 
+    /// The prompt of the command whose line or output is under the pointer.
+    pub(super) fn prompt_under(
+        &self,
+        pane_id: PaneId,
+        rect: layout::Rect,
+        position: gpui::Point<gpui::Pixels>,
+    ) -> Option<usize> {
+        let pane = self.panes.get(&pane_id)?;
+        let point = self.selection_pointer(rect, &pane.frame, position).point?;
+        let row = usize::try_from(pane.frame.scroll.offset).ok()? + usize::from(point.row);
+        prompt_owning(&self.cached_prompt_rows(pane_id)?, row)
+    }
+
+    /// Put on the clipboard the command run from a prompt, without the
+    /// prompt.
+    pub(super) fn copy_command(&mut self, pane_id: PaneId, prompt: usize, cx: &mut Context<Self>) {
+        let Some(line) = self
+            .panes
+            .get(&pane_id)
+            .and_then(|pane| pane.with_engine(|engine| engine.row_text(prompt)).ok())
+        else {
+            return;
+        };
+        let command = command_of(&line).to_owned();
+        if command.is_empty() {
+            self.say_in_strip("no command was run there", false, cx);
+        } else if let Some(clipboard) = &mut self.clipboard
+            && clipboard.set_text(command).is_ok()
+        {
+            self.say_in_strip("copied the command", false, cx);
+        }
+    }
+
+    /// Put on the clipboard what the command run from a prompt printed.
+    pub(super) fn copy_output(&mut self, pane_id: PaneId, prompt: usize, cx: &mut Context<Self>) {
+        let Some(pane) = self.panes.get(&pane_id) else {
+            return;
+        };
+        let prompts = pane
+            .with_engine(|engine| engine.prompt_rows())
+            .unwrap_or_default();
+        let text = pane
+            .with_engine(|engine| engine.screen_text())
+            .unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        let Some((first, last)) = output_rows(&prompts, prompt, &lines) else {
+            self.say_in_strip("that command printed nothing", false, cx);
+            return;
+        };
+        let output = lines[first..=last]
+            .iter()
+            .map(|line| line.trim_end())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let count = last - first + 1;
+        if let Some(clipboard) = &mut self.clipboard
+            && clipboard.set_text(output).is_ok()
+        {
+            let copied = if count == 1 {
+                "copied 1 line of output".to_owned()
+            } else {
+                format!("copied {count} lines of output")
+            };
+            self.say_in_strip(copied, false, cx);
+        }
+    }
+
     /// Bring a command's prompt to the top of its pane, and the keys there.
     pub(super) fn go_to_command(&mut self, pane_id: PaneId, row: usize) {
         let Some(offset) = self
@@ -826,6 +915,19 @@ mod tests {
         assert_eq!(command_of("❯ ls"), "ls");
         assert_eq!(command_of("ryan@mac src % "), "");
         assert_eq!(command_of("plain"), "plain");
+    }
+
+    #[test]
+    fn a_row_belongs_to_the_command_above_it() {
+        let prompts = [2, 6];
+        assert_eq!(prompt_owning(&prompts, 1), None);
+        assert_eq!(prompt_owning(&prompts, 2), Some(2));
+        assert_eq!(prompt_owning(&prompts, 5), Some(2));
+        assert_eq!(prompt_owning(&prompts, 9), Some(6));
+        let lines = ["", "", "$ ls", "a", "b", "", "$ true", "$ "];
+        assert_eq!(output_rows(&prompts, 2, &lines), Some((3, 4)));
+        assert_eq!(output_rows(&prompts, 6, &lines), Some((7, 7)));
+        assert_eq!(output_rows(&[2, 3], 2, &lines), None, "printed nothing");
     }
 
     #[test]
