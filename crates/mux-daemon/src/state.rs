@@ -609,6 +609,9 @@ impl SessionRuntime {
                     .title = title;
             }
             WorkspaceCommand::SelectTab(tab_id) => self.model.write().select_tab(tab_id)?,
+            WorkspaceCommand::RenamePane { pane, name } => {
+                self.model.write().rename_pane(pane, &name)?;
+            }
             WorkspaceCommand::NextTab => self.model.write().cycle_tab(1)?,
             WorkspaceCommand::PreviousTab => self.model.write().cycle_tab(-1)?,
             WorkspaceCommand::RenameSession(name) => {

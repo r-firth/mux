@@ -73,6 +73,7 @@ enum Command {
     CloseTab,
     BreakPane,
     SyncTab,
+    RenamePane,
     MoveTabLeft,
     MoveTabRight,
     Clear,
@@ -278,6 +279,7 @@ impl MuxApp {
             Command::CloseTab => Action::CloseTab,
             Command::BreakPane => Action::BreakPaneToTab,
             Command::SyncTab => Action::ToggleSyncTab,
+            Command::RenamePane => Action::RenamePane,
             Command::MoveTabLeft => Action::MoveTab(mux_workspace::Direction::Left),
             Command::MoveTabRight => Action::MoveTab(mux_workspace::Direction::Right),
             Command::TabInk => {
@@ -546,10 +548,12 @@ impl MuxApp {
                 .tab_agent(tab_id)
                 .map_or_else(|| "agent".to_owned(), agent_view::agent_title);
         }
-        self.panes
-            .get(&pane_id)
-            .and_then(PaneReplica::head_title)
-            .unwrap_or_else(|| format!("pane {number}"))
+        let shown = self.panes.get(&pane_id).and_then(PaneReplica::head_title);
+        match (self.pane_name(pane_id), shown) {
+            (Some(name), Some(shown)) => format!("{name} · {shown}"),
+            (Some(name), None) => name.to_owned(),
+            (None, shown) => shown.unwrap_or_else(|| format!("pane {number}")),
+        }
     }
 
     /// The agent a tab's agent pane shows, as `active_agent` finds it for
@@ -638,7 +642,7 @@ impl MuxApp {
     /// What mux can do, each with the keys that do it and other words it
     /// answers to. Some say what they will do to the pane or tab on screen.
     #[allow(clippy::too_many_lines)] // One entry per command.
-    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 24] {
+    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 25] {
         let zoomed = self
             .session
             .as_ref()
@@ -696,6 +700,12 @@ impl MuxApp {
                 "⌃t b",
                 "move this pane to a new tab",
                 "break out detach pop split own",
+            ),
+            (
+                Command::RenamePane,
+                "⌃p c",
+                "name this pane",
+                "rename title label pane",
             ),
             (
                 Command::SyncTab,

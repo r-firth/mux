@@ -3,7 +3,7 @@
 //! This crate intentionally knows nothing about PTYs, rendering, IPC, or
 //! platform keyboard events.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::str::FromStr;
 
@@ -469,6 +469,10 @@ pub struct Session {
     pub name: String,
     pub tabs: Vec<Tab>,
     pub active_tab: TabId,
+    /// Names given to panes, which their heads show over what their shells
+    /// say. A pane keeps its name when it moves to another tab.
+    #[serde(default)]
+    pub pane_names: BTreeMap<PaneId, String>,
 }
 
 impl Session {
@@ -484,7 +488,37 @@ impl Session {
             name: name.into(),
             tabs: vec![tab],
             active_tab,
+            pane_names: BTreeMap::new(),
         })
+    }
+
+    /// The name given to a pane, if it has one.
+    #[must_use]
+    pub fn pane_name(&self, pane_id: PaneId) -> Option<&str> {
+        self.pane_names.get(&pane_id).map(String::as_str)
+    }
+
+    /// Name a pane, or with an empty name hand it back to what its shell
+    /// says. Names of panes that have closed are let go at the same time.
+    pub fn rename_pane(&mut self, pane_id: PaneId, name: &str) -> Result<(), WorkspaceError> {
+        let held = |pane: PaneId| self.tabs.iter().any(|tab| tab.layout.contains(pane));
+        if !held(pane_id) {
+            return Err(WorkspaceError::UnknownPane(pane_id));
+        }
+        let live = self
+            .pane_names
+            .keys()
+            .copied()
+            .filter(|pane| held(*pane))
+            .collect::<Vec<_>>();
+        self.pane_names.retain(|pane, _| live.contains(pane));
+        let name = name.trim();
+        if name.is_empty() {
+            self.pane_names.remove(&pane_id);
+        } else {
+            self.pane_names.insert(pane_id, name.to_owned());
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -697,6 +731,8 @@ pub enum Action {
     BreakPaneToTab,
     /// Type into every pane of the tab on screen at once, or stop.
     ToggleSyncTab,
+    /// Name the focused pane in its head.
+    RenamePane,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -736,6 +772,11 @@ pub enum WorkspaceCommand {
     SetTabInk(u8),
     /// Close this tab, on screen or not. See [`Session::close_tab`].
     CloseTabWithId(TabId),
+    /// Name a pane, or clear its name. See [`Session::rename_pane`].
+    RenamePane {
+        pane: PaneId,
+        name: String,
+    },
 }
 
 /// How many tab inks there are to choose from.
@@ -902,6 +943,11 @@ impl Keymap {
     }
 
     fn bind_zellij_pane_mode(&mut self) {
+        self.bind(
+            InputMode::Pane,
+            KeyChord::plain(Key::Character('c')),
+            Action::RenamePane,
+        );
         // Keep Ctrl+n available to terminal applications in Normal mode, but
         // preserve the familiar Zellij resize prefix once the user has
         // explicitly entered Mux's Pane mode with Ctrl+p.
@@ -1192,6 +1238,10 @@ mod tests {
         assert_eq!(
             keymap.resolve(InputMode::Tab, KeyChord::plain(Key::Character('r'))),
             Some(&Action::RenameTab),
+        );
+        assert_eq!(
+            keymap.resolve(InputMode::Pane, KeyChord::plain(Key::Character('c'))),
+            Some(&Action::RenamePane),
         );
         assert_eq!(
             keymap.resolve(InputMode::Tab, KeyChord::plain(Key::Character('s'))),
@@ -1519,5 +1569,37 @@ mod tests {
         assert!(SplitRatio::new(500).is_ok());
         assert!(SplitRatio::new(0).is_err());
         assert!(SplitRatio::new(1_000).is_err());
+    }
+
+    #[test]
+    fn a_named_pane_keeps_its_name_until_cleared_or_closed() {
+        let [left, right, stranger] = [PaneId::new(), PaneId::new(), PaneId::new()];
+        let mut session = Session::with_panes("names", &[left, right]).expect("session");
+        session.rename_pane(left, "  server ").expect("name left");
+        session.rename_pane(right, "logs").expect("name right");
+        assert_eq!(session.pane_name(left), Some("server"));
+        assert!(matches!(
+            session.rename_pane(stranger, "x"),
+            Err(WorkspaceError::UnknownPane(_))
+        ));
+
+        // Moved to a tab of its own, a pane is still called what it was.
+        session
+            .active_tab_mut()
+            .expect("tab")
+            .focus(right)
+            .expect("focus");
+        session.break_focused_pane().expect("break out");
+        assert_eq!(session.pane_name(right), Some("logs"));
+
+        session.rename_pane(right, "").expect("clear");
+        assert_eq!(session.pane_name(right), None);
+
+        // A closed pane's name is let go with the next rename.
+        session.rename_pane(right, "tail").expect("name again");
+        let tab = session.active_tab;
+        session.close_tab(tab).expect("close");
+        session.rename_pane(left, "api").expect("rename");
+        assert_eq!(session.pane_names.len(), 1);
     }
 }

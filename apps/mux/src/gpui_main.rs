@@ -20,6 +20,7 @@ mod palette;
 mod pane_calls;
 mod pane_exit;
 mod pane_menu;
+mod pane_names;
 mod pane_parser;
 mod quick_select;
 mod scrollback;
@@ -647,6 +648,7 @@ struct MuxApp {
     /// GUI-local tab colours. New tabs take the next ink by position and keep
     /// it, so closing a tab never repaints its neighbours.
     tab_rename: Option<TabRename>,
+    pane_rename: Option<pane_names::PaneRename>,
     /// The chips scroll sideways when there are more than fit. They keep the
     /// active tab in view until scrolled by hand, and take it up again when
     /// the tab, or the mode (which widens chips with jump numbers), changes.
@@ -842,6 +844,7 @@ impl MuxApp {
             agent_placeholder: String::new(),
             agent_unseen: HashSet::new(),
             tab_rename: None,
+            pane_rename: None,
             tab_strip_scroll: ScrollHandle::new(),
             tab_strip_active: Cell::new(None),
             tab_strip_follow: Cell::new(true),
@@ -1652,6 +1655,7 @@ impl MuxApp {
     /// keyboard until it closes, whatever the workspace does meanwhile.
     fn field_has_keyboard(&self) -> bool {
         self.tab_rename.is_some()
+            || self.pane_rename.is_some()
             || self.session_sheet.is_some()
             || self.settings_sheet.is_some()
             || self.palette.is_some()
@@ -2228,6 +2232,7 @@ impl MuxApp {
             Action::OpenCommandPalette => self.toggle_palette(window, cx),
             Action::MoveTab(direction) => self.move_active_tab(direction),
             Action::BreakPaneToTab => self.break_pane_to_tab(cx),
+            Action::RenamePane => self.open_rename_pane(window, cx),
             Action::ToggleSyncTab => {
                 self.toggle_sync_tab();
                 let said = if self.active_tab_synced() {
@@ -3837,6 +3842,9 @@ impl MuxApp {
         if !title.is_empty() && title.parse::<u64>().is_err() {
             return chrome::truncate_chars(title, 24);
         }
+        if let Some(name) = self.pane_name(tab.focused_pane) {
+            return chrome::truncate_chars(name, 24);
+        }
         let pane = self.panes.get(&tab.focused_pane);
         if let Some(program) = pane.and_then(PaneReplica::untitled_program) {
             return chrome::truncate_chars(program, 24);
@@ -4246,6 +4254,7 @@ impl MuxApp {
                     ("d", "down"),
                     ("x", "close"),
                     ("f", "zoom"),
+                    ("c", "name"),
                     ("⌃n", "resize"),
                 ],
                 InputMode::Tab => &[
@@ -4612,7 +4621,12 @@ impl MuxApp {
     /// The slab behind a pane: a rounded card with a slim head. The focused
     /// slab takes the tab's ink as its border, ring and glow.
     #[allow(clippy::too_many_lines)]
-    fn render_pane_slab(&self, pane: motion::DrawnPane, zoomed: bool) -> gpui::AnyElement {
+    fn render_pane_slab(
+        &self,
+        pane: motion::DrawnPane,
+        zoomed: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let motion::DrawnPane {
             index,
             geometry,
@@ -4642,10 +4656,17 @@ impl MuxApp {
                 || "agent".into(),
                 |agent| agent_view::agent_title(agent).into(),
             )
+        } else if let Some(name) = self.pane_name(geometry.pane_id) {
+            name.to_owned().into()
         } else {
             pane.and_then(PaneReplica::head_title)
                 .map_or_else(|| format!("pane {number}").into(), Into::into)
         };
+        // A named pane still says what its shell does, beside the name.
+        let beside = self
+            .pane_name(geometry.pane_id)
+            .and(pane)
+            .and_then(PaneReplica::head_title);
         let call = self
             .pane_call(geometry.pane_id)
             .filter(|_| !focused && !agent_pane);
@@ -4698,13 +4719,30 @@ impl MuxApp {
                     }),
             )
             .child(
-                div()
-                    .min_w(px(0.0))
-                    .truncate()
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(color(if focused { TEXT } else { MUTED_TEXT }))
-                    .child(title),
+                self.render_pane_rename_field(
+                    geometry.pane_id,
+                    if legend { 10.5 } else { 12.0 },
+                    cx,
+                )
+                .unwrap_or_else(|| {
+                    div()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(color(if focused { TEXT } else { MUTED_TEXT }))
+                        .child(title)
+                        .into_any_element()
+                }),
             )
+            .when_some(beside, |head, beside| {
+                head.child(
+                    div()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .text_color(color(FAINT_TEXT))
+                        .child(beside),
+                )
+            })
             .when_some(agent, |head, agent| {
                 head.child(
                     div()
@@ -5023,7 +5061,7 @@ impl Render for MuxApp {
         for pane in drawn.panes {
             let (geometry, opacity) = (pane.geometry, pane.opacity);
             let pane_id = geometry.pane_id;
-            root = root.child(self.render_pane_slab(pane, zoomed));
+            root = root.child(self.render_pane_slab(pane, zoomed, cx));
             if self.active_agent_pane() == Some(pane_id) {
                 let (frame, focused) = (geometry.frame, geometry.focused);
                 root = root.child(self.render_agent_pane(pane_id, frame, focused, window, cx));

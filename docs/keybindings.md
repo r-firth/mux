@@ -64,6 +64,12 @@ from an agent pane too. They are in the menu bar's Shell and Window menus.
 | `f` | Toggle focused-pane zoom and return to Normal |
 | `x` | Close the focused pane and return to Normal |
 | `a` | Open the agent pane and return to Normal |
+| `c` | Name the focused pane in its head; Return keeps it, Escape puts it back |
+
+A named pane's head shows its name, `server` or `logs`, with what its shell
+says beside it, and a tab without a name of its own goes by its focused
+pane's name. The name stays with the pane when it moves to another tab and
+after a restart. Clearing it hands the head back to the shell.
 
 ## Resize mode
 
