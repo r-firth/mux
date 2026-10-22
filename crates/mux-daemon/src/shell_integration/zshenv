@@ -1,0 +1,30 @@
+# Mux's shell integration for zsh. Mux points ZDOTDIR here so that this file
+# runs first. It puts your ZDOTDIR back and loads your own .zshenv, so the
+# rest of your startup files load as they always do, then marks where each
+# prompt and command begins (OSC 133) so Mux can step between prompts.
+if [[ -n "${MUX_USER_ZDOTDIR+set}" ]]; then
+  ZDOTDIR="$MUX_USER_ZDOTDIR"
+  unset MUX_USER_ZDOTDIR
+else
+  unset ZDOTDIR
+fi
+[[ -r "${ZDOTDIR:-$HOME}/.zshenv" ]] && builtin source "${ZDOTDIR:-$HOME}/.zshenv"
+
+if [[ -o interactive ]]; then
+  autoload -Uz add-zsh-hook
+  typeset -g _mux_command_running=
+  _mux_precmd() {
+    local exit_status=$?
+    if [[ -n "$_mux_command_running" ]]; then
+      builtin print -n "\e]133;D;${exit_status}\a"
+    fi
+    _mux_command_running=
+    builtin print -n "\e]133;A\a"
+  }
+  _mux_preexec() {
+    _mux_command_running=1
+    builtin print -n "\e]133;C\a"
+  }
+  add-zsh-hook precmd _mux_precmd
+  add-zsh-hook preexec _mux_preexec
+fi

@@ -179,6 +179,11 @@ is what a pane starts with when Mux opens or moves to another session.
 | `Cmd+Home` / `Cmd+End` | Go to the top or bottom of the history |
 | `Cmd+PageUp` / `Cmd+PageDown` | Move a page through the history |
 | `Shift+PageUp` / `Shift+PageDown` | The same, unless the program has no history (a full-screen program keeps them) |
+| `Cmd+Up` / `Cmd+Down` | The prompt before, or after, the top of the view (`Cmd+Shift` as well, as in iTerm) |
+
+The shell marks where each prompt begins for `Cmd+Up` and `Cmd+Down`. Mux
+starts zsh and bash so they do; fish marks its own. In a shell that marks
+none, the keys go to the program.
 
 ## Find
 

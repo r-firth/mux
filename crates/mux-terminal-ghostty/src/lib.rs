@@ -917,6 +917,11 @@ mod linked {
             out_len: *mut usize,
         ) -> i32;
         fn mux_ghostty_buffer_free(bytes: *mut u8);
+        fn mux_ghostty_terminal_prompt_rows(
+            terminal: *mut c_void,
+            out_rows: *mut *mut u32,
+            out_len: *mut usize,
+        ) -> i32;
         fn mux_ghostty_terminal_scroll_viewport(terminal: *mut c_void, tag: u8, value: i64);
         fn mux_ghostty_key_encoder_new(out_encoder: *mut *mut c_void) -> i32;
         fn mux_ghostty_key_encoder_free(encoder: *mut c_void);
@@ -1312,6 +1317,37 @@ mod linked {
             // freeing null for an empty screen is supported.
             unsafe { mux_ghostty_buffer_free(bytes) };
             Ok(text)
+        }
+
+        /// The rows where the shell's prompts begin, as it marked them with
+        /// OSC 133, counted from the top of the history as `screen_text`'s
+        /// lines are. Empty when the shell marks none.
+        pub fn prompt_rows(&self) -> Result<Vec<usize>, GhosttyError> {
+            let mut rows = ptr::null_mut();
+            let mut length = 0_usize;
+            // SAFETY: output pointers are valid; the returned allocation is
+            // copied before it is released with the matching shim function.
+            let result = unsafe {
+                mux_ghostty_terminal_prompt_rows(
+                    self.terminal.as_ptr(),
+                    &raw mut rows,
+                    &raw mut length,
+                )
+            };
+            check(result)?;
+            let found = if rows.is_null() || length == 0 {
+                Vec::new()
+            } else {
+                // SAFETY: the shim returned `length` initialised rows.
+                unsafe { std::slice::from_raw_parts(rows, length) }
+                    .iter()
+                    .map(|&row| row as usize)
+                    .collect()
+            };
+            // SAFETY: the pointer is the allocation returned by the shim, and
+            // freeing null is supported.
+            unsafe { mux_ghostty_buffer_free(rows.cast()) };
+            Ok(found)
         }
 
         fn checkpoint(&self) -> Result<TerminalCheckpoint, GhosttyError> {
@@ -2507,6 +2543,25 @@ mod linked {
                     .any(|window| window == env!("CARGO_PKG_VERSION").as_bytes())
             );
             assert!(engine.take_pty_responses().expect("drained").is_empty());
+        }
+
+        #[test]
+        fn prompts_the_shell_marks_are_found_by_row_history_included() {
+            let mut engine = GhosttyEngine::new(TerminalSize {
+                cols: 20,
+                rows: 4,
+                ..TerminalSize::default()
+            })
+            .expect("new terminal");
+            engine
+                .apply_output(
+                    1,
+                    b"\x1b]133;A\x07$ ls\r\n\x1b]133;C\x07a\r\nb\r\nc\r\n\
+                      \x1b]133;D;0\x07\x1b]133;A\x07$ pwd\r\n/\r\n\
+                      \x1b]133;A\x07$ ",
+                )
+                .expect("terminal output");
+            assert_eq!(engine.prompt_rows().expect("prompt rows"), vec![0, 4, 6]);
         }
 
         #[test]

@@ -63,6 +63,7 @@ impl DaemonServer {
         reject_live_or_remove_stale_socket(&self.config.socket_path).await?;
         let listener = UnixListener::bind(&self.config.socket_path)?;
         set_private_socket_permissions(&self.config.socket_path)?;
+        crate::shell_integration::install(&self.config.state_dir);
         self.state.restore_workspace();
         info!(socket = %self.config.socket_path.display(), "workspace daemon listening");
 

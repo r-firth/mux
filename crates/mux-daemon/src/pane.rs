@@ -330,6 +330,9 @@ impl PaneRuntime {
                 builder.env_remove(key);
             }
         }
+        for (key, value) in crate::shell_integration::environment(&command.program) {
+            builder.env(key, value);
+        }
         for (key, value) in &command.environment {
             builder.env(key, value);
         }

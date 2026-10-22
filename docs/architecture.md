@@ -120,6 +120,14 @@ publishes the reset in the same ordered output stream consumed by GUI replicas.
 This keeps durable checkpoints and every attached client in agreement while
 preserving enhanced keyboard input for live TUIs.
 
+Panes find the shell's prompts by the OSC 133 marks it prints. The daemon
+writes a `.zshenv` to `shell-integration/zsh` in the state directory and
+starts zsh with `ZDOTDIR` there; it restores the user's `ZDOTDIR` (passed in
+`MUX_USER_ZDOTDIR`), sources their own `.zshenv`, and adds precmd and preexec
+hooks that print the marks, so the rest of their startup files load as
+usual. bash is given a `PROMPT_COMMAND` that prints the prompt mark ahead of
+any the user exported.
+
 The daemon also owns ACP processes. Closing the native agent surface only
 detaches that view; explicit `/end` closes the selected process and the GUI
 hides its closed snapshot from the session picker. A new agent is started for a

@@ -37,6 +37,45 @@ fn scrollback_key(
     }
 }
 
+/// ⌘↑ and ⌘↓ (with ⇧ too, as iTerm has them) step through the shell's
+/// prompts: whether the key goes to an older one.
+fn prompt_key(keystroke: &gpui::Keystroke) -> Option<bool> {
+    let modifiers = keystroke.modifiers;
+    if !modifiers.platform || modifiers.control || modifiers.alt {
+        return None;
+    }
+    match keystroke.key.as_str() {
+        "up" => Some(true),
+        "down" => Some(false),
+        _ => None,
+    }
+}
+
+/// The scroll that brings the next prompt above the view's top, or below
+/// it, to the top. Past the newest prompt is the latest output.
+fn prompt_jump(
+    prompts: &[usize],
+    scroll: TerminalScrollState,
+    older: bool,
+) -> Option<TerminalViewportScroll> {
+    let top = usize::try_from(scroll.offset).unwrap_or(usize::MAX);
+    let target = if older {
+        prompts.iter().rev().find(|&&row| row < top)
+    } else {
+        prompts.iter().find(|&&row| row > top)
+    };
+    let bottom = scroll.offset.saturating_add(scroll.len) >= scroll.total;
+    match target {
+        Some(&row) => {
+            let delta =
+                i64::try_from(row).unwrap_or(i64::MAX) - i64::try_from(top).unwrap_or(i64::MAX);
+            Some(TerminalViewportScroll::Delta(delta))
+        }
+        None if !older && !bottom => Some(TerminalViewportScroll::Bottom),
+        None => None,
+    }
+}
+
 /// How far in from the pane's right edge the thumb can be grabbed: wider
 /// than the thumb, which is slim to stay out of the way.
 const THUMB_GRIP: f32 = 14.0;
@@ -196,8 +235,19 @@ impl MuxApp {
             return false;
         };
         let scroll = pane.frame.scroll;
-        let Some(movement) = scrollback_key(keystroke, pane.frame.rows, scroll.total > scroll.len)
-        else {
+        let movement = match prompt_key(keystroke) {
+            Some(older) => {
+                let prompts = pane
+                    .with_engine(|engine| engine.prompt_rows())
+                    .unwrap_or_default();
+                if prompts.is_empty() {
+                    return false;
+                }
+                prompt_jump(&prompts, scroll, older)
+            }
+            None => scrollback_key(keystroke, pane.frame.rows, scroll.total > scroll.len),
+        };
+        let Some(movement) = movement else {
             return false;
         };
         if self.scroll_viewport(pane_id, movement) {
@@ -370,6 +420,30 @@ mod tests {
             scrollback_key(&keystroke("pagedown", false, false), 40, true),
             None
         );
+    }
+
+    #[test]
+    fn command_arrows_step_through_the_prompts() {
+        let prompts = [10, 120, 300, 470];
+        let scroll = |offset| TerminalScrollState {
+            total: 500,
+            offset,
+            len: 40,
+        };
+        let delta = TerminalViewportScroll::Delta;
+        assert_eq!(prompt_jump(&prompts, scroll(460), true), Some(delta(-160)));
+        assert_eq!(prompt_jump(&prompts, scroll(300), true), Some(delta(-180)));
+        assert_eq!(prompt_jump(&prompts, scroll(10), true), None);
+        assert_eq!(prompt_jump(&prompts, scroll(120), false), Some(delta(180)));
+        assert_eq!(
+            prompt_jump(&[10, 120], scroll(120), false),
+            Some(TerminalViewportScroll::Bottom),
+            "past the newest prompt is the latest output"
+        );
+        assert_eq!(prompt_jump(&[10, 120], scroll(460), false), None);
+        assert_eq!(prompt_key(&keystroke("up", true, false)), Some(true));
+        assert_eq!(prompt_key(&keystroke("down", true, true)), Some(false));
+        assert_eq!(prompt_key(&keystroke("up", false, false)), None);
     }
 
     #[test]

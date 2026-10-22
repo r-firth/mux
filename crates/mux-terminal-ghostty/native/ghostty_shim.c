@@ -1102,6 +1102,63 @@ int32_t mux_ghostty_terminal_encode_paste(
   return (int32_t)GHOSTTY_SUCCESS;
 }
 
+/* The rows that begin a shell prompt, counted from the top of the history,
+ * as the shell marked them with OSC 133. The caller frees *out_rows with
+ * mux_ghostty_buffer_free. */
+int32_t mux_ghostty_terminal_prompt_rows(
+    mux_ghostty_terminal_t raw_terminal,
+    uint32_t **out_rows,
+    size_t *out_len) {
+  if (out_rows == NULL || out_len == NULL) {
+    return (int32_t)GHOSTTY_INVALID_VALUE;
+  }
+  *out_rows = NULL;
+  *out_len = 0;
+  GhosttyTerminal terminal = (GhosttyTerminal)raw_terminal;
+  GhosttyTerminalScrollbar scrollbar = {0};
+  GhosttyResult result = ghostty_terminal_get(
+      terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &scrollbar);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+  if (scrollbar.total == 0 || scrollbar.total > UINT32_MAX) {
+    return (int32_t)GHOSTTY_SUCCESS;
+  }
+  uint32_t *rows = NULL;
+  size_t len = 0;
+  size_t capacity = 0;
+  for (uint32_t y = 0; y < (uint32_t)scrollbar.total; y++) {
+    GhosttyPoint point = {
+        .tag = GHOSTTY_POINT_TAG_SCREEN,
+        .value = {.coordinate = {.x = 0, .y = y}},
+    };
+    GhosttyGridRef ref = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+    if (ghostty_terminal_grid_ref(terminal, point, &ref) != GHOSTTY_SUCCESS) {
+      continue;
+    }
+    GhosttyRow row = 0;
+    if (ghostty_grid_ref_row(&ref, &row) != GHOSTTY_SUCCESS) continue;
+    GhosttyRowSemanticPrompt prompt = GHOSTTY_ROW_SEMANTIC_NONE;
+    if (ghostty_row_get(row, GHOSTTY_ROW_DATA_SEMANTIC_PROMPT, &prompt) !=
+            GHOSTTY_SUCCESS ||
+        prompt != GHOSTTY_ROW_SEMANTIC_PROMPT) {
+      continue;
+    }
+    if (len == capacity) {
+      size_t grown = capacity == 0 ? 64 : capacity * 2;
+      uint32_t *bigger = realloc(rows, grown * sizeof(uint32_t));
+      if (bigger == NULL) {
+        free(rows);
+        return (int32_t)GHOSTTY_OUT_OF_MEMORY;
+      }
+      rows = bigger;
+      capacity = grown;
+    }
+    rows[len++] = y;
+  }
+  *out_rows = rows;
+  *out_len = len;
+  return (int32_t)GHOSTTY_SUCCESS;
+}
+
 void mux_ghostty_buffer_free(uint8_t *bytes) {
   free(bytes);
 }
