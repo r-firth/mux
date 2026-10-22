@@ -466,6 +466,12 @@ fn scroll_multiplier() -> mux_terminal_ghostty::ScrollMultiplier {
     *MULTIPLIER.get_or_init(mux_terminal_ghostty::user_scroll_multiplier)
 }
 
+/// When closing asks first, as in the user's Ghostty.
+fn close_confirm() -> mux_terminal_ghostty::CloseConfirm {
+    static CONFIRM: OnceLock<mux_terminal_ghostty::CloseConfirm> = OnceLock::new();
+    *CONFIRM.get_or_init(mux_terminal_ghostty::user_close_confirm)
+}
+
 fn restore_pane_replica(
     pane: &PaneAttachment,
     ghostty_theme: &GhosttyTheme,
@@ -2446,6 +2452,10 @@ impl MuxApp {
             self.close_now(target);
             return;
         }
+        if close_confirm() == mux_terminal_ghostty::CloseConfirm::Never {
+            self.close_now(target);
+            return;
+        }
         let pane_ids = match target {
             CloseTarget::Pane(pane_id) => vec![pane_id],
             CloseTarget::Tab(tab_id) => self
@@ -2485,11 +2495,23 @@ impl MuxApp {
     /// goes ahead. Otherwise the strip names what would end, and the next
     /// close of the same thing goes ahead.
     fn finish_close(&mut self, target: CloseTarget, running: &[String], cx: &mut Context<Self>) {
-        if running.is_empty() {
+        let always = close_confirm() == mux_terminal_ghostty::CloseConfirm::Always;
+        if running.is_empty() && !always {
             self.close_now(target);
             return;
         }
         self.close_armed = Some((target, Instant::now()));
+        if running.is_empty() {
+            // `confirm-close-surface = always` asks even with only shells.
+            let what = match target {
+                CloseTarget::Pane(_) => "this pane",
+                CloseTarget::Tab(tab_id) if self.active_tab_id() == Some(tab_id) => "this tab",
+                CloseTarget::Tab(_) => "that tab",
+                CloseTarget::OtherTabs(_) => "the other tabs",
+            };
+            self.say_in_strip(format!("close again to close {what}"), true, cx);
+            return;
+        }
         let what = match target {
             CloseTarget::Pane(_) => "here",
             CloseTarget::Tab(tab_id) if self.active_tab_id() == Some(tab_id) => "in this tab",

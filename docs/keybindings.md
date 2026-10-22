@@ -305,6 +305,9 @@ such as a build or an editor, doesn't end it straight away: the strip names
 what would end, and closing it again within a few seconds goes ahead. A pane
 at its prompt closes at once.
 
+`confirm-close-surface` in your Ghostty config changes this as in Ghostty:
+`false` closes at once whatever is running, and `always` asks every time.
+
 ## Exited panes
 
 A shell that exits cleanly in the pane being typed in closes that pane, or its

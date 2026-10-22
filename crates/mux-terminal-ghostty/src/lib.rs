@@ -418,6 +418,47 @@ fn parse_scroll_multiplier(contents: &str, multiplier: &mut ScrollMultiplier) {
     }
 }
 
+/// When closing a pane or tab asks first: `confirm-close-surface` from the
+/// user's Ghostty config.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CloseConfirm {
+    /// Only when a program besides the shell is running, as in Ghostty by
+    /// default.
+    #[default]
+    Running,
+    /// Never.
+    Never,
+    /// Every time.
+    Always,
+}
+
+/// The user's `confirm-close-surface`.
+#[must_use]
+pub fn user_close_confirm() -> CloseConfirm {
+    let mut confirm = CloseConfirm::Running;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_close_confirm(&contents, &mut confirm);
+            }
+        }
+    }
+    confirm
+}
+
+fn parse_close_confirm(contents: &str, confirm: &mut CloseConfirm) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "confirm-close-surface" {
+            match value.as_str() {
+                "" | "true" => *confirm = CloseConfirm::Running,
+                "false" => *confirm = CloseConfirm::Never,
+                "always" => *confirm = CloseConfirm::Always,
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Whether a paste that would run commands is held for a second ⌘V:
 /// `clipboard-paste-protection` from the user's Ghostty config, on by
 /// default as in Ghostty.
@@ -3104,6 +3145,17 @@ mod theme_tests {
         );
         parse_scroll_multiplier("mouse-scroll-multiplier =\n", &mut multiplier);
         assert_eq!(multiplier, ScrollMultiplier::default());
+    }
+
+    #[test]
+    fn close_confirm_follows_the_last_setting() {
+        let mut confirm = CloseConfirm::Running;
+        parse_close_confirm("confirm-close-surface = false\n", &mut confirm);
+        assert_eq!(confirm, CloseConfirm::Never);
+        parse_close_confirm("confirm-close-surface = always\n", &mut confirm);
+        assert_eq!(confirm, CloseConfirm::Always);
+        parse_close_confirm("confirm-close-surface =\n", &mut confirm);
+        assert_eq!(confirm, CloseConfirm::Running);
     }
 
     #[test]
