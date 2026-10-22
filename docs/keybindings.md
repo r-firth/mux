@@ -162,6 +162,12 @@ focused pane, `htop` or `npm`, while one runs, even under a shell that
 leaves the title alone, and the pane's head says it beside the directory.
 Once it has run ten seconds the head also says for how long (`cargo · ~/src
 · 42s`), by the second for its first minute and by the minute after.
+Mux starts zsh and bash titling their pane with the directory they are in
+(`~/src/mux`, the tab saying `mux`), and zsh with the command while it runs,
+as Ghostty's shell integration does, since neither titles a pane on a Mac by
+itself. A title set by your own prompt or plugins wins, and
+`shell-integration-features = no-title` in your Ghostty config leaves the
+title to them.
 With the mouse, drag a tab's chip along the strip to move it, and
 double-click the chip of the tab on screen to rename it. A chip's dot turns
 into a close mark under the pointer; click it, or middle-click the chip, to

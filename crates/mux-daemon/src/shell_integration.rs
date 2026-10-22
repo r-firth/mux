@@ -42,6 +42,23 @@ fn prompt_cursor() -> bool {
     }
 }
 
+/// Whether the shell titles its pane with where it is and what it runs:
+/// Ghostty's `title` shell integration feature, on unless turned off.
+fn shell_title() -> bool {
+    #[cfg(feature = "ghostty")]
+    {
+        mux_terminal_ghostty::user_shell_title()
+    }
+    #[cfg(not(feature = "ghostty"))]
+    {
+        true
+    }
+}
+
+/// The pane's title as bash's prompt comes back: where the shell is, as
+/// Ghostty's shell integration sets it.
+const BASH_TITLE: &str = r#"builtin printf '\033]2;%s\007' "${PWD/#$HOME/\~}"; "#;
+
 static ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 /// Where the integration lives, under the daemon's state directory. Panes
@@ -89,19 +106,23 @@ pub fn environment(program: &Path) -> Vec<(OsString, OsString)> {
             if prompt_cursor() {
                 environment.push((OsString::from("MUX_PROMPT_CURSOR"), OsString::from("1")));
             }
+            if shell_title() {
+                environment.push((OsString::from("MUX_SHELL_TITLE"), OsString::from("1")));
+            }
             environment
         }
         Some("bash") => {
             let cursor = prompt_cursor();
-            let ours = if cursor {
-                BASH_PROMPT_COMMAND.replacen(
-                    "__mux_status=$?; ",
-                    &format!("__mux_status=$?; {BASH_PROMPT_CURSOR}"),
-                    1,
-                )
-            } else {
-                BASH_PROMPT_COMMAND.to_owned()
-            };
+            let extras = format!(
+                "{}{}",
+                if cursor { BASH_PROMPT_CURSOR } else { "" },
+                if shell_title() { BASH_TITLE } else { "" }
+            );
+            let ours = BASH_PROMPT_COMMAND.replacen(
+                "__mux_status=$?; ",
+                &format!("__mux_status=$?; {extras}"),
+                1,
+            );
             let command = match std::env::var("PROMPT_COMMAND") {
                 Ok(own) if !own.trim().is_empty() => format!("{ours}; {own}"),
                 _ => ours,

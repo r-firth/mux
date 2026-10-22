@@ -220,8 +220,9 @@ pub fn terminal_place(title: &str) -> &str {
 #[must_use]
 pub fn tab_label(title: &str) -> String {
     let place = terminal_place(title);
-    let path_like =
-        (place.starts_with('~') || place.starts_with('/')) && !place.contains(char::is_whitespace);
+    // A shell titling a deep directory as Ghostty's does starts it `…/`.
+    let path_like = (place.starts_with('~') || place.starts_with('/') || place.starts_with("…/"))
+        && !place.contains(char::is_whitespace);
     let label = if path_like {
         place
             .trim_end_matches('/')

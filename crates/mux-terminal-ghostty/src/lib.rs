@@ -430,27 +430,42 @@ fn parse_focus_follows_mouse(contents: &str, follows: &mut bool) {
 /// `no-cursor` (or `shell-integration = none` turns it all off).
 #[must_use]
 pub fn user_prompt_cursor() -> bool {
-    let mut bar = true;
+    user_shell_feature("cursor")
+}
+
+/// Whether the shell titles its pane with where it is and what it runs, as
+/// Ghostty's shell integration does unless `shell-integration-features`
+/// says `no-title`.
+#[must_use]
+pub fn user_shell_title() -> bool {
+    user_shell_feature("title")
+}
+
+fn user_shell_feature(feature: &str) -> bool {
+    let mut on = true;
     if let Some((_, configs)) = user_config_paths() {
         for config in configs {
             if let Ok(contents) = read_config(&config) {
-                parse_prompt_cursor(&contents, &mut bar);
+                parse_shell_feature(&contents, feature, &mut on);
             }
         }
     }
-    bar
+    on
 }
 
-fn parse_prompt_cursor(contents: &str, bar: &mut bool) {
+/// One of Ghostty's shell integration features, on by default: `feature`
+/// or `no-feature` in `shell-integration-features`, `true` or `false` for
+/// them all, and `shell-integration = none` for none.
+fn parse_shell_feature(contents: &str, feature: &str, on: &mut bool) {
     for (key, value) in contents.lines().filter_map(parse_config_entry) {
         match key.as_str() {
-            "shell-integration" if value == "none" => *bar = false,
+            "shell-integration" if value == "none" => *on = false,
             "shell-integration-features" => {
-                for feature in value.split(',').map(str::trim) {
-                    match feature {
-                        "cursor" => *bar = true,
-                        "no-cursor" => *bar = false,
-                        _ => {}
+                for named in value.split(',').map(str::trim) {
+                    if named == feature || named == "true" {
+                        *on = true;
+                    } else if named.strip_prefix("no-") == Some(feature) || named == "false" {
+                        *on = false;
                     }
                 }
             }
@@ -3761,13 +3776,19 @@ mod theme_tests {
     }
 
     #[test]
-    fn the_prompt_cursor_unless_turned_off() {
+    fn shell_features_unless_turned_off() {
         let mut bar = true;
-        parse_prompt_cursor("shell-integration-features = sudo,no-cursor\n", &mut bar);
+        let features = "shell-integration-features = sudo,no-cursor\n";
+        parse_shell_feature(features, "cursor", &mut bar);
         assert!(!bar);
-        parse_prompt_cursor("shell-integration-features = cursor\n", &mut bar);
+        let mut title = true;
+        parse_shell_feature(features, "title", &mut title);
+        assert!(title, "only the features named change");
+        parse_shell_feature("shell-integration-features = cursor\n", "cursor", &mut bar);
         assert!(bar);
-        parse_prompt_cursor("shell-integration = none\n", &mut bar);
+        parse_shell_feature("shell-integration-features = false\n", "title", &mut title);
+        assert!(!title);
+        parse_shell_feature("shell-integration = none\n", "cursor", &mut bar);
         assert!(!bar);
     }
 
