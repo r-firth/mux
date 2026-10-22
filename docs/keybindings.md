@@ -547,7 +547,8 @@ drop the sessions sheet from it.
 
 `Cmd+,` opens settings: the agents `Ctrl+a` offers, each on or off. Below
 them it says which Ghostty config the terminal's look and feel come from,
-and the font and theme Mux took from it.
+and the font and theme Mux took from it. Files the config includes with
+`config-file` are read after it, as Ghostty reads them.
 
 | Keys | Action |
 | --- | --- |

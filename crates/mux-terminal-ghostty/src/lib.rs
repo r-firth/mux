@@ -1210,16 +1210,64 @@ fn user_config_paths() -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
     let roots = vec![macos_root.clone(), xdg_root.clone()];
     // Ghostty loads XDG first and macOS-specific files afterwards. Support
     // both the current and pre-1.2.3 filenames.
-    let configs = [
+    let mut configs = Vec::new();
+    let mut visited = HashSet::new();
+    for path in [
         xdg_root.join("config.ghostty"),
         xdg_root.join("config"),
         macos_root.join("config.ghostty"),
         macos_root.join("config"),
-    ]
-    .into_iter()
-    .filter(|path| path.is_file())
-    .collect();
+    ] {
+        if path.is_file() {
+            with_included(path, home, &mut visited, &mut configs);
+        }
+    }
     Some((roots, configs))
+}
+
+/// A config file and, after it, those its `config-file` lines include, as
+/// Ghostty loads them: relative to the including file, `~/` from home, a
+/// leading `?` for one that may be missing, each file once.
+fn with_included(
+    path: PathBuf,
+    home: &Path,
+    visited: &mut HashSet<PathBuf>,
+    configs: &mut Vec<PathBuf>,
+) {
+    let identity = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+    if !visited.insert(identity) {
+        return;
+    }
+    let included = fs::read_to_string(&path)
+        .map(|contents| included_files(&contents))
+        .unwrap_or_default();
+    let directory = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    configs.push(path);
+    for include in included {
+        let include = match include.strip_prefix("~/") {
+            Some(rest) => home.join(rest),
+            None => directory.join(include),
+        };
+        if include.is_file() {
+            with_included(include, home, visited, configs);
+        }
+    }
+}
+
+/// The files a config's `config-file` lines name, in order; `config-file =`
+/// with nothing clears those named before it.
+fn included_files(contents: &str) -> Vec<String> {
+    let mut files = Vec::new();
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "config-file" {
+            if value.is_empty() {
+                files.clear();
+            } else {
+                files.push(value.strip_prefix('?').unwrap_or(&value).to_owned());
+            }
+        }
+    }
+    files
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -4099,6 +4147,31 @@ mod theme_tests {
         );
         parse_cursor_colors("cursor-color =\n", &mut colors);
         assert_eq!(colors.cursor, None);
+    }
+
+    #[test]
+    fn included_config_files_load_after_their_includer() {
+        let root = std::env::temp_dir().join(format!("mux-includes-{}", std::process::id()));
+        fs::create_dir_all(root.join("parts")).expect("dir");
+        fs::write(
+            root.join("config"),
+            "config-file = parts/keys\nconfig-file = ?missing\nconfig-file = config\n",
+        )
+        .expect("config");
+        fs::write(root.join("parts/keys"), "keybind = ctrl+t=new_tab\n").expect("keys");
+        let mut configs = Vec::new();
+        with_included(
+            root.join("config"),
+            &root,
+            &mut HashSet::new(),
+            &mut configs,
+        );
+        assert_eq!(configs, [root.join("config"), root.join("parts/keys")]);
+        assert_eq!(
+            included_files("config-file = a\nconfig-file =\nconfig-file = ?b\n"),
+            ["b"]
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
