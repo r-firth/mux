@@ -153,6 +153,7 @@ impl MuxApp {
         let _ = pane.publish_frame();
         self.selected_pane = Some(pane_id);
         let scroll = pane.frame.scroll;
+        self.copy_on_select();
         let top = usize::try_from(scroll.offset).unwrap_or(usize::MAX);
         let shown = usize::try_from(scroll.len).unwrap_or(usize::MAX);
         if first < top || first >= top.saturating_add(shown) {

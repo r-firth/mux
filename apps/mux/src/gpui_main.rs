@@ -2380,10 +2380,10 @@ impl MuxApp {
         }
     }
 
-    /// A selection made with the pointer goes to the selection clipboard
-    /// for ⌘⇧V, as in Ghostty, and with `copy-on-select = clipboard` in the
-    /// user's Ghostty config on the clipboard too, without a word in the
-    /// strip.
+    /// A selection, made with the pointer or the keys, goes to the
+    /// selection clipboard for ⌘⇧V, as in Ghostty, and with
+    /// `copy-on-select = clipboard` in the user's Ghostty config on the
+    /// clipboard too, without a word in the strip.
     fn copy_on_select(&mut self) {
         use mux_terminal_ghostty::CopyOnSelect;
         let copies = copy_on_select();

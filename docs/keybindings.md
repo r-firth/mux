@@ -351,8 +351,8 @@ pastes it. A shell that brackets its pastes, as bash, zsh and fish do,
 gets the paste at once, since it holds it as text until Return. Setting
 `clipboard-paste-protection = false` in your Ghostty config turns this off.
 
-`Cmd+Shift+V` pastes what you last selected with the pointer instead of the
-clipboard (Ghostty's `paste_from_selection`).
+`Cmd+Shift+V` pastes what you last selected instead of the clipboard
+(Ghostty's `paste_from_selection`).
 
 A program can copy to the clipboard itself with OSC 52, as Neovim, tmux
 and programs over ssh do; the strip says how many lines it copied.
@@ -372,8 +372,11 @@ Shift with an arrow moves the end of a selection a character or a row, as
 Ghostty's does, to take in a little more or less before copying. With
 nothing selected, the keys go to the program.
 
-A selection you make with the pointer is kept for `Cmd+Shift+V`, which
-pastes it without touching the clipboard, as in Ghostty and Terminal.app.
+A selection you make, with the pointer or the keys (`Cmd+Shift+O`, a
+failure mark, Shift with an arrow), is kept for `Cmd+Shift+V`, which pastes
+it without touching the clipboard, as in Ghostty and Terminal.app:
+`Cmd+Shift+O` then `Cmd+Shift+V` puts what the last command printed at the
+prompt.
 With `copy-on-select = clipboard` in your Ghostty config, it goes on the
 clipboard as well, and `copy-on-select = false` keeps nothing.
 

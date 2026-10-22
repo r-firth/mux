@@ -112,6 +112,7 @@ impl MuxApp {
         }
         let _ = pane.publish_frame();
         self.keyed_selection = Some((pane_id, selection));
+        self.copy_on_select();
         cx.notify();
         true
     }
