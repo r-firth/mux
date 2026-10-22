@@ -645,11 +645,7 @@ impl MuxApp {
     /// answers to. Some say what they will do to the pane or tab on screen.
     #[allow(clippy::too_many_lines)] // One entry per command.
     fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 26] {
-        let zoomed = self
-            .session
-            .as_ref()
-            .and_then(Session::active_tab)
-            .is_some_and(|tab| tab.zoomed_pane.is_some());
+        let zoomed = self.active_tab_zoomed();
         let agent_here = self
             .active_agent_pane()
             .is_some_and(|pane_id| Some(pane_id) == self.focused_pane_id());

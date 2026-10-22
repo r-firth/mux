@@ -420,6 +420,12 @@ fn pane_cursor_style() -> mux_terminal::CursorStyle {
     *STYLE.get_or_init(mux_terminal_ghostty::user_cursor_style)
 }
 
+/// How much of an unfocused split shows through, as in the user's Ghostty.
+fn unfocused_split_opacity() -> f32 {
+    static OPACITY: OnceLock<f32> = OnceLock::new();
+    *OPACITY.get_or_init(mux_terminal_ghostty::user_unfocused_split_opacity)
+}
+
 fn restore_pane_replica(
     pane: &PaneAttachment,
     ghostty_theme: &GhosttyTheme,
@@ -4758,6 +4764,31 @@ impl MuxApp {
 
     /// The slab behind a pane: a rounded card with a slim head. The focused
     /// slab takes the tab's ink as its border, ring and glow.
+    fn active_tab_zoomed(&self) -> bool {
+        self.session
+            .as_ref()
+            .and_then(Session::active_tab)
+            .is_some_and(|tab| tab.zoomed_pane.is_some())
+    }
+
+    /// How much of a pane's text shows: as in Ghostty, a split without the
+    /// keys fades back a little; every pane of a synced tab has them.
+    fn pane_content_opacity(
+        &self,
+        geometry: &layout::PaneGeometry,
+        opacity: f32,
+        pane_count: usize,
+    ) -> f32 {
+        if pane_count > 1
+            && !geometry.focused
+            && !self.pane_synced(self.active_tab_id(), geometry.pane_id)
+        {
+            opacity * unfocused_split_opacity()
+        } else {
+            opacity
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn render_pane_slab(
         &self,
@@ -5202,11 +5233,7 @@ impl Render for MuxApp {
         .text_color(theme.text)
         .child(self.render_tabs(cx));
 
-        let zoomed = self
-            .session
-            .as_ref()
-            .and_then(Session::active_tab)
-            .is_some_and(|tab| tab.zoomed_pane.is_some());
+        let zoomed = self.active_tab_zoomed();
         let hints = if self.mode == InputMode::Pane && pane_count > 1 {
             neighbour_hints(&geometry.panes)
         } else {
@@ -5217,16 +5244,17 @@ impl Render for MuxApp {
         }
         let mut shown_terminals = HashSet::new();
         for pane in drawn.panes {
-            let (geometry, opacity) = (pane.geometry, pane.opacity);
+            let geometry = pane.geometry;
             let pane_id = geometry.pane_id;
+            let shown = self.pane_content_opacity(&geometry, pane.opacity, pane_count);
             root = root.child(self.render_pane_slab(pane, zoomed, cx));
             if self.active_agent_pane() == Some(pane_id) {
                 let (frame, focused) = (geometry.frame, geometry.focused);
                 root = root.child(self.render_agent_pane(pane_id, frame, focused, window, cx));
             } else {
-                if let Some(terminal) = self.terminal_view(geometry, opacity, cx) {
+                if let Some(terminal) = self.terminal_view(geometry, shown, cx) {
                     shown_terminals.insert(pane_id);
-                    root = root.child(self.render_terminal_pane(geometry, opacity, terminal, cx));
+                    root = root.child(self.render_terminal_pane(geometry, shown, terminal, cx));
                 }
                 root = root.children(self.render_pane_exit(geometry));
                 root = root.children(self.render_scroll_thumb(geometry));

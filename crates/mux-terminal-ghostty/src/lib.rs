@@ -172,6 +172,38 @@ fn parse_cursor_style(contents: &str, style: &mut CursorStyle) {
     }
 }
 
+/// How much of an unfocused split shows through: `unfocused-split-opacity`
+/// from the user's Ghostty config, kept between 0.15 and 1 as Ghostty keeps
+/// it, 0.7 by default as in Ghostty.
+#[must_use]
+pub fn user_unfocused_split_opacity() -> f32 {
+    let mut opacity = DEFAULT_UNFOCUSED_SPLIT_OPACITY;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_unfocused_split_opacity(&contents, &mut opacity);
+            }
+        }
+    }
+    opacity
+}
+
+const DEFAULT_UNFOCUSED_SPLIT_OPACITY: f32 = 0.7;
+
+fn parse_unfocused_split_opacity(contents: &str, opacity: &mut f32) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "unfocused-split-opacity" {
+            if value.is_empty() {
+                *opacity = DEFAULT_UNFOCUSED_SPLIT_OPACITY;
+            } else if let Ok(value) = value.parse::<f32>()
+                && value.is_finite()
+            {
+                *opacity = value.clamp(0.15, 1.0);
+            }
+        }
+    }
+}
+
 /// Whether a paste that would run commands is held for a second ⌘V:
 /// `clipboard-paste-protection` from the user's Ghostty config, on by
 /// default as in Ghostty.
@@ -2768,6 +2800,21 @@ mod theme_tests {
         assert_eq!(style, CursorStyle::HollowBlock);
         parse_cursor_style("cursor-style = underline\ncursor-style =\n", &mut style);
         assert_eq!(style, CursorStyle::Block);
+    }
+
+    #[test]
+    fn unfocused_split_opacity_is_kept_in_range() {
+        let mut opacity = 0.7;
+        parse_unfocused_split_opacity("unfocused-split-opacity = 0.9\n", &mut opacity);
+        assert!((opacity - 0.9).abs() < f32::EPSILON);
+        parse_unfocused_split_opacity("unfocused-split-opacity = 0\n", &mut opacity);
+        assert!((opacity - 0.15).abs() < f32::EPSILON);
+        parse_unfocused_split_opacity("unfocused-split-opacity = 3\n", &mut opacity);
+        assert!((opacity - 1.0).abs() < f32::EPSILON);
+        parse_unfocused_split_opacity("unfocused-split-opacity = half\n", &mut opacity);
+        assert!((opacity - 1.0).abs() < f32::EPSILON);
+        parse_unfocused_split_opacity("unfocused-split-opacity =\n", &mut opacity);
+        assert!((opacity - 0.7).abs() < f32::EPSILON);
     }
 
     #[test]
