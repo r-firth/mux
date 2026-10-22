@@ -229,11 +229,14 @@ pub enum ForegroundChange {
 
 /// The rule under the text a pane showed before a restart.
 pub const HISTORY_RULE: &str = "── before Mux restarted ──";
+/// The rule under the text a pane of a reopened tab showed before the tab
+/// was closed.
+pub const CLOSED_RULE: &str = "── before the tab was closed ──";
 
 /// Text a pane showed before a restart, as output for a new terminal: each
 /// line as it was, without anything that would act as a control, then a
 /// faint rule saying where the past ends.
-fn history_output(history: &str) -> Vec<u8> {
+fn history_output(history: &str, rule: &str) -> Vec<u8> {
     let mut output = Vec::with_capacity(history.len() + 64);
     for line in history.trim_end().lines() {
         let line = line
@@ -243,7 +246,7 @@ fn history_output(history: &str) -> Vec<u8> {
         output.extend_from_slice(line.trim_end().as_bytes());
         output.extend_from_slice(b"\r\n");
     }
-    output.extend_from_slice(format!("\x1b[2m{HISTORY_RULE}\x1b[0m\r\n").as_bytes());
+    output.extend_from_slice(format!("\x1b[2m{rule}\x1b[0m\r\n").as_bytes());
     output
 }
 
@@ -290,9 +293,9 @@ impl PaneRuntime {
         )
     }
 
-    /// Start a pane that first shows `history`, the text a pane of the
-    /// same place showed before Mux restarted, above a rule, so it reads
-    /// as the past before the new shell's prompt comes up under it.
+    /// Start a pane that first shows `history`: the text a pane in its
+    /// place showed before, then the rule that says when that was, so it
+    /// reads as the past before the new shell's prompt comes up under it.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub fn spawn_with_history(
         session_id: SessionId,
@@ -302,7 +305,7 @@ impl PaneRuntime {
         size: TerminalSize,
         replay_bytes: usize,
         events: broadcast::Sender<ServerEvent>,
-        history: Option<&str>,
+        history: Option<(&str, &str)>,
     ) -> Result<Arc<Self>, PaneError> {
         let size = size.validate()?;
         let pair = native_pty_system().openpty(to_pty_size(size))?;
@@ -335,11 +338,11 @@ impl PaneRuntime {
         drop(pair.slave);
 
         let mut engine = create_terminal_engine(size, replay_bytes)?;
-        if let Some(history) = history.filter(|history| !history.trim().is_empty()) {
+        if let Some((text, rule)) = history.filter(|(text, _)| !text.trim().is_empty()) {
             // Before the reader starts, so it lands ahead of the shell's
             // first output.
             let sequence = engine.next_output_sequence();
-            engine.apply_output(sequence, &history_output(history))?;
+            engine.apply_output(sequence, &history_output(text, rule))?;
         }
         let terminal: Arc<Mutex<Box<dyn TerminalEngine>>> = Arc::new(Mutex::new(engine));
         let exit_status = Arc::new(Mutex::new(None));
@@ -663,13 +666,13 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        ForegroundProcessTracker, OUTPUT_BATCH_SIZE, collect_output_batch, history_output,
-        names_another_terminal,
+        ForegroundProcessTracker, HISTORY_RULE, OUTPUT_BATCH_SIZE, collect_output_batch,
+        history_output, names_another_terminal,
     };
 
     #[test]
     fn history_comes_back_as_plain_lines_under_a_rule() {
-        let output = history_output("$ ls\nsrc  \x1b[31mtarget\n\n\n");
+        let output = history_output("$ ls\nsrc  \x1b[31mtarget\n\n\n", HISTORY_RULE);
         let output = String::from_utf8(output).expect("text");
         assert_eq!(
             output,

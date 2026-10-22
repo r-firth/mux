@@ -1,15 +1,16 @@
 //! Closed tabs, kept so the last few can come back, as a browser's do: the
-//! tab's name, ink, splits and pane names, and the directory each pane's
-//! shell was in. What ran in them has ended, so each pane gets a fresh shell
-//! there.
+//! tab's name, ink, splits and pane names, the directory each pane's shell
+//! was in, and what each pane showed. What ran in them has ended, so each
+//! pane gets a fresh shell there, under the text it showed.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use mux_workspace::{PaneId, Tab, TabId};
 
+use super::restore::{PANE_TEXT_LINES, last_lines, worth_keeping};
 use super::{SessionMutationError, SessionRuntime};
-use crate::pane::PaneRuntime;
+use crate::pane::{CLOSED_RULE, PaneRuntime};
 
 /// How many closed tabs a session remembers.
 const KEPT: usize = 10;
@@ -20,6 +21,7 @@ pub(super) struct ClosedTab {
     place: usize,
     cwds: HashMap<PaneId, PathBuf>,
     names: Vec<(PaneId, String)>,
+    texts: HashMap<PaneId, String>,
 }
 
 impl SessionRuntime {
@@ -45,12 +47,24 @@ impl SessionRuntime {
             .iter()
             .filter_map(|pane| Some((*pane, self.cwd_for_pane(*pane)?)))
             .collect();
+        let texts = {
+            let runtimes = self.panes.read();
+            panes
+                .iter()
+                .filter_map(|pane| {
+                    let text = runtimes.get(pane)?.screen_text()?;
+                    let text = worth_keeping(last_lines(&text, PANE_TEXT_LINES));
+                    (!text.is_empty()).then(|| (*pane, text.to_owned()))
+                })
+                .collect()
+        };
         let mut closed = self.closed_tabs.lock();
         closed.push(ClosedTab {
             tab,
             place,
             cwds,
             names,
+            texts,
         });
         if closed.len() > KEPT {
             closed.remove(0);
@@ -85,7 +99,11 @@ impl SessionRuntime {
                 .filter(|cwd| cwd.is_dir())
                 .cloned()
                 .unwrap_or_else(|| self.spawn.cwd.clone());
-            match PaneRuntime::spawn(
+            let history = closed
+                .texts
+                .get(pane)
+                .map(|text| (text.as_str(), CLOSED_RULE));
+            match PaneRuntime::spawn_with_history(
                 session_id,
                 fresh[pane],
                 &cwd,
@@ -93,6 +111,7 @@ impl SessionRuntime {
                 self.spawn.size,
                 replay_bytes,
                 self.events.clone(),
+                history,
             ) {
                 Ok(runtime) => spawned.push((fresh[pane], runtime)),
                 Err(error) => {

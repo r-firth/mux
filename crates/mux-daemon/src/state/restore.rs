@@ -29,7 +29,7 @@ const WORKSPACE_FILE: &str = "workspace.json";
 const PANE_TEXT_DIR: &str = "pane-text";
 /// The most lines of a pane's text kept: the end of its history and its
 /// screen.
-const PANE_TEXT_LINES: usize = 1_000;
+pub(super) const PANE_TEXT_LINES: usize = 1_000;
 const WORKSPACE_VERSION: u32 = 1;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -198,7 +198,9 @@ impl DaemonState {
                 saved.size,
                 self.replay_bytes_per_pane,
                 events.clone(),
-                history.as_deref(),
+                history
+                    .as_deref()
+                    .map(|text| (text, crate::pane::HISTORY_RULE)),
             );
             match pane {
                 Ok(pane) => {
@@ -239,7 +241,7 @@ fn pane_text_file(pane_id: PaneId) -> String {
 /// only its prompt on it, and for a pane untouched since it was itself
 /// brought back, what it was brought back with, so an idle pane does not
 /// gather a rule and a prompt at every restart.
-fn worth_keeping(mut text: &str) -> &str {
+pub(super) fn worth_keeping(mut text: &str) -> &str {
     while let Some((before, after)) = text.rsplit_once(crate::pane::HISTORY_RULE)
         && !after.trim().contains('\n')
     {
@@ -250,7 +252,7 @@ fn worth_keeping(mut text: &str) -> &str {
 
 /// The last `count` lines of `text` that hold anything, without the blank
 /// rows under them.
-fn last_lines(text: &str, count: usize) -> &str {
+pub(super) fn last_lines(text: &str, count: usize) -> &str {
     let text = text.trim_end();
     let start = text
         .rmatch_indices('\n')
