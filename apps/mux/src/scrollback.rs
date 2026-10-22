@@ -597,10 +597,11 @@ impl MuxApp {
                 .into_iter()
                 .filter(|&pane_id| Some(pane_id) != focused)
             {
-                let place = if tab.id == active {
-                    "another pane".to_owned()
-                } else {
-                    format!("tab {}", index + 1)
+                let place = match (self.pane_name(pane_id), tab.id == active) {
+                    (Some(name), true) => name.to_owned(),
+                    (None, true) => "another pane".to_owned(),
+                    (Some(name), false) => format!("{name} · tab {}", index + 1),
+                    (None, false) => format!("tab {}", index + 1),
                 };
                 ran.extend(self.commands_ran_in(pane_id, Some(&place)));
             }
