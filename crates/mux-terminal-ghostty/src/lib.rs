@@ -428,26 +428,40 @@ fn parse_cursor_colors(contents: &str, colors: &mut CursorColors) {
     }
 }
 
-/// Whether programs may read the clipboard with OSC 52: `clipboard-read =
-/// allow` in the user's Ghostty config. Ghostty asks by default; Mux has no
-/// way to ask, so it refuses unless allowed.
+/// What a program's OSC 52 read of the clipboard gets: Ghostty's
+/// `clipboard-read`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClipboardRead {
+    Allow,
+    /// Ask first, as Ghostty does by default.
+    #[default]
+    Ask,
+    Deny,
+}
+
+/// The user's `clipboard-read`, from their Ghostty config.
 #[must_use]
-pub fn user_clipboard_read() -> bool {
-    let mut allowed = false;
+pub fn user_clipboard_read() -> ClipboardRead {
+    let mut read = ClipboardRead::default();
     if let Some((_, configs)) = user_config_paths() {
         for config in configs {
             if let Ok(contents) = read_config(&config) {
-                parse_clipboard_read(&contents, &mut allowed);
+                parse_clipboard_read(&contents, &mut read);
             }
         }
     }
-    allowed
+    read
 }
 
-fn parse_clipboard_read(contents: &str, allowed: &mut bool) {
+fn parse_clipboard_read(contents: &str, read: &mut ClipboardRead) {
     for (key, value) in contents.lines().filter_map(parse_config_entry) {
         if key == "clipboard-read" {
-            *allowed = value == "allow";
+            match value.as_str() {
+                "allow" => *read = ClipboardRead::Allow,
+                "" | "ask" => *read = ClipboardRead::Ask,
+                "deny" => *read = ClipboardRead::Deny,
+                _ => {}
+            }
         }
     }
 }
@@ -4030,12 +4044,15 @@ mod theme_tests {
     }
 
     #[test]
-    fn programs_read_the_clipboard_only_when_allowed() {
-        let mut allowed = false;
-        parse_clipboard_read("clipboard-read = allow\n", &mut allowed);
-        assert!(allowed);
-        parse_clipboard_read("clipboard-read = ask\n", &mut allowed);
-        assert!(!allowed);
+    fn clipboard_reads_ask_unless_allowed_or_denied() {
+        let mut read = ClipboardRead::default();
+        assert_eq!(read, ClipboardRead::Ask);
+        parse_clipboard_read("clipboard-read = allow\n", &mut read);
+        assert_eq!(read, ClipboardRead::Allow);
+        parse_clipboard_read("clipboard-read = deny\n", &mut read);
+        assert_eq!(read, ClipboardRead::Deny);
+        parse_clipboard_read("clipboard-read =\n", &mut read);
+        assert_eq!(read, ClipboardRead::Ask);
     }
 
     #[test]

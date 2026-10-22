@@ -481,11 +481,11 @@ fn desktop_notifications() -> bool {
     HEEDED.get()
 }
 
-/// Whether programs may read the clipboard, as the user's Ghostty allows.
-fn clipboard_read_allowed() -> bool {
-    static ALLOWED: ghostty_config::Reloadable<bool> =
+/// What programs' clipboard reads get, as in the user's Ghostty.
+fn clipboard_read() -> mux_terminal_ghostty::ClipboardRead {
+    static READ: ghostty_config::Reloadable<mux_terminal_ghostty::ClipboardRead> =
         ghostty_config::Reloadable::new(mux_terminal_ghostty::user_clipboard_read);
-    ALLOWED.get()
+    READ.get()
 }
 
 /// Whether the pane under the pointer takes the keys, as in the user's
@@ -811,6 +811,9 @@ struct MuxApp {
     /// A paste that would run lines, and when: pasting it again soon after
     /// goes ahead.
     paste_armed: Option<(u64, Instant)>,
+    /// A program's clipboard read waiting on a ⌘V: the pane, the clipboard
+    /// it named, and when it asked.
+    clipboard_read_asked: Option<(PaneId, String, Instant)>,
     /// When Mux last closed a pane or tab, for ⌘Z to bring it back.
     closed_at: Option<Instant>,
     /// What was last selected with the pointer, for ⌘⇧V.
@@ -1037,6 +1040,7 @@ impl MuxApp {
             bell_serial: 0,
             close_armed: None,
             paste_armed: None,
+            clipboard_read_asked: None,
             closed_at: None,
             selection_clipboard: None,
             pane_menu: None,
@@ -2415,12 +2419,25 @@ impl MuxApp {
         }
     }
 
-    /// Give programs that asked to read the clipboard what is on it, when
-    /// the user's Ghostty allows it; otherwise they get no answer, as before.
+    /// Give programs that asked to read the clipboard what is on it, as
+    /// the user's Ghostty says: at once with `allow`, never with `deny`,
+    /// and by default after asking in the strip, a ⌘V handing it over.
     fn answer_clipboard_reads(&mut self, reads: Vec<(PaneId, String)>, cx: &mut Context<Self>) {
-        if reads.is_empty() || !clipboard_read_allowed() {
+        use mux_terminal_ghostty::ClipboardRead;
+        let Some((pane_id, place)) = reads.into_iter().last() else {
             return;
+        };
+        match clipboard_read() {
+            ClipboardRead::Allow => self.give_clipboard(pane_id, &place, cx),
+            ClipboardRead::Deny => {}
+            ClipboardRead::Ask => {
+                self.clipboard_read_asked = Some((pane_id, place, Instant::now()));
+                self.say_in_strip("a program asks for the clipboard · ⌘v gives it", true, cx);
+            }
         }
+    }
+
+    fn give_clipboard(&mut self, pane_id: PaneId, place: &str, cx: &mut Context<Self>) {
         let Some(text) = self
             .clipboard
             .as_mut()
@@ -2428,13 +2445,26 @@ impl MuxApp {
         else {
             return;
         };
-        for (pane_id, place) in reads {
-            self.backend.send(CommandMessage::Write {
-                pane_id,
-                bytes: mux_terminal::clipboard_reply(&place, &text),
-            });
-        }
-        self.say_in_strip("a program read the clipboard".to_owned(), false, cx);
+        self.backend.send(CommandMessage::Write {
+            pane_id,
+            bytes: mux_terminal::clipboard_reply(place, &text),
+        });
+        self.say_in_strip("a program read the clipboard", false, cx);
+    }
+
+    /// A ⌘V soon after a program asked to read the clipboard hands it over
+    /// instead of pasting. Returns whether it did.
+    fn answer_asked_clipboard_read(&mut self, cx: &mut Context<Self>) -> bool {
+        const ASK_WINDOW: Duration = Duration::from_secs(15);
+        let Some((pane_id, place, _)) =
+            self.clipboard_read_asked.take().filter(|(pane_id, _, at)| {
+                at.elapsed() < ASK_WINDOW && self.panes.contains_key(pane_id)
+            })
+        else {
+            return false;
+        };
+        self.give_clipboard(pane_id, &place, cx);
+        true
     }
 
     /// A selection, made with the pointer or the keys, goes to the
@@ -2461,6 +2491,9 @@ impl MuxApp {
     /// Paste the clipboard into the pane with the keys, as its program
     /// asks for pastes, and show the pane's latest output.
     fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
+        if self.answer_asked_clipboard_read(cx) {
+            return;
+        }
         if let Some(clipboard) = &mut self.clipboard
             && let Ok(text) = clipboard.get_text()
         {
