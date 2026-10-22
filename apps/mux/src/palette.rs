@@ -458,7 +458,12 @@ impl MuxApp {
             );
             row.tone = MUTED_TEXT;
             row.quiet = true;
-            row.hint = ran.failed.map(|status| (format!("exit {status}"), SIGNAL));
+            let tone = if ran.ending.failed().is_some() {
+                SIGNAL
+            } else {
+                FAINT_TEXT
+            };
+            row.hint = scrollback::ending_words(ran.ending).map(|words| (words, tone));
             rows.push(row);
         }
     }

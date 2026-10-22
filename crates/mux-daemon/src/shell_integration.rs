@@ -22,6 +22,9 @@ const BASH_PROMPT_COMMAND: &str = concat!(
     "__mux_keep_status() { return $1; }; __mux_keep_status $__mux_status",
 );
 
+/// Where a command starts, printed from bash's PS0.
+const BASH_COMMAND_START: &str = r"\e]133;C\a";
+
 static ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 /// Where the integration lives, under the daemon's state directory. Panes
@@ -73,7 +76,16 @@ pub fn environment(program: &Path) -> Vec<(OsString, OsString)> {
                 Ok(own) if !own.trim().is_empty() => format!("{BASH_PROMPT_COMMAND}; {own}"),
                 _ => BASH_PROMPT_COMMAND.to_owned(),
             };
-            vec![(OsString::from("PROMPT_COMMAND"), OsString::from(command))]
+            // PS0 prints as a command starts (bash 4.4 and later), so an
+            // empty line is told from a command and a command can be timed.
+            let start = match std::env::var("PS0") {
+                Ok(own) => format!("{BASH_COMMAND_START}{own}"),
+                Err(_) => BASH_COMMAND_START.to_owned(),
+            };
+            vec![
+                (OsString::from("PROMPT_COMMAND"), OsString::from(command)),
+                (OsString::from("PS0"), OsString::from(start)),
+            ]
         }
         _ => Vec::new(),
     }

@@ -240,7 +240,8 @@ none, the keys go to the program. While a pane is scrolled back, a faint
 tick beside its scroll thumb marks each prompt in its history, orange for
 a command that failed, and when the view starts partway through a
 command's output, that command's prompt line stays pinned to the top of the
-pane, with `exit 2` beside it if it failed; click it to go to the prompt.
+pane, with `exit 2` beside it if it failed and how long it ran if that was
+a second or more; click it to go to the prompt.
 
 ## Find
 
@@ -403,7 +404,8 @@ by its tab's name, and a tab by what its panes are running. A number goes to
 that tab. Agents are listed once you type one's name: `codex` opens Codex in
 the pane with the keys, or shows the Codex session already in the tab.
 The commands run in the focused pane are found the same way, newest first
-and each once, with `exit 2` beside one that failed: `cargo t` then Return
+and each once, with `exit 2` beside one that failed and how long each ran
+(`exit 2 · 3m`): `cargo t` then Return
 scrolls back to where `cargo test` was run.
 
 | Keys | Action |

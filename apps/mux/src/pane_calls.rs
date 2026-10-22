@@ -173,8 +173,6 @@ impl MuxApp {
     }
 }
 
-/// A length of time as a tab chip has room for: seconds under a minute,
-/// then whole minutes, then hours and minutes.
 /// What a long program finishing says: done, or failed with the status the
 /// shell gave, or stopped by a signal such as Ctrl+C's.
 fn finished_words(program: &str, seconds: u64, exit_status: Option<i32>) -> String {
@@ -186,7 +184,9 @@ fn finished_words(program: &str, seconds: u64, exit_status: Option<i32>) -> Stri
     }
 }
 
-fn duration_words(seconds: u64) -> String {
+/// A length of time as a tab chip has room for: seconds under a minute,
+/// then whole minutes, then hours and minutes.
+pub(super) fn duration_words(seconds: u64) -> String {
     match seconds {
         0..60 => format!("{seconds}s"),
         60..3600 => format!("{}m", seconds / 60),

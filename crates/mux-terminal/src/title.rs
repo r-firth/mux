@@ -17,9 +17,26 @@ pub struct TitleScanner {
     copied: Option<String>,
     progress: Option<Progress>,
     exit_status: Option<i32>,
-    commands: std::collections::VecDeque<Option<i32>>,
-    command_started: bool,
+    commands: std::collections::VecDeque<CommandEnding>,
+    command_started: Option<std::time::Instant>,
     marks_starts: bool,
+}
+
+/// How the command run from one prompt ended, as far as the shell said.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CommandEnding {
+    /// Its exit status; `None` while it runs, or for an empty line.
+    pub status: Option<i32>,
+    /// How long it ran, from the shell's marks for its start and end.
+    pub took: Option<std::time::Duration>,
+}
+
+impl CommandEnding {
+    /// Its status, if it failed.
+    #[must_use]
+    pub fn failed(self) -> Option<i32> {
+        self.status.filter(|&status| status != 0)
+    }
 }
 
 /// How many prompts' worth of command endings a pane remembers.
@@ -140,7 +157,7 @@ impl TitleScanner {
     /// each prompt the shell marked; the newest is the prompt still
     /// waiting. Line them up with the screen's prompts from the newest.
     #[must_use]
-    pub fn command_endings(&self) -> &std::collections::VecDeque<Option<i32>> {
+    pub fn command_endings(&self) -> &std::collections::VecDeque<CommandEnding> {
         &self.commands
     }
 
@@ -317,25 +334,29 @@ impl TitleScanner {
                 if self.commands.len() == REMEMBERED_COMMANDS {
                     self.commands.pop_front();
                 }
-                self.commands.push_back(None);
-                self.command_started = false;
+                self.commands.push_back(CommandEnding::default());
+                self.command_started = None;
             }
             Some("C") => {
                 self.exit_status = None;
-                self.command_started = true;
+                self.command_started = Some(std::time::Instant::now());
                 self.marks_starts = true;
             }
             Some("D") => {
                 self.exit_status = parts.next().and_then(|status| status.trim().parse().ok());
-                if self.command_started || !self.marks_starts {
+                let started = self.command_started.take();
+                if started.is_some() || !self.marks_starts {
+                    let ending = CommandEnding {
+                        status: self.exit_status,
+                        took: started.map(|started| started.elapsed()),
+                    };
                     // The first prompt this pane saw may have come before
                     // Mux was listening, as after a restart.
                     match self.commands.back_mut() {
-                        Some(ending) => *ending = self.exit_status,
-                        None => self.commands.push_back(self.exit_status),
+                        Some(last) => *last = ending,
+                        None => self.commands.push_back(ending),
                     }
                 }
-                self.command_started = false;
             }
             _ => {}
         }
@@ -467,10 +488,14 @@ mod tests {
             scanner
                 .command_endings()
                 .iter()
-                .copied()
+                .map(|ending| ending.status)
                 .collect::<Vec<_>>(),
             [Some(2), None, Some(0), None]
         );
+        let first = scanner.command_endings()[0];
+        assert!(first.took.is_some(), "timed from its start");
+        assert_eq!(first.failed(), Some(2));
+        assert_eq!(scanner.command_endings()[2].failed(), None);
         // bash marks no starts: each `D` is taken as given, the first for
         // the prompt that was there before Mux was listening.
         let mut scanner = TitleScanner::default();
@@ -480,9 +505,14 @@ mod tests {
             scanner
                 .command_endings()
                 .iter()
-                .copied()
+                .map(|ending| ending.status)
                 .collect::<Vec<_>>(),
             [Some(0), Some(1), None]
+        );
+        assert_eq!(
+            scanner.command_endings()[1].took,
+            None,
+            "no start to time from"
         );
     }
 

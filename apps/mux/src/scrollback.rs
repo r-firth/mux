@@ -11,7 +11,7 @@
 //! the pane's top.
 
 use super::*;
-use mux_terminal::TerminalScrollState;
+use mux_terminal::{CommandEnding, TerminalScrollState};
 
 /// The keys that move a pane through its history rather than reaching its
 /// program. ⇧ with page up or down reaches the program when there is no
@@ -91,17 +91,32 @@ fn command_above(prompts: &[usize], scroll: TerminalScrollState) -> Option<usize
         .filter(|&row| row < top)
 }
 
-/// How the command run from the prompt at `index` of `prompt_count` ended,
-/// if it failed: the shell's endings lined up with the prompts from the
-/// newest.
-fn failed_status(
-    endings: &std::collections::VecDeque<Option<i32>>,
+/// How the command run from the prompt at `index` of `prompt_count` ended:
+/// the shell's endings lined up with the prompts from the newest.
+fn ending_at(
+    endings: &std::collections::VecDeque<CommandEnding>,
     prompt_count: usize,
     index: usize,
-) -> Option<i32> {
-    let from_newest = prompt_count.checked_sub(index + 1)?;
-    let at = endings.len().checked_sub(from_newest + 1)?;
-    endings[at].filter(|&status| status != 0)
+) -> CommandEnding {
+    prompt_count
+        .checked_sub(index + 1)
+        .and_then(|from_newest| endings.len().checked_sub(from_newest + 1))
+        .map(|at| endings[at])
+        .unwrap_or_default()
+}
+
+/// What is worth saying of how a command ended: its status if it failed,
+/// and how long it ran if that was a second or more.
+pub(super) fn ending_words(ending: CommandEnding) -> Option<String> {
+    let status = ending.failed().map(|status| format!("exit {status}"));
+    let took = ending
+        .took
+        .filter(|took| took.as_secs() >= 1)
+        .map(|took| pane_calls::duration_words(took.as_secs()));
+    match (status, took) {
+        (Some(status), Some(took)) => Some(format!("{status} · {took}")),
+        (status, took) => status.or(took),
+    }
 }
 
 /// The command on a prompt's line, after the prompt: what follows the
@@ -122,7 +137,7 @@ pub(super) struct CommandRan {
     /// Its prompt's row, from the top of the history.
     pub(super) row: usize,
     pub(super) command: String,
-    pub(super) failed: Option<i32>,
+    pub(super) ending: CommandEnding,
 }
 
 /// How many of a pane's latest commands the palette offers.
@@ -516,7 +531,7 @@ impl MuxApp {
                         pane_id,
                         row,
                         command: command.to_owned(),
-                        failed: failed_status(endings, count, index),
+                        ending: ending_at(endings, count, index),
                     })
                 })
                 .collect()
@@ -575,10 +590,11 @@ impl MuxApp {
         }
         let prompts = self.cached_prompt_rows(pane_id)?;
         let row = command_above(&prompts, scroll)?;
-        let failed = prompts
+        let ending = prompts
             .iter()
             .position(|&prompt| prompt == row)
-            .and_then(|index| failed_status(pane.title.command_endings(), prompts.len(), index));
+            .map(|index| ending_at(pane.title.command_endings(), prompts.len(), index))
+            .unwrap_or_default();
         let text = pane
             .with_engine(|engine| engine.row_text(row))
             .ok()
@@ -620,12 +636,16 @@ impl MuxApp {
                     }
                 }))
                 .child(div().flex_1().overflow_hidden().child(text))
-                .children(failed.map(|status| {
+                .children(ending_words(ending).map(|words| {
                     div()
                         .flex_none()
                         .pl(px(12.0))
-                        .text_color(color(SIGNAL))
-                        .child(format!("exit {status}"))
+                        .text_color(color(if ending.failed().is_some() {
+                            SIGNAL
+                        } else {
+                            FAINT_TEXT
+                        }))
+                        .child(words)
                 }))
                 .into_any_element(),
         )
@@ -666,7 +686,7 @@ impl MuxApp {
         for (index, &row) in prompts.iter().enumerate() {
             let y = (row as f32 + 0.5) / total * track;
             // A failure always shows, in the colour progress fails in.
-            let failed = failed_status(endings, prompts.len(), index).is_some();
+            let failed = ending_at(endings, prompts.len(), index).failed().is_some();
             if y - last < 2.0 && !failed {
                 continue;
             }
@@ -777,15 +797,26 @@ mod tests {
     }
 
     #[test]
-    fn failures_line_up_with_the_prompts_from_the_newest() {
-        let endings: std::collections::VecDeque<_> = [Some(1), Some(0), Some(2), None].into();
+    fn endings_line_up_with_the_prompts_from_the_newest() {
+        let ended = |status, seconds| CommandEnding {
+            status: Some(status),
+            took: Some(std::time::Duration::from_secs(seconds)),
+        };
+        let endings: std::collections::VecDeque<_> = [
+            ended(1, 0),
+            ended(0, 200),
+            ended(2, 75),
+            CommandEnding::default(),
+        ]
+        .into();
+        let words = |index| ending_words(ending_at(&endings, 5, index));
         // Five prompts on screen, the oldest from before the shell's marks
         // were followed.
-        assert_eq!(failed_status(&endings, 5, 0), None);
-        assert_eq!(failed_status(&endings, 5, 1), Some(1));
-        assert_eq!(failed_status(&endings, 5, 2), None, "it succeeded");
-        assert_eq!(failed_status(&endings, 5, 3), Some(2));
-        assert_eq!(failed_status(&endings, 5, 4), None, "still at its prompt");
+        assert_eq!(words(0), None);
+        assert_eq!(words(1).as_deref(), Some("exit 1"), "too quick to time");
+        assert_eq!(words(2).as_deref(), Some("3m"), "it succeeded");
+        assert_eq!(words(3).as_deref(), Some("exit 2 · 1m"));
+        assert_eq!(words(4), None, "still at its prompt");
     }
 
     #[test]
