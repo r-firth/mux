@@ -14,6 +14,7 @@ pub struct TitleScanner {
     title: Option<String>,
     attention: Option<Attention>,
     copied: Option<String>,
+    progress: Option<Progress>,
 }
 
 /// A program asking to be noticed.
@@ -22,6 +23,45 @@ pub enum Attention {
     Bell,
     /// A desktop notification, with what it says.
     Notification(String),
+}
+
+/// A program saying how far along it is, with the OSC 9;4 progress report
+/// that Ghostty shows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Progress {
+    /// This far, in percent.
+    Normal(u8),
+    /// Failed, this far along.
+    Error(u8),
+    /// Busy, without saying how far.
+    Indeterminate,
+    /// Waiting, this far along.
+    Paused(u8),
+    /// No longer saying.
+    Removed,
+}
+
+impl Progress {
+    /// `4 ; state ; percent`, with `state` 0 taking the progress away.
+    fn parse(report: &str) -> Option<Self> {
+        let mut parts = report.split(';');
+        if parts.next()? != "4" {
+            return None;
+        }
+        let state = parts.next().unwrap_or("0");
+        let percent = parts
+            .next()
+            .and_then(|percent| percent.trim().parse::<u16>().ok())
+            .map(|percent| u8::try_from(percent.min(100)).unwrap_or(100));
+        Some(match state {
+            "0" => Self::Removed,
+            "1" => Self::Normal(percent.unwrap_or(0)),
+            "2" => Self::Error(percent.unwrap_or(100)),
+            "3" => Self::Indeterminate,
+            "4" => Self::Paused(percent.unwrap_or(0)),
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -68,6 +108,12 @@ impl TitleScanner {
     /// called. A notification outranks a bell rung alongside it.
     pub fn take_attention(&mut self) -> Option<Attention> {
         self.attention.take()
+    }
+
+    /// How far along the program last said it was, if it has said since
+    /// this was last called.
+    pub fn take_progress(&mut self) -> Option<Progress> {
+        self.progress.take()
     }
 
     /// The text a program last copied to the clipboard since this was last
@@ -201,6 +247,9 @@ impl TitleScanner {
                 .bytes()
                 .all(|byte| byte.is_ascii_digit());
             if numbered {
+                if let Some(progress) = Progress::parse(&text) {
+                    self.progress = Some(progress);
+                }
                 return;
             }
             text
@@ -305,6 +354,28 @@ mod tests {
         scanner.scan(b"\x1b]9;4;1;50\x07");
         assert_eq!(scanner.take_attention(), None);
         assert_eq!(scanner.title(), None);
+    }
+
+    #[test]
+    fn progress_reports_say_how_far_along() {
+        let mut scanner = TitleScanner::default();
+        assert_eq!(scanner.take_progress(), None);
+        scanner.scan(b"\x1b]9;4;1;50\x07");
+        assert_eq!(scanner.take_progress(), Some(Progress::Normal(50)));
+        assert_eq!(scanner.take_progress(), None, "nothing new");
+        scanner.scan(b"\x1b]9;4;1;250\x1b\\");
+        assert_eq!(scanner.take_progress(), Some(Progress::Normal(100)));
+        scanner.scan(b"\x1b]9;4;2\x07");
+        assert_eq!(scanner.take_progress(), Some(Progress::Error(100)));
+        scanner.scan(b"\x1b]9;4;3;\x07");
+        assert_eq!(scanner.take_progress(), Some(Progress::Indeterminate));
+        scanner.scan(b"\x1b]9;4;4;30\x07");
+        assert_eq!(scanner.take_progress(), Some(Progress::Paused(30)));
+        scanner.scan(b"\x1b]9;4;0;0\x07");
+        assert_eq!(scanner.take_progress(), Some(Progress::Removed));
+        scanner.scan(b"\x1b]9;4;7;1\x07\x1b]9;5\x07");
+        assert_eq!(scanner.take_progress(), None, "not progress");
+        assert_eq!(scanner.take_attention(), None);
     }
 
     #[test]

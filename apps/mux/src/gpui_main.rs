@@ -22,6 +22,7 @@ mod pane_exit;
 mod pane_menu;
 mod pane_names;
 mod pane_parser;
+mod progress;
 mod quick_select;
 mod scrollback;
 mod seams;
@@ -464,10 +465,11 @@ fn restore_pane_replica(
         engine.apply_output(chunk.sequence, &chunk.bytes)?;
         title.scan(&chunk.bytes);
     }
-    // A bell in the replayed history rang long ago, and what it copied has
-    // likely been copied over since.
+    // A bell in the replayed history rang long ago, what it copied has
+    // likely been copied over since, and its progress is long out of date.
     let _ = title.take_attention();
     let _ = title.take_copied();
+    let _ = title.take_progress();
     let restored_next_sequence = engine.next_output_sequence();
     if restored_next_sequence != pane.terminal.next_sequence {
         return Err(anyhow!(
@@ -731,6 +733,10 @@ struct MuxApp {
     pane_restart: Option<pane_exit::PaneRestart>,
     /// Panes out of sight that rang or sent a notification, until seen.
     pane_calls: HashMap<PaneId, mux_terminal::Attention>,
+    /// How far along each pane's program last said it was, and when.
+    pane_progress: HashMap<PaneId, (mux_terminal::Progress, Instant)>,
+    /// When stale progress reports will next be looked for, if they will.
+    progress_sweep: Option<Instant>,
     /// Long programs that have finished since the calls were last gathered,
     /// with what to say about each.
     finished_commands: Vec<(PaneId, String)>,
@@ -909,6 +915,8 @@ impl MuxApp {
             pane_exits: HashMap::new(),
             pane_restart: None,
             pane_calls: HashMap::new(),
+            pane_progress: HashMap::new(),
+            progress_sweep: None,
             finished_commands: Vec::new(),
             link_hover: None,
             link_pointer: None,
@@ -1237,7 +1245,8 @@ impl MuxApp {
         self.publish_terminal_frames(&mut dirty_panes, cx);
         self.refresh_link_hover(cx);
         self.collect_pane_copies(cx);
-        self.collect_pane_calls(window, cx) || needs_render
+        let progressed = self.collect_pane_progress(cx);
+        self.collect_pane_calls(window, cx) || progressed || needs_render
     }
 
     fn publish_terminal_frames(
@@ -4092,28 +4101,7 @@ impl MuxApp {
             _ => ink.color().opacity(0.72),
         };
         chip = Self::with_tab_close(chip, tab_id, dot, &group, cx);
-        if let Some(rename) = self
-            .tab_rename
-            .as_ref()
-            .filter(|rename| rename.tab_id == tab_id)
-        {
-            chip = chip.child(Self::render_tab_rename_field(rename, cx));
-        } else {
-            chip = chip.child(
-                div()
-                    .min_w_0()
-                    .max_w(px(200.0))
-                    .truncate()
-                    .font_weight(if active {
-                        FontWeight::BOLD
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .text_color(color(if active { TEXT } else { MUTED_TEXT }))
-                    .group_hover(group, |style| style.text_color(color(TEXT)))
-                    .child(label),
-            );
-        }
+        chip = chip.child(self.render_tab_label(tab_id, label, active, group, cx));
         // Said in words as well, since a peach-inked tab's dot is peach
         // anyway: what its agent or a pane of it wants.
         let wants = if activity == Some(AgentTabActivity::Attention) {
@@ -4124,12 +4112,46 @@ impl MuxApp {
         if let Some(wants) = wants {
             chip = chip.child(div().flex_none().text_color(color(SIGNAL)).child(wants));
         }
+        chip = chip
+            .relative()
+            .children(self.render_chip_progress(tab, active));
         if active {
             chip.bg(wash(0.10))
         } else {
             chip.hover(|style| style.bg(wash(0.05)))
                 .active(|style| style.bg(wash(0.10)))
         }
+    }
+
+    /// The tab's name in its chip, or the field naming it.
+    fn render_tab_label(
+        &self,
+        tab_id: TabId,
+        label: String,
+        active: bool,
+        group: SharedString,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        if let Some(rename) = self
+            .tab_rename
+            .as_ref()
+            .filter(|rename| rename.tab_id == tab_id)
+        {
+            return Self::render_tab_rename_field(rename, cx).into_any_element();
+        }
+        div()
+            .min_w_0()
+            .max_w(px(200.0))
+            .truncate()
+            .font_weight(if active {
+                FontWeight::BOLD
+            } else {
+                FontWeight::NORMAL
+            })
+            .text_color(color(if active { TEXT } else { MUTED_TEXT }))
+            .group_hover(group, |style| style.text_color(color(TEXT)))
+            .child(label)
+            .into_any_element()
     }
 
     /// The tab's dot, which turns into a close mark while the pointer is
@@ -5291,6 +5313,7 @@ impl Render for MuxApp {
                     root = root.child(self.render_terminal_pane(geometry, shown, terminal, cx));
                 }
                 root = root.children(self.render_pane_exit(geometry));
+                root = root.children(self.render_pane_progress(geometry));
                 root = root.children(self.render_scroll_thumb(geometry));
                 root = root.children(self.render_latest_pill(geometry, cx));
                 root = root.children(self.render_find_ticks(geometry));

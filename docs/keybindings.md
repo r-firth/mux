@@ -264,6 +264,12 @@ calls the same way, with how long it took: `cargo done in 3m`. While Mux is in t
 background, the first call also bounces its Dock icon. A bell in the pane you
 are looking at flashes it for a moment in the tab's ink instead.
 
+A program that reports its progress with OSC 9;4, as Ghostty shows, gets a
+thin bar along the top of its pane: the tab's ink while it goes, peach when
+it fails, muted while it waits, and a faint band while it is busy without
+saying how far. A tab out of sight carries the bar under its chip. A report
+not renewed for 15 seconds goes away, as in Ghostty.
+
 ## Closing what is running
 
 Closing a pane, or a tab, whose shell is running something in front of it,
