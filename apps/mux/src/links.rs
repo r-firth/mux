@@ -167,6 +167,13 @@ fn trimmed_url_length(url: &[char]) -> usize {
 }
 
 /// Cells in reading order, gathered into one span per row.
+/// What copying a link puts on the clipboard: a file's path, or the URL.
+pub(super) fn link_text(url: &str) -> &str {
+    url.strip_prefix("file://").map_or(url, |path| {
+        path.find('/').map_or(path, |slash| &path[slash..])
+    })
+}
+
 pub(super) fn spans_of(cells: impl Iterator<Item = (u16, u16)>) -> Vec<(u16, u16, u16)> {
     let mut spans: Vec<(u16, u16, u16)> = Vec::new();
     for (row, column) in cells {
@@ -179,7 +186,7 @@ pub(super) fn spans_of(cells: impl Iterator<Item = (u16, u16)>) -> Vec<(u16, u16
 }
 
 /// Open a link the way the system opens it. Files are shown, not opened.
-fn open_link(url: &str) -> std::io::Result<()> {
+pub(super) fn open_link(url: &str) -> std::io::Result<()> {
     let mut command = if cfg!(target_os = "macos") {
         Command::new("/usr/bin/open")
     } else {
@@ -204,7 +211,7 @@ fn open_link(url: &str) -> std::io::Result<()> {
 }
 
 impl MuxApp {
-    fn link_under(
+    pub(super) fn link_under(
         &self,
         pane_id: PaneId,
         rect: layout::Rect,
@@ -284,10 +291,14 @@ impl MuxApp {
         let Some(link) = self.link_under(pane_id, rect, event.position) else {
             return false;
         };
-        if let Err(error) = open_link(&link.url) {
-            self.say_in_strip(format!("couldn't open {}: {error}", link.url), true, cx);
-        }
+        self.open_link_url(&link.url, cx);
         true
+    }
+
+    pub(super) fn open_link_url(&mut self, url: &str, cx: &mut Context<Self>) {
+        if let Err(error) = open_link(url) {
+            self.say_in_strip(format!("couldn't open {url}: {error}"), true, cx);
+        }
     }
 
     pub(super) fn pane_link_hovered(&self, pane_id: PaneId) -> bool {
@@ -409,6 +420,16 @@ mod tests {
 
     fn at(column: u16, row: u16) -> TerminalPoint {
         TerminalPoint { column, row }
+    }
+
+    #[test]
+    fn a_copied_file_link_is_its_path() {
+        assert_eq!(
+            link_text("file://mac.local/Users/r/a b.txt"),
+            "/Users/r/a b.txt"
+        );
+        assert_eq!(link_text("file:///tmp/x"), "/tmp/x");
+        assert_eq!(link_text("https://example.com/a"), "https://example.com/a");
     }
 
     #[test]

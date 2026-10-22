@@ -2,7 +2,7 @@
 //!
 //! What can be done to the pane, each beside the keys that do it, as a Mac
 //! app's context menu offers: copy and paste, splits, zoom, clear, find and
-//! close. A program that takes the mouse, such as an editor, gets the click
+//! close, and on a link, opening or copying it. A program that takes the mouse, such as an editor, gets the click
 //! instead, unless Shift is held. Escape, a click elsewhere or a key that
 //! isn't the menu's puts it away.
 
@@ -15,6 +15,8 @@ const RULE_GAP: f32 = 9.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Item {
+    OpenLink,
+    CopyLink,
     Copy,
     Paste,
     SelectAll,
@@ -29,6 +31,8 @@ enum Item {
 pub(super) struct PaneMenu {
     pane_id: PaneId,
     position: gpui::Point<gpui::Pixels>,
+    /// The link that was right-clicked, if one was.
+    link: Option<String>,
     /// The item the keys or the pointer are on.
     chosen: Option<usize>,
 }
@@ -44,10 +48,19 @@ struct Line {
 }
 
 impl MuxApp {
-    pub(super) fn open_pane_menu(&mut self, pane_id: PaneId, position: gpui::Point<gpui::Pixels>) {
+    pub(super) fn open_pane_menu(
+        &mut self,
+        pane_id: PaneId,
+        rect: layout::Rect,
+        position: gpui::Point<gpui::Pixels>,
+    ) {
+        let link = self
+            .link_under(pane_id, rect, position)
+            .map(|link| link.url);
         self.pane_menu = Some(PaneMenu {
             pane_id,
             position,
+            link,
             chosen: None,
         });
     }
@@ -56,7 +69,8 @@ impl MuxApp {
         self.pane_menu.is_some()
     }
 
-    fn pane_menu_lines(&self, pane_id: PaneId) -> Vec<Line> {
+    fn pane_menu_lines(&self, menu: &PaneMenu) -> Vec<Line> {
+        let pane_id = menu.pane_id;
         let zoomed = self
             .session
             .as_ref()
@@ -74,13 +88,22 @@ impl MuxApp {
             enabled,
             rule_above,
         };
-        vec![
+        let mut lines = Vec::new();
+        if let Some(url) = &menu.link {
+            let file = url.starts_with("file://");
+            let open = if file { "show in Finder" } else { "open link" };
+            let copy = if file { "copy path" } else { "copy link" };
+            lines.push(line(Item::OpenLink, open, "⌘click", true, false));
+            lines.push(line(Item::CopyLink, copy, "", true, false));
+        }
+        let linked = !lines.is_empty();
+        lines.extend([
             line(
                 Item::Copy,
                 "copy",
                 "⌘c",
                 self.selected_text().is_some(),
-                false,
+                linked,
             ),
             line(Item::Paste, "paste", "⌘v", true, false),
             line(Item::SelectAll, "select all", "⌘a", true, false),
@@ -96,12 +119,33 @@ impl MuxApp {
             line(Item::Clear, "clear", "⌘k", true, true),
             line(Item::Find, "find…", "⌘f", true, false),
             line(Item::Close, "close pane", "⌘w", true, true),
-        ]
+        ]);
+        lines
     }
 
     fn run_pane_menu_item(&mut self, item: Item, window: &mut Window, cx: &mut Context<Self>) {
-        self.pane_menu = None;
+        let link = self.pane_menu.take().and_then(|menu| menu.link);
         match item {
+            Item::OpenLink => {
+                if let Some(url) = link {
+                    self.open_link_url(&url, cx);
+                }
+            }
+            Item::CopyLink => {
+                if let Some(url) = link
+                    && let Some(clipboard) = &mut self.clipboard
+                    && clipboard
+                        .set_text(links::link_text(&url).to_owned())
+                        .is_ok()
+                {
+                    let what = if url.starts_with("file://") {
+                        "copied the path"
+                    } else {
+                        "copied the link"
+                    };
+                    self.say_in_strip(what, false, cx);
+                }
+            }
             Item::Copy => self.copy_selection(cx),
             Item::Paste => self.paste_clipboard(cx),
             Item::SelectAll => self.select_all(),
@@ -138,7 +182,7 @@ impl MuxApp {
         let Some(menu) = &self.pane_menu else {
             return false;
         };
-        let lines = self.pane_menu_lines(menu.pane_id);
+        let lines = self.pane_menu_lines(menu);
         let enabled = lines
             .iter()
             .enumerate()
@@ -197,7 +241,7 @@ impl MuxApp {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let menu = self.pane_menu.as_ref()?;
-        let lines = self.pane_menu_lines(menu.pane_id);
+        let lines = self.pane_menu_lines(menu);
         let rules = lines.iter().filter(|line| line.rule_above).count();
         #[allow(clippy::cast_precision_loss)]
         let height =

@@ -3506,7 +3506,7 @@ impl MuxApp {
                 self.begin_cursor_click(pane_id, rect, event);
                 self.begin_selection(pane_id, rect, event);
             }
-            gpui::MouseButton::Right => self.open_pane_menu(pane_id, event.position),
+            gpui::MouseButton::Right => self.open_pane_menu(pane_id, rect, event.position),
             _ => {}
         }
     }
