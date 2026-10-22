@@ -211,7 +211,7 @@ where its cursor is with a faint hollow block, as Ghostty does; so does the
 pane with them while Mux is behind other windows. The cursor
 wears the tab's ink unless your own Ghostty config sets `cursor-color` (and
 `cursor-text` for the letter under a block); a theme's are left to the
-tab.
+tab. `cursor-opacity` (0 to 1) lets the text show through it.
 
 At a zsh or bash prompt the cursor is a blinking bar, and the program's own
 while a command runs, as Ghostty's shell integration has it;

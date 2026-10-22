@@ -401,10 +401,12 @@ fn parse_clipboard_write(contents: &str, allowed: &mut bool) {
 /// The cursor's colours the user's own Ghostty config sets with
 /// `cursor-color` and `cursor-text`. A theme's are left out, so the cursor
 /// keeps the tab's ink unless the user picked one themselves.
+/// `cursor-opacity` is kept in hundredths, unset meaning solid.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CursorColors {
     pub cursor: Option<Rgb>,
     pub text: Option<Rgb>,
+    pub opacity: Option<u8>,
 }
 
 #[must_use]
@@ -418,11 +420,20 @@ pub fn user_cursor_colors() -> CursorColors {
     colors
 }
 
+// The opacity is clamped to 0..=1 before it becomes hundredths.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn parse_cursor_colors(contents: &str, colors: &mut CursorColors) {
     for (key, value) in contents.lines().filter_map(parse_config_entry) {
         match key.as_str() {
             "cursor-color" => colors.cursor = parse_rgb(&value),
             "cursor-text" => colors.text = parse_rgb(&value),
+            "cursor-opacity" => {
+                colors.opacity = value
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|opacity| opacity.is_finite())
+                    .map(|opacity| (opacity.clamp(0.0, 1.0) * 100.0).round() as u8);
+            }
             _ => {}
         }
     }
@@ -4224,6 +4235,12 @@ mod theme_tests {
         );
         parse_cursor_colors("cursor-color =\n", &mut colors);
         assert_eq!(colors.cursor, None);
+        parse_cursor_colors("cursor-opacity = 0.4\n", &mut colors);
+        assert_eq!(colors.opacity, Some(40));
+        parse_cursor_colors("cursor-opacity = 7\n", &mut colors);
+        assert_eq!(colors.opacity, Some(100));
+        parse_cursor_colors("cursor-opacity =\n", &mut colors);
+        assert_eq!(colors.opacity, None);
     }
 
     #[test]

@@ -575,7 +575,11 @@ fn paint_cursor(
     under_text: bool,
     window: &mut Window,
 ) {
-    let ink = cursor_colors().cursor.map_or(chrome.cursor, terminal_color);
+    let colors = cursor_colors();
+    let ink = colors.cursor.map_or(chrome.cursor, terminal_color);
+    let opacity = colors
+        .opacity
+        .map_or(1.0, |hundredths| f32::from(hundredths) / 100.0);
     let hollow = chrome.hollow_cursor;
     let Some(mut cursor) = frame
         .cursor
@@ -599,7 +603,7 @@ fn paint_cursor(
         ),
         size(px(metrics.cell_width), px(metrics.cell_height)),
     );
-    let cursor_color = ink.alpha(if focused { 0.88 } else { 0.5 });
+    let cursor_color = ink.alpha(if focused { 0.88 } else { 0.5 } * opacity);
     let cursor_bounds = match cursor.style {
         CursorStyle::Block => cell_bounds,
         CursorStyle::HollowBlock => {
