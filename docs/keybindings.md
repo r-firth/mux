@@ -202,7 +202,8 @@ A pane shows the cursor your Ghostty does: `cursor-style` in its config
 that picks its own cursor, as Vim does in insert mode, still gets it, and the
 pane goes back to yours when the program resets it. The letter under a
 block reads in the background's colour, and a pane without the keys marks
-where its cursor is with a faint hollow block, as Ghostty does. The cursor
+where its cursor is with a faint hollow block, as Ghostty does; so does the
+pane with them while Mux is behind other windows. The cursor
 wears the tab's ink unless your own Ghostty config sets `cursor-color` (and
 `cursor-text` for the letter under a block); a theme's are left to the
 tab.

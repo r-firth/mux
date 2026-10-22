@@ -5583,8 +5583,12 @@ impl MuxApp {
         &mut self,
         geometry: layout::PaneGeometry,
         opacity: f32,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<Entity<gpui_terminal::TerminalView>> {
+        // Behind other windows the pane with the keys shows a hollow
+        // cursor, as in Ghostty.
+        let has_keys = geometry.focused && window.is_window_active();
         let pane_id = geometry.pane_id;
         let pane = self.panes.get(&pane_id)?;
         let props = gpui_terminal::TerminalProps {
@@ -5592,7 +5596,7 @@ impl MuxApp {
             font_family: self.terminal_font.clone(),
             metrics: self.metrics,
             // A dead shell has no cursor to show.
-            focused: geometry.focused && !self.pane_has_exited(pane_id) && self.cursor_lit(pane_id),
+            focused: has_keys && !self.pane_has_exited(pane_id) && self.cursor_lit(pane_id),
             chrome: gpui_terminal::TerminalChrome {
                 surface: color(SURFACE),
                 cursor: self.active_ink().color(),
@@ -5600,7 +5604,7 @@ impl MuxApp {
                 selection_text: self.ghostty_theme.selection_foreground,
                 // A blink's dark half shows nothing, and a dead shell has
                 // no cursor at all.
-                hollow_cursor: !geometry.focused && !self.pane_has_exited(pane_id),
+                hollow_cursor: !has_keys && !self.pane_has_exited(pane_id),
             },
             marks: self
                 .quick_select_marks(pane_id)
@@ -5825,7 +5829,7 @@ impl Render for MuxApp {
                 let (frame, focused) = (geometry.frame, geometry.focused);
                 root = root.child(self.render_agent_pane(pane_id, frame, focused, window, cx));
             } else {
-                if let Some(terminal) = self.terminal_view(geometry, shown, cx) {
+                if let Some(terminal) = self.terminal_view(geometry, shown, window, cx) {
                     shown_terminals.insert(pane_id);
                     root = root.child(self.render_terminal_pane(geometry, shown, terminal, cx));
                 }
