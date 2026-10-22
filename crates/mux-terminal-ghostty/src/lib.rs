@@ -535,6 +535,34 @@ fn parse_inherit_working_directory(contents: &str, inherit: &mut Inherit) {
     }
 }
 
+/// Whether a new tab opens just after the current one: Ghostty's
+/// `window-new-tab-position = current`. Mux puts new tabs at the end unless
+/// the user's config asks for that.
+#[must_use]
+pub fn user_new_tab_after_current() -> bool {
+    let mut after = false;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_new_tab_position(&contents, &mut after);
+            }
+        }
+    }
+    after
+}
+
+fn parse_new_tab_position(contents: &str, after: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "window-new-tab-position" {
+            match value.as_str() {
+                "current" => *after = true,
+                "" | "end" => *after = false,
+                _ => {}
+            }
+        }
+    }
+}
+
 /// The least contrast text keeps against its background: Ghostty's
 /// `minimum-contrast`, from 1 (none asked, the default) to 21 (black on
 /// white).
@@ -4097,6 +4125,17 @@ mod theme_tests {
         assert_eq!(inherit.tab, None);
         parse_inherit_working_directory("window-inherit-working-directory =\n", &mut inherit);
         assert_eq!(inherit.window, None);
+    }
+
+    #[test]
+    fn new_tabs_open_after_the_current_one_only_when_asked() {
+        let mut after = false;
+        parse_new_tab_position("window-new-tab-position = current\n", &mut after);
+        assert!(after);
+        parse_new_tab_position("window-new-tab-position = sideways\n", &mut after);
+        assert!(after);
+        parse_new_tab_position("window-new-tab-position = end\n", &mut after);
+        assert!(!after);
     }
 
     #[test]

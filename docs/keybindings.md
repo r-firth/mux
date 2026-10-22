@@ -74,6 +74,8 @@ A new split or tab starts in the focused pane's directory, unless your
 Ghostty config sets `window-inherit-working-directory = false` (or
 `split-inherit-working-directory` / `tab-inherit-working-directory` for one
 of them): then it starts where Mux was started.
+A new tab goes at the end of the strip, or just after the current one with
+`window-new-tab-position = current`.
 
 ## Mac shortcuts
 

@@ -644,7 +644,12 @@ impl SessionRuntime {
                 let session_id = self.model.read().id;
                 let pane_id = PaneId::new();
                 let pane = self.spawn_new_pane(session_id, pane_id, replay_bytes, false)?;
-                if let Err(error) = self.model.write().add_tab(pane_id) {
+                let added = if new_tab_after_current() {
+                    self.model.write().add_tab_after_active(pane_id)
+                } else {
+                    self.model.write().add_tab(pane_id)
+                };
+                if let Err(error) = added {
                     let _ = pane.kill();
                     return Err(error.into());
                 }
@@ -838,6 +843,19 @@ fn inherit_working_directory(split: bool) -> bool {
         true
     }
 }
+/// Whether a new tab opens just after the current one, as the user's Ghostty
+/// config may ask; otherwise it goes at the end of the strip.
+fn new_tab_after_current() -> bool {
+    #[cfg(feature = "ghostty")]
+    {
+        mux_terminal_ghostty::user_new_tab_after_current()
+    }
+    #[cfg(not(feature = "ghostty"))]
+    {
+        false
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use std::time::{Duration, Instant};
