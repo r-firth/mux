@@ -1787,6 +1787,19 @@ impl MuxApp {
         Ok(())
     }
 
+    /// What a pane of the tab on screen hidden behind the zoomed pane
+    /// `shown` has called, if any has.
+    fn hidden_call(&self, shown: PaneId) -> Option<String> {
+        let tab = self.session.as_ref()?.active_tab()?;
+        let mut panes = Vec::new();
+        tab.layout.pane_ids(&mut panes);
+        panes
+            .iter()
+            .filter(|pane_id| **pane_id != shown)
+            .find_map(|pane_id| self.pane_call(*pane_id))
+            .map(|call| pane_calls::call_words(call).to_owned())
+    }
+
     /// The way across the focused pane's longer side: side by side for a
     /// wide pane, one above the other for a tall one.
     fn longer_axis(&self) -> mux_workspace::SplitAxis {
@@ -5307,6 +5320,17 @@ impl MuxApp {
         }
         if zoomed {
             head = head.child(div().flex_none().text_color(ink.color()).child("zoom"));
+            // The panes the zoom hides have no heads of their own to say
+            // they called.
+            if let Some(said) = self.hidden_call(pane_id) {
+                head = head.child(
+                    div()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .text_color(color(SIGNAL))
+                        .child(format!("· behind: {said}")),
+                );
+            }
         }
         if synced {
             head = head.child(div().flex_none().text_color(ink.color()).child("sync"));

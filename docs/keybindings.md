@@ -390,6 +390,9 @@ it off (`never`) or on for the pane you are looking at too (`always`).
 While Mux is in the background, the first call also bounces its Dock icon.
 A bell in the pane you are looking at flashes it for a moment in the tab's
 ink instead.
+While a pane is zoomed, what a pane hidden behind it says shows in the
+zoomed pane's head (`zoom · behind: tests passed`), since the hidden pane
+has no head on screen.
 
 `Cmd+J` goes to the pane that called last and hasn't been looked at, in
 whatever tab it is, or failing that to an agent in another tab waiting for
