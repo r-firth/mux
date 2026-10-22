@@ -24,6 +24,23 @@ const BASH_PROMPT_COMMAND: &str = concat!(
 
 /// Where a command starts, printed from bash's PS0.
 const BASH_COMMAND_START: &str = r"\e]133;C\a";
+/// The prompt's blinking bar cursor, and the program's own cursor back as
+/// a command starts, as Ghostty's shell integration does.
+const BASH_PROMPT_CURSOR: &str = r"builtin printf '\033[5 q'; ";
+const BASH_COMMAND_CURSOR: &str = r"\e[0 q";
+
+/// Whether the prompt shows a bar cursor: Ghostty's `cursor` shell
+/// integration feature, on unless the user's Ghostty config turns it off.
+fn prompt_cursor() -> bool {
+    #[cfg(feature = "ghostty")]
+    {
+        mux_terminal_ghostty::user_prompt_cursor()
+    }
+    #[cfg(not(feature = "ghostty"))]
+    {
+        true
+    }
+}
 
 static ROOT: OnceLock<PathBuf> = OnceLock::new();
 
@@ -69,19 +86,33 @@ pub fn environment(program: &Path) -> Vec<(OsString, OsString)> {
             if let Some(user) = std::env::var_os("ZDOTDIR") {
                 environment.push((OsString::from("MUX_USER_ZDOTDIR"), user));
             }
+            if prompt_cursor() {
+                environment.push((OsString::from("MUX_PROMPT_CURSOR"), OsString::from("1")));
+            }
             environment
         }
         Some("bash") => {
+            let cursor = prompt_cursor();
+            let ours = if cursor {
+                BASH_PROMPT_COMMAND.replacen(
+                    "__mux_status=$?; ",
+                    &format!("__mux_status=$?; {BASH_PROMPT_CURSOR}"),
+                    1,
+                )
+            } else {
+                BASH_PROMPT_COMMAND.to_owned()
+            };
             let command = match std::env::var("PROMPT_COMMAND") {
-                Ok(own) if !own.trim().is_empty() => format!("{BASH_PROMPT_COMMAND}; {own}"),
-                _ => BASH_PROMPT_COMMAND.to_owned(),
+                Ok(own) if !own.trim().is_empty() => format!("{ours}; {own}"),
+                _ => ours,
             };
             // PS0 prints as a command starts (bash 4.4 and later), so an
             // empty line is told from a command and a command can be timed.
-            let start = match std::env::var("PS0") {
-                Ok(own) => format!("{BASH_COMMAND_START}{own}"),
-                Err(_) => BASH_COMMAND_START.to_owned(),
-            };
+            let start = format!(
+                "{BASH_COMMAND_START}{}{}",
+                if cursor { BASH_COMMAND_CURSOR } else { "" },
+                std::env::var("PS0").unwrap_or_default()
+            );
             vec![
                 (OsString::from("PROMPT_COMMAND"), OsString::from(command)),
                 (OsString::from("PS0"), OsString::from(start)),

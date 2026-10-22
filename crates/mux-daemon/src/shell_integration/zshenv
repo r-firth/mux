@@ -13,6 +13,10 @@ fi
 if [[ -o interactive ]]; then
   autoload -Uz add-zsh-hook
   typeset -g _mux_command_running=
+  # A blinking bar at the prompt and the program's own cursor while a
+  # command runs, as Ghostty's shell integration does.
+  typeset -g _mux_prompt_cursor="${MUX_PROMPT_CURSOR-}"
+  unset MUX_PROMPT_CURSOR
   _mux_precmd() {
     local exit_status=$?
     if [[ -n "$_mux_command_running" ]]; then
@@ -20,10 +24,12 @@ if [[ -o interactive ]]; then
     fi
     _mux_command_running=
     builtin print -n "\e]133;A\a"
+    if [[ -n "$_mux_prompt_cursor" ]]; then builtin print -n "\e[5 q"; fi
   }
   _mux_preexec() {
     _mux_command_running=1
     builtin print -n "\e]133;C\a"
+    if [[ -n "$_mux_prompt_cursor" ]]; then builtin print -n "\e[0 q"; fi
   }
   add-zsh-hook precmd _mux_precmd
   add-zsh-hook preexec _mux_preexec

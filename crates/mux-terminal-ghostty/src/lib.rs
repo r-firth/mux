@@ -425,6 +425,40 @@ fn parse_focus_follows_mouse(contents: &str, follows: &mut bool) {
     }
 }
 
+/// Whether the shell's prompt shows a blinking bar cursor, as Ghostty's
+/// shell integration does unless `shell-integration-features` says
+/// `no-cursor` (or `shell-integration = none` turns it all off).
+#[must_use]
+pub fn user_prompt_cursor() -> bool {
+    let mut bar = true;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_prompt_cursor(&contents, &mut bar);
+            }
+        }
+    }
+    bar
+}
+
+fn parse_prompt_cursor(contents: &str, bar: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        match key.as_str() {
+            "shell-integration" if value == "none" => *bar = false,
+            "shell-integration-features" => {
+                for feature in value.split(',').map(str::trim) {
+                    match feature {
+                        "cursor" => *bar = true,
+                        "no-cursor" => *bar = false,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Whether a plain click on the line being typed at a shell's prompt moves
 /// the cursor there: `cursor-click-to-move` from the user's Ghostty config,
 /// on by default as in Ghostty.
@@ -3710,6 +3744,17 @@ mod theme_tests {
         assert!(follows);
         parse_focus_follows_mouse("focus-follows-mouse =\n", &mut follows);
         assert!(!follows);
+    }
+
+    #[test]
+    fn the_prompt_cursor_unless_turned_off() {
+        let mut bar = true;
+        parse_prompt_cursor("shell-integration-features = sudo,no-cursor\n", &mut bar);
+        assert!(!bar);
+        parse_prompt_cursor("shell-integration-features = cursor\n", &mut bar);
+        assert!(bar);
+        parse_prompt_cursor("shell-integration = none\n", &mut bar);
+        assert!(!bar);
     }
 
     #[test]
