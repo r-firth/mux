@@ -9,8 +9,9 @@ const BLINK: Duration = Duration::from_millis(600);
 
 /// The user's `cursor-style-blink`.
 pub(super) fn cursor_blink_setting() -> Option<bool> {
-    static BLINK_SETTING: OnceLock<Option<bool>> = OnceLock::new();
-    *BLINK_SETTING.get_or_init(mux_terminal_ghostty::user_cursor_blink)
+    static BLINK_SETTING: ghostty_config::Reloadable<Option<bool>> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_cursor_blink);
+    BLINK_SETTING.get()
 }
 
 impl MuxApp {

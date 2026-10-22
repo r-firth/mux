@@ -402,6 +402,10 @@ and the font and theme Mux took from it.
 | Space or Return | Turn it on or off; the change is saved at once |
 | `o` | Show `settings.json` in Finder |
 | `g` | Show the Ghostty config Mux reads in Finder |
+
+`Cmd+Shift+,` reloads the Ghostty config, as it does in Ghostty: colours,
+font, cursor, padding and the rest take effect in every pane at once, and
+the text size goes back to the config's. It is in the Mux menu too.
 | Escape or `Cmd+,` | Close the sheet |
 
 The sheet reads `settings.json` each time it opens, so agents added by hand

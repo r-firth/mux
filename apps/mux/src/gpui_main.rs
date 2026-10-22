@@ -12,6 +12,7 @@ mod cursor_blink;
 mod cursor_click;
 mod file_drop;
 mod find;
+mod ghostty_config;
 mod gpui_terminal;
 mod ground;
 mod ime;
@@ -42,8 +43,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use agent_completion::{
@@ -190,6 +191,7 @@ gpui::actions!(
         FindSelection,
         OpenMuxPalette,
         OpenMuxSettings,
+        ReloadMuxConfig,
         OpenQuickSelect,
         PreviousAgentChoice,
         PreviousMuxTab,
@@ -414,67 +416,74 @@ impl PaneReplica {
 /// Ghostty does. The daemon keeps less, so a pane restored from it starts
 /// with the daemon's share and grows from there while the window has it.
 fn pane_history_bytes() -> usize {
-    static LIMIT: OnceLock<usize> = OnceLock::new();
-    *LIMIT.get_or_init(mux_terminal_ghostty::user_history_limit)
+    static LIMIT: ghostty_config::Reloadable<usize> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_history_limit);
+    LIMIT.get()
 }
 
 /// The cursor a pane shows until its program picks one, as in the user's
 /// Ghostty.
 fn pane_cursor_style() -> mux_terminal::CursorStyle {
-    static STYLE: OnceLock<mux_terminal::CursorStyle> = OnceLock::new();
-    *STYLE.get_or_init(mux_terminal_ghostty::user_cursor_style)
+    static STYLE: ghostty_config::Reloadable<mux_terminal::CursorStyle> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_cursor_style);
+    STYLE.get()
 }
 
 /// How much of an unfocused split shows through, as in the user's Ghostty.
 fn unfocused_split_opacity() -> f32 {
-    static OPACITY: OnceLock<f32> = OnceLock::new();
-    *OPACITY.get_or_init(mux_terminal_ghostty::user_unfocused_split_opacity)
+    static OPACITY: ghostty_config::Reloadable<f32> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_unfocused_split_opacity);
+    OPACITY.get()
 }
 
 /// Whether programs may copy to the clipboard, as in the user's Ghostty.
 fn clipboard_write_allowed() -> bool {
-    static ALLOWED: OnceLock<bool> = OnceLock::new();
-    *ALLOWED.get_or_init(mux_terminal_ghostty::user_clipboard_write)
+    static ALLOWED: ghostty_config::Reloadable<bool> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_clipboard_write);
+    ALLOWED.get()
 }
 
 /// Whether the pane under the pointer takes the keys, as in the user's
 /// Ghostty.
 fn focus_follows_mouse() -> bool {
-    static FOLLOWS: OnceLock<bool> = OnceLock::new();
-    *FOLLOWS.get_or_init(mux_terminal_ghostty::user_focus_follows_mouse)
+    static FOLLOWS: ghostty_config::Reloadable<bool> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_focus_follows_mouse);
+    FOLLOWS.get()
 }
 
 /// Whether a selection goes on the clipboard as it is made, as in the
 /// user's Ghostty.
 fn copy_on_select() -> bool {
-    static COPIES: OnceLock<bool> = OnceLock::new();
-    *COPIES.get_or_init(mux_terminal_ghostty::user_copy_on_select)
+    static COPIES: ghostty_config::Reloadable<bool> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_copy_on_select);
+    COPIES.get()
 }
 
 /// The grid for `font_family` at `size`, its rows as tall as the user's
 /// Ghostty makes them with `adjust-cell-height`.
 fn terminal_metrics(font_family: &str, size: f32, cx: &App) -> GridMetrics {
-    static ADJUST: OnceLock<mux_terminal_ghostty::CellAdjust> = OnceLock::new();
-    static PADDING: OnceLock<(f32, f32)> = OnceLock::new();
+    static ADJUST: ghostty_config::Reloadable<mux_terminal_ghostty::CellAdjust> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_cell_height_adjust);
+    static PADDING: ghostty_config::Reloadable<(f32, f32)> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_window_padding);
     let mut metrics = GridMetrics::from_font(font_family, size, cx.text_system());
-    metrics.cell_height = ADJUST
-        .get_or_init(mux_terminal_ghostty::user_cell_height_adjust)
-        .apply(metrics.cell_height);
-    (metrics.padding_x, metrics.padding_y) =
-        *PADDING.get_or_init(mux_terminal_ghostty::user_window_padding);
+    metrics.cell_height = ADJUST.get().apply(metrics.cell_height);
+    (metrics.padding_x, metrics.padding_y) = PADDING.get();
     metrics
 }
 
 /// How far the wheel scrolls, as in the user's Ghostty.
 fn scroll_multiplier() -> mux_terminal_ghostty::ScrollMultiplier {
-    static MULTIPLIER: OnceLock<mux_terminal_ghostty::ScrollMultiplier> = OnceLock::new();
-    *MULTIPLIER.get_or_init(mux_terminal_ghostty::user_scroll_multiplier)
+    static MULTIPLIER: ghostty_config::Reloadable<mux_terminal_ghostty::ScrollMultiplier> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_scroll_multiplier);
+    MULTIPLIER.get()
 }
 
 /// When closing asks first, as in the user's Ghostty.
 fn close_confirm() -> mux_terminal_ghostty::CloseConfirm {
-    static CONFIRM: OnceLock<mux_terminal_ghostty::CloseConfirm> = OnceLock::new();
-    *CONFIRM.get_or_init(mux_terminal_ghostty::user_close_confirm)
+    static CONFIRM: ghostty_config::Reloadable<mux_terminal_ghostty::CloseConfirm> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_close_confirm);
+    CONFIRM.get()
 }
 
 fn restore_pane_replica(
@@ -3814,8 +3823,9 @@ impl MuxApp {
         cx: &mut Context<Self>,
     ) {
         use mux_terminal_ghostty::RightClick;
-        static ACTION: OnceLock<RightClick> = OnceLock::new();
-        match *ACTION.get_or_init(mux_terminal_ghostty::user_right_click) {
+        static ACTION: ghostty_config::Reloadable<RightClick> =
+            ghostty_config::Reloadable::new(mux_terminal_ghostty::user_right_click);
+        match ACTION.get() {
             RightClick::Menu => self.open_pane_menu(pane_id, rect, position),
             RightClick::Copy => self.copy_selection(cx),
             RightClick::CopyOrPaste if self.selected_text().is_some() => {
@@ -4851,6 +4861,9 @@ impl MuxApp {
         }))
         .on_action(cx.listener(|this, _: &EqualizeMuxPanes, window, cx| {
             this.run_shortcut(Action::EqualizePanes, window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &ReloadMuxConfig, _, cx| {
+            this.reload_ghostty_config(cx);
         }))
     }
 
@@ -6277,8 +6290,9 @@ fn mac_line_edit(keystroke: &gpui::Keystroke) -> Option<&'static [u8]> {
 /// Whether pastes that would run commands wait for a second ⌘V, as the
 /// user's Ghostty has it.
 fn paste_protection() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(mux_terminal_ghostty::user_paste_protection)
+    static ENABLED: ghostty_config::Reloadable<bool> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_paste_protection);
+    ENABLED.get()
 }
 
 /// Whether pasting `text`, encoded as `bytes`, would run something: it
@@ -6290,8 +6304,9 @@ fn paste_runs_lines(text: &str, bytes: &[u8]) -> bool {
 
 /// Whether Option is Meta for the shell, as the user's Ghostty has it.
 fn option_as_alt() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(mux_terminal_ghostty::user_option_as_alt)
+    static ENABLED: ghostty_config::Reloadable<bool> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_option_as_alt);
+    ENABLED.get()
 }
 
 /// Make an Option key type its plain character with Alt, so `Option+b`
@@ -6436,6 +6451,7 @@ fn configure_application_menu(cx: &mut App) {
             items: vec![
                 MenuItem::action("Go to…", OpenMuxPalette),
                 MenuItem::action("Settings…", OpenMuxSettings),
+                MenuItem::action("Reload Ghostty Config", ReloadMuxConfig),
                 MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
@@ -6528,7 +6544,17 @@ fn bind_mac_shortcuts(cx: &mut App) {
     ]);
 }
 
+/// ⌘⇧, reloads the Ghostty config, as in Ghostty; some keyboards report
+/// it as the shifted key, ⌘<.
+fn bind_reload_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-shift-,", ReloadMuxConfig, None),
+        KeyBinding::new("cmd-<", ReloadMuxConfig, None),
+    ]);
+}
+
 fn configure_application_actions(cx: &mut App) {
+    bind_reload_keys(cx);
     cx.on_action(quit_mux);
     cx.on_action(|_: &HideMux, cx| cx.hide());
     cx.on_action(|_: &HideOtherApps, cx| cx.hide_other_apps());

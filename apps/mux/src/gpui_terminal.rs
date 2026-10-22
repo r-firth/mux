@@ -171,7 +171,7 @@ struct CachedShapedRun {
 /// cache with the size of scrollback.
 #[derive(Default)]
 pub struct TerminalRenderCache {
-    font_key: Option<(String, u32)>,
+    font_key: Option<(String, u32, u64)>,
     generation: u64,
     shaped_runs: HashMap<ShapedRunKey, CachedShapedRun>,
 }
@@ -179,13 +179,17 @@ pub struct TerminalRenderCache {
 impl TerminalRenderCache {
     fn begin_frame(&mut self, font_family: &str, font_size: f32) {
         let font_size = font_size.to_bits();
+        // A reloaded config may have changed the font's features.
+        let generation = crate::ghostty_config::generation();
         if !self
             .font_key
             .as_ref()
-            .is_some_and(|(family, size)| family == font_family && *size == font_size)
+            .is_some_and(|(family, size, read_at)| {
+                family == font_family && *size == font_size && *read_at == generation
+            })
         {
             self.shaped_runs.clear();
-            self.font_key = Some((font_family.to_owned(), font_size));
+            self.font_key = Some((font_family.to_owned(), font_size, generation));
         }
         if self.generation == u64::MAX {
             self.shaped_runs.clear();
@@ -641,14 +645,13 @@ fn effective_background(cell: &RenderCell) -> Rgb {
 
 /// The OpenType features the user's Ghostty sets for its font.
 fn terminal_font_features() -> gpui::FontFeatures {
-    static FEATURES: std::sync::OnceLock<gpui::FontFeatures> = std::sync::OnceLock::new();
-    FEATURES
-        .get_or_init(|| {
+    static FEATURES: crate::ghostty_config::Reloadable<gpui::FontFeatures> =
+        crate::ghostty_config::Reloadable::new(|| {
             gpui::FontFeatures(std::sync::Arc::new(
                 mux_terminal_ghostty::user_font_features(),
             ))
-        })
-        .clone()
+        });
+    FEATURES.get()
 }
 
 fn terminal_color(color: Rgb) -> Hsla {
