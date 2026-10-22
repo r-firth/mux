@@ -4673,9 +4673,22 @@ impl MuxApp {
         // A pane with nothing sitting in its head wears a legend instead: the
         // same words, small, set into the slab's top edge.
         let legend = geometry.legended();
+        let pane_id = geometry.pane_id;
         let mut head = h_flex()
+            .id(SharedString::from(format!("pane-head-{pane_id}")))
             .flex_none()
             .items_center()
+            // A double click on a terminal pane's head names the pane.
+            .when(!agent_pane, |head| {
+                head.on_click(
+                    cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                        if event.click_count() == 2 {
+                            this.request_pane_focus(pane_id);
+                            this.open_rename_pane(window, cx);
+                        }
+                    }),
+                )
+            })
             .map(|head| {
                 if legend {
                     head.absolute()

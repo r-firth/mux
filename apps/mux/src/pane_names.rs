@@ -34,7 +34,7 @@ impl MuxApp {
 
     /// Name the focused terminal pane in its head.
     pub(super) fn open_rename_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pane_id) = self.focused_pane_id() else {
+        let Some(pane_id) = self.terminal_input_pane_id() else {
             return;
         };
         if self.active_agent_pane() == Some(pane_id) {

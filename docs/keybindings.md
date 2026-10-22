@@ -69,7 +69,8 @@ from an agent pane too. They are in the menu bar's Shell and Window menus.
 A named pane's head shows its name, `server` or `logs`, with what its shell
 says beside it, and a tab without a name of its own goes by its focused
 pane's name. The name stays with the pane when it moves to another tab and
-after a restart. Clearing it hands the head back to the shell.
+after a restart. Clearing it hands the head back to the shell. Double-click
+a pane's head to name it with the mouse.
 
 ## Resize mode
 
