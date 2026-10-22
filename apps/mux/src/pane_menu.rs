@@ -2,7 +2,7 @@
 //!
 //! What can be done to the pane, each beside the keys that do it, as a Mac
 //! app's context menu offers: copy and paste, splits, zoom, evening out,
-//! naming the pane or moving it to a tab of its own, clear, find and close;
+//! naming the pane or moving it to a tab of its own, clear, find, showing its directory and close;
 //! on a link, opening or copying it; and on a command or what it printed,
 //! when the shell marks its prompts, copying the command, its output, or both. A
 //! program that takes the mouse, such as an editor, gets the click instead,
@@ -35,6 +35,7 @@ enum Item {
     Clear,
     Find,
     OpenHistory,
+    RevealDirectory,
     Close,
     RenameTab,
     TabInk,
@@ -234,6 +235,13 @@ impl MuxApp {
             line(Item::Clear, "clear", "⌘k", true, true),
             line(Item::Find, "find…", "⌘f", true, false),
             line(Item::OpenHistory, "open history in editor", "", true, false),
+            line(
+                Item::RevealDirectory,
+                "show directory in Finder",
+                "",
+                true,
+                false,
+            ),
             line(Item::Close, "close pane", "⌘w", true, true),
         ]);
         lines
@@ -326,6 +334,11 @@ impl MuxApp {
             Item::OpenHistory => {
                 if let Some(pane_id) = pane_id {
                     self.open_history_in_editor(pane_id, cx);
+                }
+            }
+            Item::RevealDirectory => {
+                if let Some(pane_id) = pane_id {
+                    self.reveal_directory(pane_id);
                 }
             }
             Item::Close => self.run_shortcut(Action::ClosePane, window, cx),

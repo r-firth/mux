@@ -320,7 +320,8 @@ of its output, or both as a transcript (`$ make` and what it printed, to
 paste into an issue or a chat), when the shell marks its prompts; "open
 history in editor"
 writes all the pane holds, history and screen, to a text file and opens it
-in the system's text editor (also in `Cmd+P`). The arrows and Return
+in the system's text editor (also in `Cmd+P`). "show directory in Finder" opens the
+folder the pane's shell is in now (also in `Cmd+P`). The arrows and Return
 work it too; Escape or a click elsewhere puts it away. A program that takes
 the mouse, such as an editor, gets the click instead, unless Shift is held.
 

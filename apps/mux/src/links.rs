@@ -351,6 +351,14 @@ impl MuxApp {
         }
     }
 
+    /// Open the directory a pane's shell is in now, in Finder.
+    pub(super) fn reveal_directory(&self, pane_id: PaneId) {
+        self.backend.send(CommandMessage::RevealPath {
+            pane_id,
+            written: ".".to_owned(),
+        });
+    }
+
     pub(super) fn pane_link_hovered(&self, pane_id: PaneId) -> bool {
         self.link_hover
             .as_ref()

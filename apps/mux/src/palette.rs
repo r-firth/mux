@@ -95,6 +95,7 @@ enum Command {
     ActualSize,
     SelectOutput,
     OpenHistory,
+    RevealDirectory,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -378,6 +379,12 @@ impl MuxApp {
             Command::OpenHistory => {
                 if let Some(pane_id) = self.focused_pane_id() {
                     self.open_history_in_editor(pane_id, cx);
+                }
+                return;
+            }
+            Command::RevealDirectory => {
+                if let Some(pane_id) = self.focused_pane_id() {
+                    self.reveal_directory(pane_id);
                 }
                 return;
             }
@@ -777,7 +784,7 @@ impl MuxApp {
     /// What mux can do, each with the keys that do it and other words it
     /// answers to. Some say what they will do to the pane or tab on screen.
     #[allow(clippy::too_many_lines)] // One entry per command.
-    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 30] {
+    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 31] {
         let zoomed = self.active_tab_zoomed();
         let agent_here = self
             .active_agent_pane()
@@ -889,6 +896,12 @@ impl MuxApp {
                 "",
                 "open this pane's history in an editor",
                 "scrollback export save text file dump",
+            ),
+            (
+                Command::RevealDirectory,
+                "",
+                "show this pane's directory in Finder",
+                "reveal open folder cwd working",
             ),
             (
                 Command::GoToCall,
