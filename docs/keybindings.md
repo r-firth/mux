@@ -141,6 +141,11 @@ A pane shows the cursor your Ghostty does: `cursor-style` in its config
 that picks its own cursor, as Vim does in insert mode, still gets it, and the
 pane goes back to yours when the program resets it.
 
+Right-clicking a pane opens its menu, unless `right-click-action` in your
+Ghostty config says otherwise: `paste`, `copy`, `copy-or-paste` (copy what
+is selected and let go of it, or paste when nothing is), or `ignore`. A
+right-click on a link still opens the link's menu.
+
 A dead key (`Option+E` then `E` for é) or an input method (Japanese,
 Chinese, Korean) shows what it has composed so far at the cursor, underlined,
 and types the finished text into the pane. With Option as Meta, Option

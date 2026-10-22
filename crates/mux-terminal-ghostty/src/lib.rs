@@ -527,6 +527,49 @@ fn parse_scroll_multiplier(contents: &str, multiplier: &mut ScrollMultiplier) {
     }
 }
 
+/// What a right-click in a pane does: `right-click-action` from the user's
+/// Ghostty config.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RightClick {
+    /// Open the pane's menu, as in Ghostty by default.
+    #[default]
+    Menu,
+    Paste,
+    Copy,
+    /// Copy what is selected, or paste when nothing is.
+    CopyOrPaste,
+    Ignore,
+}
+
+/// The user's `right-click-action`.
+#[must_use]
+pub fn user_right_click() -> RightClick {
+    let mut action = RightClick::Menu;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_right_click(&contents, &mut action);
+            }
+        }
+    }
+    action
+}
+
+fn parse_right_click(contents: &str, action: &mut RightClick) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "right-click-action" {
+            *action = match value.as_str() {
+                "" | "context-menu" => RightClick::Menu,
+                "paste" => RightClick::Paste,
+                "copy" => RightClick::Copy,
+                "copy-or-paste" => RightClick::CopyOrPaste,
+                "ignore" => RightClick::Ignore,
+                _ => continue,
+            };
+        }
+    }
+}
+
 /// When closing a pane or tab asks first: `confirm-close-surface` from the
 /// user's Ghostty config.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -3280,6 +3323,23 @@ mod theme_tests {
         assert_eq!(features.len(), 4);
         parse_font_features("font-feature =\n", &mut features);
         assert!(features.is_empty());
+    }
+
+    #[test]
+    fn right_click_does_what_ghostty_is_told() {
+        let mut action = RightClick::Menu;
+        parse_right_click("right-click-action = copy-or-paste\n", &mut action);
+        assert_eq!(action, RightClick::CopyOrPaste);
+        parse_right_click("right-click-action = sideways\n", &mut action);
+        assert_eq!(
+            action,
+            RightClick::CopyOrPaste,
+            "an unknown action is ignored"
+        );
+        parse_right_click("right-click-action = ignore\n", &mut action);
+        assert_eq!(action, RightClick::Ignore);
+        parse_right_click("right-click-action =\n", &mut action);
+        assert_eq!(action, RightClick::Menu);
     }
 
     #[test]

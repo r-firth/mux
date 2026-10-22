@@ -3747,7 +3747,13 @@ impl MuxApp {
         }
     }
 
-    fn pointer_down(&mut self, pane_id: PaneId, rect: layout::Rect, event: &gpui::MouseDownEvent) {
+    fn pointer_down(
+        &mut self,
+        pane_id: PaneId,
+        rect: layout::Rect,
+        event: &gpui::MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
         self.request_pane_focus(pane_id);
         let button = terminal_mouse_button(event.button);
         if !event.modifiers.shift
@@ -3773,8 +3779,34 @@ impl MuxApp {
                 self.begin_cursor_click(pane_id, rect, event);
                 self.begin_selection(pane_id, rect, event);
             }
-            gpui::MouseButton::Right => self.open_pane_menu(pane_id, rect, event.position),
+            gpui::MouseButton::Right => self.right_click(pane_id, rect, event.position, cx),
             _ => {}
+        }
+    }
+
+    /// A right-click in a pane: its menu, or what the user's Ghostty has
+    /// right-click do instead.
+    fn right_click(
+        &mut self,
+        pane_id: PaneId,
+        rect: layout::Rect,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        use mux_terminal_ghostty::RightClick;
+        static ACTION: OnceLock<RightClick> = OnceLock::new();
+        match *ACTION.get_or_init(mux_terminal_ghostty::user_right_click) {
+            RightClick::Menu => self.open_pane_menu(pane_id, rect, position),
+            RightClick::Copy => self.copy_selection(cx),
+            RightClick::CopyOrPaste if self.selected_text().is_some() => {
+                self.copy_selection(cx);
+                // Let go of it, so the next right-click pastes.
+                if let Some(selected) = self.selected_pane {
+                    self.clear_selection_on_typing(selected);
+                }
+            }
+            RightClick::Paste | RightClick::CopyOrPaste => self.paste_clipboard(cx),
+            RightClick::Ignore => {}
         }
     }
 
@@ -5266,7 +5298,7 @@ impl MuxApp {
                         return;
                     }
                     this.focus_handle.focus(window, cx);
-                    this.pointer_down(pane_id, rect, event);
+                    this.pointer_down(pane_id, rect, event, cx);
                     cx.notify();
                 });
                 cx.stop_propagation();
