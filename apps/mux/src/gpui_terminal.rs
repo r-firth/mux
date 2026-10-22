@@ -362,6 +362,7 @@ pub fn terminal_canvas(
                 metrics,
                 &prepaint_marks,
                 chrome.selection_text,
+                block_cursor_cell(&prepaint_frame, focused),
                 window,
             )
         },
@@ -382,6 +383,7 @@ pub fn terminal_canvas(
     .size_full()
 }
 
+#[allow(clippy::too_many_arguments)] // Each is one thing the text's colour hangs on.
 fn prepare_runs(
     frame: &RenderFrame,
     cache: &Rc<RefCell<TerminalRenderCache>>,
@@ -389,6 +391,7 @@ fn prepare_runs(
     metrics: GridMetrics,
     marks: &TerminalMarks,
     selection_text: Option<Rgb>,
+    cursor_cell: Option<(usize, usize)>,
     window: &mut Window,
 ) -> PreparedTerminal {
     let columns = usize::from(frame.cols);
@@ -407,6 +410,11 @@ fn prepare_runs(
 
             let start = column;
             let foreground_at = |column: usize, cell: &RenderCell| {
+                // Under a block cursor the letter takes the background's
+                // colour, as Ghostty's default cursor-text, so it reads.
+                if cursor_cell == Some((row, column)) {
+                    return frame.background;
+                }
                 let foreground = match selection_text {
                     Some(text) if cell.selected => text,
                     _ => effective_foreground(cell),
@@ -525,6 +533,10 @@ fn paint_terminal(
 
     paint_marks(origin, metrics, marks, window);
 
+    // A block cursor goes under the text, whose letter there is drawn in
+    // the background's colour; the other shapes go over it.
+    paint_cursor(origin, metrics, frame, focused, chrome.cursor, true, window);
+
     for run in prepared.runs {
         let position = point(
             origin.x + px(metrics.cell_width) * run.column,
@@ -540,40 +552,74 @@ fn paint_terminal(
         );
     }
 
-    if focused
-        && let Some(cursor) = frame.cursor
-        && cursor.visible
-        && cursor.x < frame.cols
-        && cursor.y < frame.rows
-    {
-        let cell_bounds = Bounds::new(
-            point(
-                origin.x + px(metrics.cell_width) * usize::from(cursor.x),
-                origin.y + px(metrics.cell_height) * usize::from(cursor.y),
-            ),
-            size(px(metrics.cell_width), px(metrics.cell_height)),
-        );
-        let cursor_color = chrome.cursor.alpha(0.88);
-        let cursor_bounds = match cursor.style {
-            CursorStyle::Block => cell_bounds,
-            CursorStyle::HollowBlock => {
-                window.paint_quad(gpui::outline(
-                    cell_bounds,
-                    cursor_color,
-                    gpui::BorderStyle::Solid,
-                ));
-                return;
-            }
-            CursorStyle::Bar => {
-                Bounds::new(cell_bounds.origin, size(px(2.0), cell_bounds.size.height))
-            }
-            CursorStyle::Underline => Bounds::new(
-                point(cell_bounds.origin.x, cell_bounds.bottom() - px(2.0)),
-                size(cell_bounds.size.width, px(2.0)),
-            ),
-        };
-        window.paint_quad(fill(cursor_bounds, cursor_color));
-    }
+    paint_cursor(
+        origin,
+        metrics,
+        frame,
+        focused,
+        chrome.cursor,
+        false,
+        window,
+    );
+}
+
+/// Paint the cursor of a pane with the keys: a solid block `under_text`,
+/// the other shapes over it.
+fn paint_cursor(
+    origin: gpui::Point<Pixels>,
+    metrics: GridMetrics,
+    frame: &RenderFrame,
+    focused: bool,
+    ink: Hsla,
+    under_text: bool,
+    window: &mut Window,
+) {
+    let Some(cursor) = frame.cursor.filter(|cursor| {
+        focused
+            && cursor.visible
+            && cursor.x < frame.cols
+            && cursor.y < frame.rows
+            && (cursor.style == CursorStyle::Block) == under_text
+    }) else {
+        return;
+    };
+    let cell_bounds = Bounds::new(
+        point(
+            origin.x + px(metrics.cell_width) * usize::from(cursor.x),
+            origin.y + px(metrics.cell_height) * usize::from(cursor.y),
+        ),
+        size(px(metrics.cell_width), px(metrics.cell_height)),
+    );
+    let cursor_color = ink.alpha(0.88);
+    let cursor_bounds = match cursor.style {
+        CursorStyle::Block => cell_bounds,
+        CursorStyle::HollowBlock => {
+            window.paint_quad(gpui::outline(
+                cell_bounds,
+                cursor_color,
+                gpui::BorderStyle::Solid,
+            ));
+            return;
+        }
+        CursorStyle::Bar => Bounds::new(cell_bounds.origin, size(px(2.0), cell_bounds.size.height)),
+        CursorStyle::Underline => Bounds::new(
+            point(cell_bounds.origin.x, cell_bounds.bottom() - px(2.0)),
+            size(cell_bounds.size.width, px(2.0)),
+        ),
+    };
+    window.paint_quad(fill(cursor_bounds, cursor_color));
+}
+
+/// The row and column of a solid block cursor in a pane with the keys.
+fn block_cursor_cell(frame: &RenderFrame, focused: bool) -> Option<(usize, usize)> {
+    let cursor = frame.cursor.filter(|cursor| {
+        focused
+            && cursor.visible
+            && cursor.style == CursorStyle::Block
+            && cursor.x < frame.cols
+            && cursor.y < frame.rows
+    })?;
+    Some((usize::from(cursor.y), usize::from(cursor.x)))
 }
 
 /// Marks sit between the backgrounds and the text, a hair inside their row
