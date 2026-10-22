@@ -798,8 +798,8 @@ impl MuxApp {
             (
                 Command::ReopenTab,
                 "⌘⇧t",
-                "reopen the tab closed last",
-                "undo restore closed tab back",
+                "reopen the tab or pane closed last",
+                "undo restore closed tab pane split back",
             ),
             (
                 Command::RenamePane,

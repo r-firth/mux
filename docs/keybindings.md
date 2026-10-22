@@ -60,7 +60,7 @@ from an agent pane too. They are in the menu bar's Shell and Window menus.
 | Keys | Action |
 | --- | --- |
 | `Cmd+T` | Create a tab |
-| `Cmd+Shift+T` | Reopen the tab closed last, its splits and names, with a fresh shell in each pane's directory under what the pane showed |
+| `Cmd+Shift+T` | Reopen the tab or pane closed last: a tab with its splits and names, a pane beside the pane that took its room, each with a fresh shell in its directory under what it showed |
 | `Cmd+D` | Split to the right |
 | `Cmd+Shift+D` | Split downward |
 | `Cmd+Shift+Return` | Toggle focused-pane zoom |

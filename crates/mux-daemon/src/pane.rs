@@ -238,6 +238,8 @@ pub const HISTORY_RULE: &str = "── before Mux restarted ──";
 /// The rule under the text a pane of a reopened tab showed before the tab
 /// was closed.
 pub const CLOSED_RULE: &str = "── before the tab was closed ──";
+/// The rule under the text a reopened pane showed before it was closed.
+pub const CLOSED_PANE_RULE: &str = "── before the pane was closed ──";
 
 /// Text a pane showed before a restart, as output for a new terminal: each
 /// line as it was, without anything that would act as a control, then a

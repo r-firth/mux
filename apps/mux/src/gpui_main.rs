@@ -6548,7 +6548,7 @@ fn configure_application_menu(cx: &mut App) {
             disabled: false,
             items: vec![
                 MenuItem::action("New Tab", NewMuxTab),
-                MenuItem::action("Reopen Closed Tab", ReopenMuxTab),
+                MenuItem::action("Reopen Closed Tab or Pane", ReopenMuxTab),
                 MenuItem::separator(),
                 MenuItem::action("Split Right", SplitMuxRight),
                 MenuItem::action("Split Down", SplitMuxDown),

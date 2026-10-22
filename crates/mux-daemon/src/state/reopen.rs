@@ -1,19 +1,27 @@
-//! Closed tabs, kept so the last few can come back, as a browser's do: the
-//! tab's name, ink, splits and pane names, the directory each pane's shell
-//! was in, and what each pane showed. What ran in them has ended, so each
-//! pane gets a fresh shell there, under the text it showed.
+//! Closed tabs and panes, kept so the last few can come back, as a
+//! browser's tabs do. A tab comes back with its name, ink, splits and pane
+//! names, a pane beside the pane that took its room; each with the
+//! directory its shell was in and what it showed. What ran in them has
+//! ended, so each pane gets a fresh shell there, under the text it showed.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use mux_workspace::{PaneId, Tab, TabId};
+use mux_workspace::{Direction, PaneId, Tab, TabId};
 
 use super::restore::{PANE_TEXT_LINES, last_lines, worth_keeping};
 use super::{SessionMutationError, SessionRuntime};
-use crate::pane::{CLOSED_RULE, PaneRuntime};
+use crate::pane::{CLOSED_PANE_RULE, CLOSED_RULE, PaneError, PaneRuntime};
 
-/// How many closed tabs a session remembers.
+/// How many closed tabs and panes a session remembers.
 const KEPT: usize = 10;
+
+/// A tab or a pane closed, newest last.
+pub(super) enum Closed {
+    Tab(ClosedTab),
+    Pane(ClosedPane),
+}
 
 pub(super) struct ClosedTab {
     tab: Tab,
@@ -24,7 +32,33 @@ pub(super) struct ClosedTab {
     texts: HashMap<PaneId, String>,
 }
 
+pub(super) struct ClosedPane {
+    /// The tab it was in.
+    tab: TabId,
+    /// The pane that took its room, and which side of that pane it was on.
+    heir: PaneId,
+    side: Direction,
+    cwd: Option<PathBuf>,
+    name: Option<String>,
+    text: Option<String>,
+}
+
 impl SessionRuntime {
+    fn remember(&self, closed: Closed) {
+        let mut kept = self.closed.lock();
+        kept.push(closed);
+        if kept.len() > KEPT {
+            kept.remove(0);
+        }
+    }
+
+    /// What a pane showed, as much of it as comes back with it.
+    fn text_to_keep(&self, pane: PaneId) -> Option<String> {
+        let text = self.panes.read().get(&pane)?.screen_text()?;
+        let text = worth_keeping(last_lines(&text, PANE_TEXT_LINES));
+        (!text.is_empty()).then(|| text.to_owned())
+    }
+
     /// Remember a tab that is about to close. The session's last tab never
     /// closes, so it is not remembered.
     pub(super) fn remember_closed_tab(&self, tab_id: TabId) {
@@ -47,42 +81,92 @@ impl SessionRuntime {
             .iter()
             .filter_map(|pane| Some((*pane, self.cwd_for_pane(*pane)?)))
             .collect();
-        let texts = {
-            let runtimes = self.panes.read();
-            panes
-                .iter()
-                .filter_map(|pane| {
-                    let text = runtimes.get(pane)?.screen_text()?;
-                    let text = worth_keeping(last_lines(&text, PANE_TEXT_LINES));
-                    (!text.is_empty()).then(|| (*pane, text.to_owned()))
-                })
-                .collect()
-        };
-        let mut closed = self.closed_tabs.lock();
-        closed.push(ClosedTab {
+        let texts = panes
+            .iter()
+            .filter_map(|pane| Some((*pane, self.text_to_keep(*pane)?)))
+            .collect();
+        self.remember(Closed::Tab(ClosedTab {
             tab,
             place,
             cwds,
             names,
             texts,
-        });
-        if closed.len() > KEPT {
-            closed.remove(0);
-        }
+        }));
     }
 
-    /// Bring back the tab closed last, where it was in the strip, with a
-    /// fresh shell in each pane's directory, and show it.
-    pub(super) fn reopen_closed_tab(
-        &self,
-        replay_bytes: usize,
-    ) -> Result<(), SessionMutationError> {
+    /// Remember the active tab's focused pane, about to close. A tab's
+    /// only pane closes with its tab, so it is not remembered here.
+    pub(super) fn remember_closed_pane(&self) {
+        let model = self.model.read();
+        let Some(tab) = model.active_tab() else {
+            return;
+        };
+        let pane = tab.focused_pane;
+        let (Some(heir), Some(side)) = (tab.layout.heir(pane), tab.layout.side_of_heir(pane))
+        else {
+            return;
+        };
+        let closed = ClosedPane {
+            tab: tab.id,
+            heir,
+            side,
+            cwd: None,
+            name: model.pane_name(pane).map(str::to_owned),
+            text: None,
+        };
+        drop(model);
+        self.remember(Closed::Pane(ClosedPane {
+            cwd: self.cwd_for_pane(pane),
+            text: self.text_to_keep(pane),
+            ..closed
+        }));
+    }
+
+    /// Bring back what was closed last, a tab or a pane, and show it.
+    pub(super) fn reopen_closed(&self, replay_bytes: usize) -> Result<(), SessionMutationError> {
         let closed = self
-            .closed_tabs
+            .closed
             .lock()
             .pop()
             .ok_or(SessionMutationError::NothingClosed)?;
+        match closed {
+            Closed::Tab(closed) => self.reopen_tab(closed, replay_bytes),
+            Closed::Pane(closed) => self.reopen_pane(closed, replay_bytes),
+        }
+    }
+
+    /// A fresh shell for a pane coming back, in its directory (or where
+    /// the session starts, if that has gone) under the text it showed and
+    /// a rule saying where that ends.
+    fn respawn(
+        &self,
+        pane: PaneId,
+        cwd: Option<&Path>,
+        text: Option<(&str, &str)>,
+        replay_bytes: usize,
+    ) -> Result<Arc<PaneRuntime>, PaneError> {
         let session_id = self.model.read().id;
+        let cwd = cwd
+            .filter(|cwd| cwd.is_dir())
+            .unwrap_or(self.spawn.cwd.as_path());
+        PaneRuntime::spawn_with_history(
+            session_id,
+            pane,
+            cwd,
+            &self.spawn.command,
+            self.spawn.size,
+            replay_bytes,
+            self.events.clone(),
+            text,
+        )
+    }
+
+    /// Bring a closed tab back where it was in the strip.
+    fn reopen_tab(
+        &self,
+        closed: ClosedTab,
+        replay_bytes: usize,
+    ) -> Result<(), SessionMutationError> {
         let mut old = Vec::new();
         closed.tab.layout.pane_ids(&mut old);
         let fresh = old
@@ -91,28 +175,12 @@ impl SessionRuntime {
             .collect::<HashMap<_, _>>();
         let mut spawned = Vec::new();
         for pane in &old {
-            // A directory removed since starts the shell where the session
-            // does.
-            let cwd = closed
-                .cwds
-                .get(pane)
-                .filter(|cwd| cwd.is_dir())
-                .cloned()
-                .unwrap_or_else(|| self.spawn.cwd.clone());
-            let history = closed
+            let cwd = closed.cwds.get(pane).map(PathBuf::as_path);
+            let text = closed
                 .texts
                 .get(pane)
                 .map(|text| (text.as_str(), CLOSED_RULE));
-            match PaneRuntime::spawn_with_history(
-                session_id,
-                fresh[pane],
-                &cwd,
-                &self.spawn.command,
-                self.spawn.size,
-                replay_bytes,
-                self.events.clone(),
-                history,
-            ) {
+            match self.respawn(fresh[pane], cwd, text, replay_bytes) {
                 Ok(runtime) => spawned.push((fresh[pane], runtime)),
                 Err(error) => {
                     for (_, runtime) in spawned {
@@ -136,6 +204,56 @@ impl SessionRuntime {
         model.insert_tab(tab, closed.place);
         drop(model);
         self.panes.write().extend(spawned);
+        Ok(())
+    }
+
+    /// Bring a closed pane back beside the pane that took its room, on the
+    /// side it was, with the keys. If that pane has gone too it comes back
+    /// beside its tab's focused pane, and if its tab has gone, beside the
+    /// focused pane of the tab on screen.
+    fn reopen_pane(
+        &self,
+        closed: ClosedPane,
+        replay_bytes: usize,
+    ) -> Result<(), SessionMutationError> {
+        let pane = PaneId::new();
+        let runtime = self.respawn(
+            pane,
+            closed.cwd.as_deref(),
+            closed.text.as_deref().map(|text| (text, CLOSED_PANE_RULE)),
+            replay_bytes,
+        )?;
+        let mut model = self.model.write();
+        let active = model.active_tab;
+        let place = model
+            .tabs
+            .iter()
+            .position(|tab| tab.id == closed.tab)
+            .or_else(|| model.tabs.iter().position(|tab| tab.id == active));
+        let Some(tab) = place.map(|place| &mut model.tabs[place]) else {
+            drop(model);
+            let _ = runtime.kill();
+            return Err(SessionMutationError::NoActiveTab);
+        };
+        let (beside, side) = if tab.layout.contains(closed.heir) {
+            (closed.heir, closed.side)
+        } else {
+            (tab.focused_pane, Direction::Right)
+        };
+        if let Err(error) = tab.layout.split_beside(beside, pane, side) {
+            drop(model);
+            let _ = runtime.kill();
+            return Err(error.into());
+        }
+        tab.focused_pane = pane;
+        tab.zoomed_pane = None;
+        let tab_id = tab.id;
+        model.select_tab(tab_id)?;
+        if let Some(name) = closed.name {
+            model.pane_names.insert(pane, name);
+        }
+        drop(model);
+        self.panes.write().insert(pane, runtime);
         Ok(())
     }
 }
@@ -203,6 +321,59 @@ mod tests {
                 .is_err(),
             "nothing left to reopen"
         );
+        runtime.kill();
+    }
+
+    #[test]
+    fn a_closed_pane_comes_back_where_it_was() {
+        let state_directory = tempfile::tempdir().expect("state directory");
+        let start = tempfile::tempdir().expect("start directory");
+        let state = DaemonState::new(state_directory.path().to_path_buf(), 64 * 1024);
+        let summary = state
+            .create_session(CreateSession {
+                name: "work".to_owned(),
+                cwd: start.path().to_path_buf(),
+                command: SpawnCommand {
+                    program: PathBuf::from("/bin/sh"),
+                    args: Vec::new(),
+                    environment: Vec::new(),
+                },
+                initial_panes: 1,
+                initial_size: TerminalSize::default(),
+            })
+            .expect("create session");
+        let run = |command| {
+            state
+                .workspace_command(summary.id, command)
+                .expect("workspace command");
+        };
+        let runtime = state
+            .resolve(&SessionSelector::Id(summary.id))
+            .expect("session");
+        let first = runtime.model.read().active_tab().expect("tab").focused_pane;
+        run(WorkspaceCommand::SplitPane(SplitAxis::Horizontal));
+        let second = runtime.model.read().active_tab().expect("tab").focused_pane;
+        run(WorkspaceCommand::RenamePane {
+            pane: second,
+            name: "logs".to_owned(),
+        });
+        run(WorkspaceCommand::SetFocusedPane(first));
+        run(WorkspaceCommand::ClosePane);
+        assert_eq!(runtime.panes.read().len(), 1);
+
+        run(WorkspaceCommand::ReopenClosedTab);
+        let model = runtime.model.read().clone();
+        let tab = model.active_tab().expect("tab");
+        let mut panes = Vec::new();
+        tab.layout.pane_ids(&mut panes);
+        assert_eq!(panes.len(), 2);
+        assert_eq!(
+            panes[1], second,
+            "back on the left of the pane that took its room"
+        );
+        assert_eq!(tab.focused_pane, panes[0], "with the keys");
+        assert_eq!(model.pane_name(second), Some("logs"));
+        assert_eq!(runtime.panes.read().len(), 2);
         runtime.kill();
     }
 }

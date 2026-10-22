@@ -311,7 +311,7 @@ impl DaemonState {
                 size: request.initial_size,
             },
             mutation: Mutex::new(()),
-            closed_tabs: Mutex::new(Vec::new()),
+            closed: Mutex::new(Vec::new()),
         });
         let summary = runtime.summary();
         sessions.insert(summary.id, runtime);
@@ -503,8 +503,8 @@ struct SessionRuntime {
     events: broadcast::Sender<ServerEvent>,
     spawn: SpawnTemplate,
     mutation: Mutex<()>,
-    /// The tabs closed last, the newest at the end.
-    closed_tabs: Mutex<Vec<reopen::ClosedTab>>,
+    /// The tabs and panes closed last, the newest at the end.
+    closed: Mutex<Vec<reopen::Closed>>,
 }
 
 impl SessionRuntime {
@@ -628,6 +628,7 @@ impl SessionRuntime {
                     .focus(pane_id)?;
             }
             WorkspaceCommand::ClosePane => {
+                self.remember_closed_pane();
                 let pane_id = self
                     .model
                     .write()
@@ -664,7 +665,7 @@ impl SessionRuntime {
                 let pane_ids = self.model.write().close_tab(tab_id)?;
                 self.remove_panes(&pane_ids);
             }
-            WorkspaceCommand::ReopenClosedTab => self.reopen_closed_tab(replay_bytes)?,
+            WorkspaceCommand::ReopenClosedTab => self.reopen_closed(replay_bytes)?,
             WorkspaceCommand::RenameTab(title) => {
                 let title = validated_name("tab", &title)?;
                 self.model
@@ -768,7 +769,7 @@ enum SessionMutationError {
     Pane(#[from] crate::pane::PaneError),
     #[error("{kind} name cannot be empty")]
     EmptyName { kind: &'static str },
-    #[error("there is no closed tab to reopen")]
+    #[error("there is no closed tab or pane to reopen")]
     NothingClosed,
 }
 

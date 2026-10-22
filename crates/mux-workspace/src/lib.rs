@@ -199,6 +199,30 @@ impl PaneLayout {
         }
     }
 
+    /// Which side of its heir (see [`Self::heir`]) `target` is on.
+    #[must_use]
+    pub fn side_of_heir(&self, target: PaneId) -> Option<Direction> {
+        let Self::Split {
+            axis,
+            first,
+            second,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let (before, after) = match axis {
+            SplitAxis::Horizontal => (Direction::Left, Direction::Right),
+            SplitAxis::Vertical => (Direction::Up, Direction::Down),
+        };
+        match (first.as_ref(), second.as_ref()) {
+            (Self::Leaf(pane), _) if *pane == target => Some(before),
+            (_, Self::Leaf(pane)) if *pane == target => Some(after),
+            _ if first.contains(target) => first.side_of_heir(target),
+            _ => second.side_of_heir(target),
+        }
+    }
+
     pub fn remove(&mut self, target: PaneId) -> Result<(), WorkspaceError> {
         match self {
             Self::Leaf(_) => Err(WorkspaceError::CannotCloseLastPane),
