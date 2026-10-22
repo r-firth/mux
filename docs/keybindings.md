@@ -161,6 +161,10 @@ Rows are as tall as your Ghostty makes them: `adjust-cell-height` in its
 config adds points (`2`) or a share of the height (`10%`), or takes them
 away with a minus.
 
+The font's OpenType features follow `font-feature` in your Ghostty config:
+`font-feature = -calt` turns its ligatures off, and `+ss01` or `zero` turn
+on a stylistic set or a slashed zero, where the font has them.
+
 Text sits as far in from a pane's edges as `window-padding-x` and
 `window-padding-y` in your Ghostty config say (2 points by default). Mux
 pads both sides of a pane alike, so a `left,right` pair takes the larger.

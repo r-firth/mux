@@ -258,6 +258,61 @@ fn parse_window_padding(contents: &str, padding: &mut (f32, f32)) {
     }
 }
 
+/// OpenType features for the terminal font: `font-feature` from the user's
+/// Ghostty config, as tag and value, `-calt` turning ligatures off. Ghostty
+/// takes `tag`, `+tag`, `-tag`, `tag=value` and `tag on|off`, several to a
+/// line with commas between; an empty value forgets those before it.
+#[must_use]
+pub fn user_font_features() -> Vec<(String, u32)> {
+    let mut features = Vec::new();
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_font_features(&contents, &mut features);
+            }
+        }
+    }
+    features
+}
+
+fn parse_font_features(contents: &str, features: &mut Vec<(String, u32)>) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key != "font-feature" {
+            continue;
+        }
+        if value.is_empty() {
+            features.clear();
+            continue;
+        }
+        for feature in value.split(',').filter_map(parse_font_feature) {
+            features.retain(|(tag, _)| *tag != feature.0);
+            features.push(feature);
+        }
+    }
+}
+
+fn parse_font_feature(text: &str) -> Option<(String, u32)> {
+    let text = text.trim();
+    let (tag, value) = if let Some(tag) = text.strip_prefix('-') {
+        (tag, 0)
+    } else if let Some(tag) = text.strip_prefix('+') {
+        (tag, 1)
+    } else if let Some((tag, value)) = text.split_once('=') {
+        (tag, value.trim().parse().ok()?)
+    } else if let Some((tag, state)) = text.split_once(char::is_whitespace) {
+        match state.trim() {
+            "on" | "true" => (tag, 1),
+            "off" | "false" => (tag, 0),
+            _ => return None,
+        }
+    } else {
+        (text, 1)
+    };
+    let tag = tag.trim();
+    (tag.len() == 4 && tag.bytes().all(|byte| byte.is_ascii_graphic()))
+        .then(|| (tag.to_owned(), value))
+}
+
 /// Whether a program may copy to the clipboard with OSC 52:
 /// `clipboard-write` from the user's Ghostty config, allowed by default as in
 /// Ghostty. Mux has no prompt to ask with, so `ask` allows it, and the strip
@@ -3200,6 +3255,31 @@ mod theme_tests {
         assert_eq!(padding, (10.0, 12.0), "what is not a padding is ignored");
         parse_window_padding("window-padding-x = -5\nwindow-padding-y =\n", &mut padding);
         assert_eq!(padding, (0.0, DEFAULT_WINDOW_PADDING));
+    }
+
+    #[test]
+    fn font_features_read_as_ghostty_writes_them() {
+        let mut features = Vec::new();
+        parse_font_features(
+            "font-feature = -calt\nfont-feature = +ss01, zero=1\nfont-feature = liga off\n\
+             font-feature = toolong\n",
+            &mut features,
+        );
+        let tag = |tag: &str, value| (tag.to_owned(), value);
+        assert_eq!(
+            features,
+            vec![
+                tag("calt", 0),
+                tag("ss01", 1),
+                tag("zero", 1),
+                tag("liga", 0)
+            ]
+        );
+        parse_font_features("font-feature = calt\n", &mut features);
+        assert_eq!(features.last(), Some(&tag("calt", 1)), "a later value wins");
+        assert_eq!(features.len(), 4);
+        parse_font_features("font-feature =\n", &mut features);
+        assert!(features.is_empty());
     }
 
     #[test]

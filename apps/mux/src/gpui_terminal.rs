@@ -221,6 +221,7 @@ impl TerminalRenderCache {
         }
 
         let mut run_font = font(font_family.to_owned());
+        run_font.features = terminal_font_features();
         apply_font_style(&mut run_font, style);
         let color = terminal_color(foreground).alpha(if style.faint { 0.58 } else { 1.0 });
         let underline = (style.underline != 0).then_some(UnderlineStyle {
@@ -636,6 +637,18 @@ fn effective_background(cell: &RenderCell) -> Rgb {
     } else {
         cell.background
     }
+}
+
+/// The OpenType features the user's Ghostty sets for its font.
+fn terminal_font_features() -> gpui::FontFeatures {
+    static FEATURES: std::sync::OnceLock<gpui::FontFeatures> = std::sync::OnceLock::new();
+    FEATURES
+        .get_or_init(|| {
+            gpui::FontFeatures(std::sync::Arc::new(
+                mux_terminal_ghostty::user_font_features(),
+            ))
+        })
+        .clone()
 }
 
 fn terminal_color(color: Rgb) -> Hsla {

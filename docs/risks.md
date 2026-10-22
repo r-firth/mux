@@ -59,7 +59,8 @@ and resolves the requested local face in GPUI's shaping database. The same cell 
 drive rendering, cursor placement, pane sizing, PTY resize, mouse reporting,
 and selection. An unavailable configured face falls back to the
 bundled JetBrains Mono Nerd Font, while the shaping stack retains system glyph
-fallback. Broader Ghostty font features such as per-style family overrides,
+fallback. OpenType features follow Ghostty's `font-feature`. Broader Ghostty font
+settings such as per-style family overrides,
 variation axes, synthetic-style controls, and explicit fallback lists remain
 outside the supported configuration subset and should be added at this boundary
 rather than leaking font assumptions into workspace code.
