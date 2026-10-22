@@ -10,12 +10,18 @@
 //! A long program finishing calls the same way: a build or a test run that
 //! ends in a pane out of sight, or while mux is in the background, says it
 //! is done and how long it took.
+//!
+//! A bell in the pane you are looking at has nothing to mark, so the pane
+//! flashes instead, washed for a moment in its tab's ink.
 
 use super::*;
 use mux_terminal::Attention;
 
 /// A program that runs at least this long is worth saying has finished.
 const LONG_COMMAND_SECONDS: u64 = 10;
+
+/// How long a pane on screen flashes when its bell rings.
+const BELL_FLASH: Duration = Duration::from_millis(450);
 
 impl MuxApp {
     /// A program has finished in a pane: one that ran long enough is a call,
@@ -30,12 +36,17 @@ impl MuxApp {
     /// Gather what panes asked for in the output just applied. Returns
     /// whether a mark changed, which needs drawing even when the pane that
     /// called is out of sight.
-    pub(super) fn collect_pane_calls(&mut self, window: &mut Window) -> bool {
+    pub(super) fn collect_pane_calls(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let watched = self
             .terminal_input_pane_id()
             .filter(|_| window.is_window_active());
         let mut fresh = false;
         let mut changed = false;
+        let mut rung = None;
         for (pane_id, words) in std::mem::take(&mut self.finished_commands) {
             if Some(pane_id) == watched || !self.panes.contains_key(&pane_id) {
                 continue;
@@ -50,6 +61,9 @@ impl MuxApp {
                 continue;
             };
             if Some(*pane_id) == watched {
+                if call == Attention::Bell {
+                    rung = Some(*pane_id);
+                }
                 continue;
             }
             match (self.pane_calls.get(pane_id), call) {
@@ -65,7 +79,57 @@ impl MuxApp {
         if fresh {
             window.request_attention();
         }
+        if let Some(pane_id) = rung {
+            self.flash_bell(pane_id, cx);
+            changed = true;
+        }
         changed
+    }
+
+    /// A bell in the pane you are looking at flashes it, as a visual bell
+    /// does, since there is nothing to mark.
+    fn flash_bell(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
+        self.bell_serial += 1;
+        let serial = self.bell_serial;
+        self.bell_flash = Some((pane_id, serial));
+        cx.spawn(async move |entity, cx| {
+            cx.background_executor().timer(BELL_FLASH).await;
+            let _ = entity.update(cx, |this, cx| {
+                if this.bell_flash.is_some_and(|(_, rung)| rung == serial) {
+                    this.bell_flash = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The flash over a pane whose bell just rang: a wash of the tab's ink,
+    /// fading, or held still while motion is reduced.
+    pub(super) fn bell_flash_overlay(&self, pane_id: PaneId) -> Option<gpui::AnyElement> {
+        let (flashing, serial) = self.bell_flash?;
+        if flashing != pane_id {
+            return None;
+        }
+        let ink = self.active_ink().color();
+        let flash = div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .bg(ink.opacity(0.14));
+        if self.motion == MotionPreference::Reduced {
+            return Some(flash.into_any_element());
+        }
+        Some(
+            flash
+                .with_animation(
+                    SharedString::from(format!("bell-flash-{serial}")),
+                    Animation::new(BELL_FLASH),
+                    |flash, delta| flash.opacity(1.0 - delta),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The pane with the keys, in a window in front, has been seen.

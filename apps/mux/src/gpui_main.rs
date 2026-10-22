@@ -649,6 +649,10 @@ struct MuxApp {
     tab_strip_follow: Cell<bool>,
     strip_message: Option<StripMessage>,
     strip_serial: u64,
+    /// The pane on screen whose bell just rang, flashing its edge, and
+    /// which ring it was.
+    bell_flash: Option<(PaneId, u64)>,
+    bell_serial: u64,
     pane_menu: Option<pane_menu::PaneMenu>,
     /// A close that found something running, and when: closing the same
     /// thing again soon after goes ahead.
@@ -832,6 +836,8 @@ impl MuxApp {
             tab_strip_follow: Cell::new(true),
             strip_message: None,
             strip_serial: 0,
+            bell_flash: None,
+            bell_serial: 0,
             close_armed: None,
             pane_menu: None,
             size_readout: false,
@@ -1184,7 +1190,7 @@ impl MuxApp {
         }
         self.publish_terminal_frames(&mut dirty_panes, cx);
         self.refresh_link_hover(cx);
-        self.collect_pane_calls(window) || needs_render
+        self.collect_pane_calls(window, cx) || needs_render
     }
 
     fn publish_terminal_frames(
@@ -4812,6 +4818,7 @@ impl MuxApp {
                     .child(terminal.cached(gpui::StyleRefinement::default().size_full())),
             )
             .children(self.render_quick_select_labels(pane_id, rect))
+            .children(self.bell_flash_overlay(pane_id))
             .child(self.file_drop_target(pane_id, cx));
         surface.into_any_element()
     }

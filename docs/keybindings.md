@@ -187,7 +187,8 @@ until it is looked at. Its tab's dot turns peach with what it said beside the
 name, and in the tab on screen the pane's head says it. A program that ran for
 ten seconds or more and finishes out of sight, such as a build or a test run,
 calls the same way, with how long it took: `cargo done in 3m`. While Mux is in the
-background, the first call also bounces its Dock icon.
+background, the first call also bounces its Dock icon. A bell in the pane you
+are looking at flashes it for a moment in the tab's ink instead.
 
 ## Closing what is running
 
