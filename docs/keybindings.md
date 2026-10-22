@@ -74,7 +74,7 @@ from an agent pane too. They are in the menu bar's Shell and Window menus.
 | --- | --- |
 | `Cmd+T` | Create a tab |
 | `Cmd+Shift+T` | Reopen the tab or pane closed last: a tab with its splits and names, a pane beside the pane that took its room, each with a fresh shell in its directory under what it showed |
-| `Cmd+Z` | Within five seconds of closing a pane or tab, bring it back, as Ghostty's undo does; later, the key goes to the program |
+| `Cmd+Z` | Just after closing a pane or tab, bring it back, as Ghostty's undo does: within its `undo-timeout`, five seconds by default; later, the key goes to the program |
 | `Cmd+D` | Split to the right |
 | `Cmd+Shift+D` | Split downward |
 | `Cmd+Shift+Return` | Toggle focused-pane zoom |

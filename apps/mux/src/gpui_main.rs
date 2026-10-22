@@ -2281,7 +2281,7 @@ impl MuxApp {
             && self
                 .closed_at
                 .take()
-                .is_some_and(|at| at.elapsed() < UNDO_CLOSE_WINDOW)
+                .is_some_and(|at| at.elapsed() < undo_timeout())
         {
             self.send_workspace(WorkspaceCommand::ReopenClosedTab);
             return;
@@ -6646,7 +6646,11 @@ fn terminal_codepoint(key: &str, terminal_key: TerminalKey) -> Option<char> {
 const CLOSE_AGAIN_WINDOW: Duration = Duration::from_secs(5);
 
 /// How long after a close ⌘Z brings it back: Ghostty's `undo-timeout`.
-const UNDO_CLOSE_WINDOW: Duration = Duration::from_secs(5);
+fn undo_timeout() -> Duration {
+    static TIMEOUT: ghostty_config::Reloadable<Duration> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_undo_timeout);
+    TIMEOUT.get()
+}
 
 /// The range of terminal text sizes, in points.
 const MIN_FONT_SIZE: f32 = 8.0;

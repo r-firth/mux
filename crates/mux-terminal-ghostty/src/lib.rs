@@ -630,6 +630,31 @@ fn parse_command_finish_notice(contents: &str, notice: &mut CommandFinishNotice)
 
 /// A Ghostty duration: whole numbers with units, run together or spaced,
 /// as in `5s`, `1m30s` or `1h 15m`.
+/// How long after a close Ghostty's undo can bring it back:
+/// `undo-timeout` from the user's Ghostty config, five seconds by default.
+#[must_use]
+pub fn user_undo_timeout() -> std::time::Duration {
+    let mut timeout = std::time::Duration::from_secs(5);
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_undo_timeout(&contents, &mut timeout);
+            }
+        }
+    }
+    timeout
+}
+
+fn parse_undo_timeout(contents: &str, timeout: &mut std::time::Duration) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "undo-timeout"
+            && let Some(duration) = parse_duration(&value)
+        {
+            *timeout = duration;
+        }
+    }
+}
+
 fn parse_duration(value: &str) -> Option<std::time::Duration> {
     let mut total = std::time::Duration::ZERO;
     let mut rest = value.trim();
@@ -3831,6 +3856,15 @@ mod theme_tests {
         assert!(steady);
         parse_cursor_steady("shell-integration-features = cursor\n", &mut steady);
         assert!(!steady);
+    }
+
+    #[test]
+    fn undo_timeout_from_the_config() {
+        let mut timeout = std::time::Duration::from_secs(5);
+        parse_undo_timeout("undo-timeout = 30s\n", &mut timeout);
+        assert_eq!(timeout, std::time::Duration::from_secs(30));
+        parse_undo_timeout("undo-timeout = 0s\n", &mut timeout);
+        assert_eq!(timeout, std::time::Duration::ZERO);
     }
 
     #[test]
