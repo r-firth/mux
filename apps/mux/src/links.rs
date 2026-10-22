@@ -320,6 +320,31 @@ impl MuxApp {
         }
     }
 
+    /// Put a link, or a path's text, on the clipboard.
+    pub(super) fn copy_link(&mut self, link: &Link, cx: &mut Context<Self>) {
+        if let Some(clipboard) = &mut self.clipboard
+            && clipboard.set_text(link_text(&link.url).to_owned()).is_ok()
+        {
+            let what = if link.path || link.url.starts_with("file://") {
+                "copied the path"
+            } else {
+                "copied the link"
+            };
+            self.say_in_strip(what, false, cx);
+        }
+    }
+
+    /// Ghostty's `copy_url_to_clipboard`: the link under the pointer, ⌘
+    /// held or not.
+    pub(super) fn copy_link_under_pointer(&mut self, cx: &mut Context<Self>) {
+        let link = self
+            .link_pointer
+            .and_then(|(pane_id, rect, position)| self.link_under(pane_id, rect, position));
+        if let Some(link) = link {
+            self.copy_link(&link, cx);
+        }
+    }
+
     /// ⌘-click on a link opens it. Returns whether the click was a link's.
     pub(super) fn open_link_under(
         &mut self,

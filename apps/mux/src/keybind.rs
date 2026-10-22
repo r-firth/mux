@@ -73,6 +73,7 @@ enum Command {
     Prompt(bool),
     NamePane,
     OpenHistory,
+    CopyUrl,
 }
 
 static KEYBINDS: ghostty_config::Reloadable<Vec<(String, Bound)>> =
@@ -231,6 +232,7 @@ impl MuxApp {
                 return self.scroll_input_pane(TerminalViewportScroll::Delta(lines), cx);
             }
             Command::NamePane => return self.open_rename_pane(window, cx),
+            Command::CopyUrl => return self.copy_link_under_pointer(cx),
             Command::OpenHistory => {
                 if let Some(pane_id) = self.terminal_input_pane_id() {
                     self.open_history_in_editor(pane_id, cx);
@@ -469,6 +471,7 @@ fn parse_action(action: &str) -> Option<Bound> {
             Command::ScrollFraction((fraction * 1000.0).round() as i64)
         }
         "prompt_surface_title" => Command::NamePane,
+        "copy_url_to_clipboard" => Command::CopyUrl,
         "write_scrollback_file" | "write_screen_file" if parameter == "open" => {
             Command::OpenHistory
         }

@@ -287,18 +287,8 @@ impl MuxApp {
                 }
             }
             Item::CopyLink => {
-                if let Some(link) = link
-                    && let Some(clipboard) = &mut self.clipboard
-                    && clipboard
-                        .set_text(links::link_text(&link.url).to_owned())
-                        .is_ok()
-                {
-                    let what = if link.path || link.url.starts_with("file://") {
-                        "copied the path"
-                    } else {
-                        "copied the link"
-                    };
-                    self.say_in_strip(what, false, cx);
+                if let Some(link) = link {
+                    self.copy_link(&link, cx);
                 }
             }
             Item::CopyCommand => {
