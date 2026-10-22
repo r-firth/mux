@@ -481,6 +481,13 @@ fn desktop_notifications() -> bool {
     HEEDED.get()
 }
 
+/// Whether programs may read the clipboard, as the user's Ghostty allows.
+fn clipboard_read_allowed() -> bool {
+    static ALLOWED: ghostty_config::Reloadable<bool> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_clipboard_read);
+    ALLOWED.get()
+}
+
 /// Whether the pane under the pointer takes the keys, as in the user's
 /// Ghostty.
 fn focus_follows_mouse() -> bool {
@@ -2382,11 +2389,16 @@ impl MuxApp {
     /// just applied, and say how much in the strip.
     fn collect_pane_copies(&mut self, cx: &mut Context<Self>) {
         let mut copied = None;
-        for pane in self.panes.values_mut() {
+        let mut reads = Vec::new();
+        for (pane_id, pane) in &mut self.panes {
             if let Some(text) = pane.title.take_copied() {
                 copied = Some(text);
             }
+            if let Some(place) = pane.title.take_clipboard_read() {
+                reads.push((*pane_id, place));
+            }
         }
+        self.answer_clipboard_reads(reads, cx);
         let Some(text) = copied.filter(|_| clipboard_write_allowed()) else {
             return;
         };
@@ -2401,6 +2413,28 @@ impl MuxApp {
                 self.say_in_strip(copied, false, cx);
             }
         }
+    }
+
+    /// Give programs that asked to read the clipboard what is on it, when
+    /// the user's Ghostty allows it; otherwise they get no answer, as before.
+    fn answer_clipboard_reads(&mut self, reads: Vec<(PaneId, String)>, cx: &mut Context<Self>) {
+        if reads.is_empty() || !clipboard_read_allowed() {
+            return;
+        }
+        let Some(text) = self
+            .clipboard
+            .as_mut()
+            .and_then(|clipboard| clipboard.get_text().ok())
+        else {
+            return;
+        };
+        for (pane_id, place) in reads {
+            self.backend.send(CommandMessage::Write {
+                pane_id,
+                bytes: mux_terminal::clipboard_reply(&place, &text),
+            });
+        }
+        self.say_in_strip("a program read the clipboard".to_owned(), false, cx);
     }
 
     /// A selection, made with the pointer or the keys, goes to the

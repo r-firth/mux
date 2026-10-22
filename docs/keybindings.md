@@ -370,7 +370,9 @@ gets the paste at once, since it holds it as text until Return. Setting
 A program can copy to the clipboard itself with OSC 52, as Neovim, tmux
 and programs over ssh do; the strip says how many lines it copied.
 `clipboard-write = deny` in your Ghostty config stops it. Reading the
-clipboard that way is not allowed.
+clipboard that way, as Neovim's OSC 52 paste does, takes
+`clipboard-read = allow`; the strip says when a program read it. Ghostty
+asks by default, and Mux, with no way to ask, refuses.
 
 ## Selecting
 

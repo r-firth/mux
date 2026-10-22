@@ -18,6 +18,8 @@ pub struct TitleScanner {
     previous_title: Option<String>,
     attention: Option<Attention>,
     copied: Option<String>,
+    /// The clipboard a program last asked to read with OSC 52, as it named it.
+    read_asked: Option<String>,
     progress: Option<Progress>,
     exit_status: Option<i32>,
     commands: std::collections::VecDeque<CommandEnding>,
@@ -116,6 +118,14 @@ const MAX_NOTICE_BYTES: usize = 512;
 /// rather than cut short.
 const MAX_CLIPBOARD_BYTES: usize = 8 * 1024 * 1024;
 
+/// OSC 52's answer to a program that asked to read the clipboard `place`.
+#[must_use]
+pub fn clipboard_reply(place: &str, text: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    let data = base64::engine::general_purpose::STANDARD.encode(text);
+    format!("\x1b]52;{place};{data}\x1b\\").into_bytes()
+}
+
 impl TitleScanner {
     /// A scanner that already knows the title, as a client restoring a pane
     /// from a checkpoint does: the sequence that set it is long gone.
@@ -160,6 +170,12 @@ impl TitleScanner {
     /// called.
     pub fn take_copied(&mut self) -> Option<String> {
         self.copied.take()
+    }
+
+    /// The clipboard a program asked to read since this was last called,
+    /// as it named it (`c`, or empty), for [`clipboard_reply`].
+    pub fn take_clipboard_read(&mut self) -> Option<String> {
+        self.read_asked.take()
     }
 
     /// How the last command ended, as the shell said with OSC 133;D, unless
@@ -270,7 +286,7 @@ impl TitleScanner {
 
     /// OSC 52 ; where ; base64. Which clipboard the program names makes no
     /// difference, since a Mac has the one; a `?` asks to read it, which is
-    /// not given.
+    /// noted for the app to answer or refuse.
     fn commit_copy(&mut self) {
         use base64::Engine as _;
         let buffer = std::mem::take(&mut self.buffer);
@@ -282,6 +298,7 @@ impl TitleScanner {
         };
         let data = &buffer[at + 1..];
         if data == b"?" {
+            self.read_asked = Some(String::from_utf8_lossy(&buffer[..at]).into_owned());
             return;
         }
         if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data)
@@ -555,6 +572,12 @@ mod tests {
         assert_eq!(scanner.take_copied().as_deref(), Some("mux"));
         scanner.scan(b"\x1b]52;c;?\x07\x1b]52;c;!!!\x07");
         assert_eq!(scanner.take_copied(), None, "a read, and nonsense");
+        assert_eq!(scanner.take_clipboard_read().as_deref(), Some("c"));
+        assert_eq!(scanner.take_clipboard_read(), None);
+        assert_eq!(
+            clipboard_reply("c", "mux"),
+            b"\x1b]52;c;bXV4\x1b\\".to_vec()
+        );
         assert_eq!(scanner.title(), None);
     }
 

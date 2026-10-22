@@ -398,6 +398,30 @@ fn parse_clipboard_write(contents: &str, allowed: &mut bool) {
     }
 }
 
+/// Whether programs may read the clipboard with OSC 52: `clipboard-read =
+/// allow` in the user's Ghostty config. Ghostty asks by default; Mux has no
+/// way to ask, so it refuses unless allowed.
+#[must_use]
+pub fn user_clipboard_read() -> bool {
+    let mut allowed = false;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_clipboard_read(&contents, &mut allowed);
+            }
+        }
+    }
+    allowed
+}
+
+fn parse_clipboard_read(contents: &str, allowed: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "clipboard-read" {
+            *allowed = value == "allow";
+        }
+    }
+}
+
 /// Whether the pane under the pointer takes the keys: `focus-follows-mouse`
 /// from the user's Ghostty config, off by default as in Ghostty.
 #[must_use]
@@ -3973,6 +3997,15 @@ mod theme_tests {
         assert!((minimum - 21.0).abs() < f32::EPSILON);
         parse_minimum_contrast("minimum-contrast =\n", &mut minimum);
         assert!((minimum - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn programs_read_the_clipboard_only_when_allowed() {
+        let mut allowed = false;
+        parse_clipboard_read("clipboard-read = allow\n", &mut allowed);
+        assert!(allowed);
+        parse_clipboard_read("clipboard-read = ask\n", &mut allowed);
+        assert!(!allowed);
     }
 
     #[test]
