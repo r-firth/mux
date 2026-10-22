@@ -210,6 +210,10 @@ pub struct PaneRuntime {
     title: Arc<Mutex<TitleScanner>>,
     /// The program in front of the shell when last looked, and since when.
     foreground_command: Mutex<Option<ForegroundCommand>>,
+    /// A process in front that still bears the shell's own name: either a
+    /// fork that has not yet become the program it will run, or a nested
+    /// shell. It is named only once seen twice.
+    shell_named_pending: Mutex<Option<u32>>,
     output_injector: OutputInjector,
 }
 
@@ -394,6 +398,7 @@ impl PaneRuntime {
             process_id,
             title,
             foreground_command: Mutex::new(None),
+            shell_named_pending: Mutex::new(None),
             output_injector,
         }))
     }
@@ -506,6 +511,12 @@ impl PaneRuntime {
                     return None;
                 }
                 let name = process_name(process_id);
+                let mut pending = self.shell_named_pending.lock();
+                if name == process_name(shell) && *pending != Some(process_id) {
+                    *pending = Some(process_id);
+                    return None;
+                }
+                *pending = None;
                 *command = Some(ForegroundCommand {
                     since: Instant::now(),
                     name: name.clone(),
