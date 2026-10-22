@@ -62,6 +62,44 @@ impl MuxApp {
         self.select_output_rows(pane_id, first, last, cx);
     }
 
+    /// Put what the last command printed on the clipboard, without
+    /// selecting it.
+    pub(super) fn copy_last_output(&mut self, cx: &mut Context<Self>) {
+        let Some(pane_id) = self.terminal_input_pane_id() else {
+            return;
+        };
+        let Some(pane) = self.panes.get(&pane_id) else {
+            return;
+        };
+        let prompts = pane
+            .with_engine(|engine| engine.prompt_rows())
+            .unwrap_or_default();
+        let text = pane
+            .with_engine(|engine| engine.screen_text())
+            .unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        let Some((first, last)) = last_output_rows(&prompts, &lines) else {
+            self.say_in_strip("the last command printed nothing", false, cx);
+            return;
+        };
+        let output = lines[first..=last]
+            .iter()
+            .map(|line| line.trim_end())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let count = last - first + 1;
+        if let Some(clipboard) = &mut self.clipboard
+            && clipboard.set_text(output).is_ok()
+        {
+            let copied = if count == 1 {
+                "copied 1 line of output".to_owned()
+            } else {
+                format!("copied {count} lines of output")
+            };
+            self.say_in_strip(copied, false, cx);
+        }
+    }
+
     /// Select what the command run from the prompt at history row `prompt`
     /// printed, as a click on its failure mark does.
     pub(super) fn select_output_of(
