@@ -993,7 +993,8 @@ int32_t mux_ghostty_terminal_selected_text(
     mux_ghostty_terminal_t raw_terminal,
     uint8_t **out_bytes,
     size_t *out_len,
-    bool *out_has_selection) {
+    bool *out_has_selection,
+    bool trim) {
   if (out_bytes == NULL || out_len == NULL || out_has_selection == NULL) {
     return (int32_t)GHOSTTY_INVALID_VALUE;
   }
@@ -1011,7 +1012,7 @@ int32_t mux_ghostty_terminal_selected_text(
       GHOSTTY_INIT_SIZED(GhosttyTerminalSelectionFormatOptions);
   options.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN;
   options.unwrap = true;
-  options.trim = true;
+  options.trim = trim;
   options.selection = &selection;
   uint8_t *ghostty_bytes = NULL;
   size_t ghostty_len = 0;

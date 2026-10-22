@@ -535,6 +535,33 @@ fn parse_inherit_working_directory(contents: &str, inherit: &mut Inherit) {
     }
 }
 
+/// Whether copied text loses the spaces at the ends of its lines: Ghostty's
+/// `clipboard-trim-trailing-spaces`, on by default.
+#[must_use]
+pub fn user_clipboard_trim_trailing_spaces() -> bool {
+    let mut trim = true;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_clipboard_trim(&contents, &mut trim);
+            }
+        }
+    }
+    trim
+}
+
+fn parse_clipboard_trim(contents: &str, trim: &mut bool) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key == "clipboard-trim-trailing-spaces" {
+            match value.as_str() {
+                "" | "true" => *trim = true,
+                "false" => *trim = false,
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Whether a new tab opens just after the current one: Ghostty's
 /// `window-new-tab-position = current`. Mux puts new tabs at the end unless
 /// the user's config asks for that.
@@ -1669,6 +1696,7 @@ mod linked {
             out_bytes: *mut *mut u8,
             out_len: *mut usize,
             out_has_selection: *mut bool,
+            trim: bool,
         ) -> i32;
         fn mux_ghostty_terminal_set_history_limit(terminal: *mut c_void, max_bytes: usize) -> i32;
         fn mux_ghostty_terminal_set_default_cursor_style(terminal: *mut c_void, style: u8) -> i32;
@@ -2513,6 +2541,7 @@ mod linked {
                     &raw mut bytes,
                     &raw mut length,
                     &raw mut has_selection,
+                    crate::user_clipboard_trim_trailing_spaces(),
                 )
             };
             check(result).map_err(|error| TerminalError::Engine(error.to_string()))?;
@@ -4125,6 +4154,15 @@ mod theme_tests {
         assert_eq!(inherit.tab, None);
         parse_inherit_working_directory("window-inherit-working-directory =\n", &mut inherit);
         assert_eq!(inherit.window, None);
+    }
+
+    #[test]
+    fn copies_are_trimmed_unless_told_not_to() {
+        let mut trim = true;
+        parse_clipboard_trim("clipboard-trim-trailing-spaces = false\n", &mut trim);
+        assert!(!trim);
+        parse_clipboard_trim("clipboard-trim-trailing-spaces =\n", &mut trim);
+        assert!(trim);
     }
 
     #[test]

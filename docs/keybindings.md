@@ -231,6 +231,8 @@ composes nothing.
 Selected text takes `selection-background` and `selection-foreground` from
 your Ghostty config or theme when they are set, and a warm wash over the
 text's own colours when not.
+Copied text loses the spaces at the ends of its lines unless
+`clipboard-trim-trailing-spaces = false`.
 `minimum-contrast` (from 1, the default, to 21) lifts text that would read
 fainter than that against its background to white or black, as Ghostty does.
 
