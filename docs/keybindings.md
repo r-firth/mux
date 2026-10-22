@@ -21,6 +21,31 @@ inside the supported modes, matching Zellij. Enter or Escape returns from a
 mode to normal terminal input. All other Normal-mode keys, including
 `Ctrl+n`, `Ctrl+o`, and `:`, pass through to the foreground program.
 
+## Your Ghostty keybinds
+
+`keybind` lines in your Ghostty config work in Mux too, and win over Mux's
+own key for the same keys:
+
+```
+keybind = shift+enter=text:\x1b\r
+keybind = super+d=new_split:down
+keybind = super+k=unbind
+```
+
+`text:` types its text into the pane (Zig escapes such as `\x1b`, `\r` and
+`\u{e9}` as in Ghostty), `csi:` and `esc:` send an escape sequence, `unbind`
+gives the key back to the program and `ignore` swallows it. Ghostty's
+actions for what Mux has a key for do what that key does: `new_tab`,
+`new_split`, `close_surface`, `goto_split`, `resize_split`,
+`equalize_splits`, `toggle_split_zoom`, `next_tab`, `previous_tab`,
+`goto_tab`, `last_tab`, the font size actions, `reload_config`,
+`open_config` (the settings), `toggle_fullscreen`, `clear_screen`, `quit`,
+`toggle_command_palette`, `start_search`, `search_selection`,
+`copy_to_clipboard`, `paste_from_clipboard`, `select_all`, the scroll
+actions and `jump_to_prompt`. Sequences (`ctrl+a>n`), `global:` binds and
+actions Mux has nothing for are left out. `Cmd+Shift+,` picks up new and
+changed binds; one taken out of the config gives its key back to the pane.
+
 Option composes characters, `Option+e` an accent and `Option+b` a `∫`, unless
 your Ghostty config sets `macos-option-as-alt`: then Option is Meta, so
 `Option+b` and `Option+f` move a shell back and forward a word, as in

@@ -715,6 +715,32 @@ pub fn user_config_files() -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+/// The user's `keybind` lines from their Ghostty config, in order, each
+/// as `trigger=action`. `keybind = clear` drops those before it.
+#[must_use]
+pub fn user_keybinds() -> Vec<String> {
+    let mut binds = Vec::new();
+    for config in user_config_files() {
+        if let Ok(contents) = read_config(&config) {
+            parse_keybinds(&contents, &mut binds);
+        }
+    }
+    binds
+}
+
+fn parse_keybinds(contents: &str, binds: &mut Vec<String>) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key != "keybind" {
+            continue;
+        }
+        if value == "clear" {
+            binds.clear();
+        } else if !value.is_empty() {
+            binds.push(value);
+        }
+    }
+}
+
 /// The theme the user's Ghostty config names, its dark one when it names a
 /// light and a dark.
 #[must_use]
@@ -3492,6 +3518,17 @@ mod theme_tests {
         assert!(hide);
         parse_mouse_hide("mouse-hide-while-typing =\n", &mut hide);
         assert!(!hide);
+    }
+
+    #[test]
+    fn keybinds_are_kept_in_order_and_clear_drops_those_before() {
+        let mut binds = Vec::new();
+        parse_keybinds(
+            "keybind = cmd+d=new_split:right\nkeybind = clear\n\
+             keybind = shift+enter=text:\\x1b\\r\nkeybind = \"ctrl+==ignore\"\n",
+            &mut binds,
+        );
+        assert_eq!(binds, ["shift+enter=text:\\x1b\\r", "ctrl+==ignore"]);
     }
 
     #[test]

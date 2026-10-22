@@ -16,6 +16,7 @@ mod ghostty_config;
 mod gpui_terminal;
 mod ground;
 mod ime;
+mod keybind;
 mod layout;
 mod links;
 mod motion;
@@ -4868,6 +4869,11 @@ impl MuxApp {
         .on_action(cx.listener(|this, _: &ReloadMuxConfig, _, cx| {
             this.reload_ghostty_config(cx);
         }))
+        .on_action(
+            cx.listener(|this, bind: &keybind::GhosttyKeybind, window, cx| {
+                this.run_ghostty_keybind(bind, window, cx);
+            }),
+        )
     }
 
     /// Name the window for the tab on screen and its session, as the
@@ -6833,6 +6839,7 @@ fn initialize_graphical_application(cx: &mut App) {
         CancelAgentTurn,
         Some("MuxAgentPane"),
     )]);
+    keybind::bind_ghostty_keys(cx);
     configure_theme(cx);
     configure_pointer_hiding(cx);
     if let Err(error) = cx.text_system().add_fonts(vec![

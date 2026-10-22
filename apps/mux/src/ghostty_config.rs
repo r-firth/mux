@@ -76,6 +76,7 @@ impl super::MuxApp {
         }
         self.terminal_views.clear();
         super::configure_pointer_hiding(cx);
+        super::keybind::bind_ghostty_keys(cx);
         self.say_in_strip("reloaded the Ghostty config", false, cx);
         cx.notify();
     }

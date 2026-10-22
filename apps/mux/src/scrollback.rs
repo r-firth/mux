@@ -269,6 +269,36 @@ impl MuxApp {
         true
     }
 
+    /// Step the pane with the keys to the prompt before, or after, the top
+    /// of its view.
+    pub(super) fn jump_to_prompt(&mut self, older: bool, cx: &mut Context<Self>) {
+        let Some(pane_id) = self.terminal_input_pane_id() else {
+            return;
+        };
+        let Some(pane) = self.panes.get(&pane_id) else {
+            return;
+        };
+        let prompts = pane
+            .with_engine(|engine| engine.prompt_rows())
+            .unwrap_or_default();
+        if let Some(movement) = prompt_jump(&prompts, pane.frame.scroll, older) {
+            self.scroll_input_pane(movement, cx);
+        }
+    }
+
+    /// Move the pane with the keys through its history.
+    pub(super) fn scroll_input_pane(
+        &mut self,
+        movement: TerminalViewportScroll,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pane_id) = self.terminal_input_pane_id()
+            && self.scroll_viewport(pane_id, movement)
+        {
+            cx.notify();
+        }
+    }
+
     /// Typing into a pane scrolled back through its history brings it back to
     /// the latest output.
     pub(super) fn return_to_latest(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
