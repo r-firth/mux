@@ -4518,6 +4518,7 @@ name = "mux-workspace"
 version = "0.9.1"
 dependencies = [
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "uuid",
 ]

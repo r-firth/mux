@@ -72,7 +72,7 @@ a double click evens the split out.
 | `1` through `9` | Select a numbered tab and return to Normal |
 | `n` | Create a tab and return to Normal |
 | `r` | Rename the active tab in its chip; Return keeps it, Escape puts it back |
-| `c` | Give the active tab the next ink |
+| `c` | Give the active tab the next ink; it keeps it when moved and after a restart |
 | `Shift+h` / `Shift+Left` | Move the active tab one place left |
 | `Shift+l` / `Shift+Right` | Move the active tab one place right |
 | `b` | Move the focused pane to a tab of its own, next to this one |

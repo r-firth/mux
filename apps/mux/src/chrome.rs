@@ -20,6 +20,18 @@ impl Ink {
         Self::ALL[index % Self::ALL.len()]
     }
 
+    /// The ink at a place in [`Self::ALL`], as tabs keep it.
+    #[must_use]
+    pub const fn from_index(index: u8) -> Self {
+        Self::ALL[index as usize % Self::ALL.len()]
+    }
+
+    /// This ink's place in [`Self::ALL`].
+    #[must_use]
+    pub const fn index(self) -> u8 {
+        self as u8
+    }
+
     #[must_use]
     pub const fn next(self) -> Self {
         match self {

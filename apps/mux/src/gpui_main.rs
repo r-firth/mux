@@ -590,7 +590,6 @@ struct MuxApp {
     agent_unseen: HashSet<AgentSessionId>,
     /// GUI-local tab colours. New tabs take the next ink by position and keep
     /// it, so closing a tab never repaints its neighbours.
-    tab_inks: HashMap<TabId, Ink>,
     tab_rename: Option<TabRename>,
     /// The chips scroll sideways when there are more than fit. They keep the
     /// active tab in view until scrolled by hand, and take it up again when
@@ -773,7 +772,6 @@ impl MuxApp {
             permission_choice: None,
             agent_placeholder: String::new(),
             agent_unseen: HashSet::new(),
-            tab_inks: HashMap::new(),
             tab_rename: None,
             tab_strip_scroll: ScrollHandle::new(),
             tab_strip_active: Cell::new(None),
@@ -1420,22 +1418,24 @@ impl MuxApp {
             })
             .collect::<HashMap<_, _>>();
         self.agent_panes = valid_agent_panes;
-
-        let tabs = self
-            .session
-            .as_ref()
-            .map(|session| session.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>())
-            .unwrap_or_default();
-        self.tab_inks.retain(|tab_id, _| tabs.contains(tab_id));
-        for (position, tab_id) in tabs.into_iter().enumerate() {
-            self.tab_inks
-                .entry(tab_id)
-                .or_insert_with(|| Ink::for_position(position));
-        }
     }
 
+    /// A tab's colour is kept with the tab by the daemon, so it outlasts a
+    /// move along the strip and a restart of the app. A tab from before
+    /// colours were kept takes the colour of its place.
     fn tab_ink(&self, tab_id: TabId) -> Ink {
-        self.tab_inks.get(&tab_id).copied().unwrap_or(Ink::Peach)
+        let Some(session) = &self.session else {
+            return Ink::Peach;
+        };
+        session
+            .tabs
+            .iter()
+            .enumerate()
+            .find(|(_, tab)| tab.id == tab_id)
+            .map_or(Ink::Peach, |(position, tab)| {
+                tab.ink
+                    .map_or_else(|| Ink::for_position(position), Ink::from_index)
+            })
     }
 
     fn active_ink(&self) -> Ink {
@@ -1444,10 +1444,15 @@ impl MuxApp {
     }
 
     fn cycle_active_tab_ink(&mut self) {
-        if let Some(tab_id) = self.active_tab_id() {
-            let next = self.tab_ink(tab_id).next();
-            self.tab_inks.insert(tab_id, next);
+        let Some(tab_id) = self.active_tab_id() else {
+            return;
+        };
+        let next = self.tab_ink(tab_id).next().index();
+        // Shown at once; the daemon's answer says the same.
+        if let Some(tab) = self.session.as_mut().and_then(Session::active_tab_mut) {
+            tab.ink = Some(next);
         }
+        self.send_workspace(WorkspaceCommand::SetTabInk(next));
     }
 
     fn apply_server_event(&mut self, event: ServerEvent) -> Result<()> {

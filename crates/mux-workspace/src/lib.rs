@@ -347,6 +347,11 @@ pub struct Tab {
     pub layout: PaneLayout,
     pub focused_pane: PaneId,
     pub zoomed_pane: Option<PaneId>,
+    /// The tab's colour, as a place in the app's set of inks. A tab is given
+    /// one when it is made, so it keeps its colour when tabs move; tabs from
+    /// before this was kept have none and take the colour of their place.
+    #[serde(default)]
+    pub ink: Option<u8>,
 }
 
 impl Tab {
@@ -376,6 +381,7 @@ impl Tab {
             layout,
             focused_pane: first,
             zoomed_pane: None,
+            ink: None,
         })
     }
 
@@ -470,7 +476,8 @@ impl Session {
         name: impl Into<String>,
         pane_ids: &[PaneId],
     ) -> Result<Self, WorkspaceError> {
-        let tab = Tab::with_panes("1", pane_ids)?;
+        let mut tab = Tab::with_panes("1", pane_ids)?;
+        tab.ink = Some(0);
         let active_tab = tab.id;
         Ok(Self {
             id: SessionId::new(),
@@ -515,10 +522,30 @@ impl Session {
         }
     }
 
+    /// The ink for a new tab: the one after the last tab's, so tabs made
+    /// one after another go round the colours as they always have.
+    fn fresh_ink(&self) -> u8 {
+        let count = u8::try_from(self.tabs.len() % usize::from(INK_COUNT)).unwrap_or(0);
+        self.tabs
+            .last()
+            .and_then(|tab| tab.ink)
+            .map_or(count, |ink| (ink + 1) % INK_COUNT)
+    }
+
+    /// Give the active tab another ink.
+    pub fn set_active_tab_ink(&mut self, ink: u8) -> Result<(), WorkspaceError> {
+        let tab_id = self.active_tab;
+        self.active_tab_mut()
+            .ok_or(WorkspaceError::UnknownTab(tab_id))?
+            .ink = Some(ink % INK_COUNT);
+        Ok(())
+    }
+
     pub fn add_tab(&mut self, pane_id: PaneId) -> Result<TabId, WorkspaceError> {
         self.normalize_numeric_tab_titles();
         let title = (self.tabs.len() + 1).to_string();
-        let tab = Tab::with_panes(title, &[pane_id])?;
+        let mut tab = Tab::with_panes(title, &[pane_id])?;
+        tab.ink = Some(self.fresh_ink());
         let id = tab.id;
         self.tabs.push(tab);
         self.active_tab = id;
@@ -569,7 +596,8 @@ impl Session {
             .position(|tab| tab.id == self.active_tab)
             .ok_or(WorkspaceError::UnknownTab(self.active_tab))?;
         let pane_id = self.tabs[index].close_focused()?;
-        let tab = Tab::with_panes((self.tabs.len() + 1).to_string(), &[pane_id])?;
+        let mut tab = Tab::with_panes((self.tabs.len() + 1).to_string(), &[pane_id])?;
+        tab.ink = Some(self.fresh_ink());
         let id = tab.id;
         self.tabs.insert(index + 1, tab);
         self.active_tab = id;
@@ -694,7 +722,12 @@ pub enum WorkspaceCommand {
     /// Give the focused pane a tab of its own. See
     /// [`Session::break_focused_pane`].
     BreakPaneToTab,
+    /// Colour the active tab with one of the [`INK_COUNT`] inks.
+    SetTabInk(u8),
 }
+
+/// How many tab inks there are to choose from.
+pub const INK_COUNT: u8 = 4;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct Modifiers(u8);
@@ -1264,6 +1297,36 @@ mod tests {
             session.active_tab, third,
             "moving a tab doesn't change which is shown"
         );
+    }
+
+    #[test]
+    fn a_tab_keeps_its_ink_when_it_moves() {
+        let mut session = Session::with_panes("daily", &[PaneId::new()]).expect("session");
+        session.add_tab(PaneId::new()).expect("second tab");
+        let third = session.add_tab(PaneId::new()).expect("third tab");
+        let inks = session.tabs.iter().map(|tab| tab.ink).collect::<Vec<_>>();
+        assert_eq!(inks, vec![Some(0), Some(1), Some(2)]);
+
+        session.set_active_tab_ink(7).expect("colour the third tab");
+        assert_eq!(session.tabs[2].ink, Some(3), "inks wrap round");
+        session.move_tab(third, 0).expect("move it to the front");
+        assert_eq!(session.tabs[0].ink, Some(3));
+
+        session.add_tab(PaneId::new()).expect("fourth tab");
+        assert_eq!(
+            session.tabs[3].ink,
+            Some(2),
+            "a new tab takes the ink after the last tab's"
+        );
+    }
+
+    #[test]
+    fn a_tab_saved_before_inks_were_kept_still_loads() {
+        let session = Session::with_panes("daily", &[PaneId::new()]).expect("session");
+        let mut saved = serde_json::to_value(&session.tabs[0]).expect("tab to json");
+        saved.as_object_mut().expect("an object").remove("ink");
+        let tab: Tab = serde_json::from_value(saved).expect("loads without an ink");
+        assert_eq!(tab.ink, None);
     }
 
     #[test]

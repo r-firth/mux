@@ -491,6 +491,8 @@ impl SessionRuntime {
         })
     }
 
+    // One arm per command; splitting the match would only scatter it.
+    #[allow(clippy::too_many_lines)]
     fn apply_command(
         &self,
         command: WorkspaceCommand,
@@ -594,6 +596,7 @@ impl SessionRuntime {
             WorkspaceCommand::BreakPaneToTab => {
                 self.model.write().break_focused_pane()?;
             }
+            WorkspaceCommand::SetTabInk(ink) => self.model.write().set_active_tab_ink(ink)?,
         }
         Ok(self.attachment()?)
     }
