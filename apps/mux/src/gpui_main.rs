@@ -29,6 +29,7 @@ mod pane_menu;
 mod pane_names;
 mod pane_parser;
 mod progress;
+mod prompt_flash;
 mod quick_select;
 mod run_clock;
 mod scrollback;
@@ -816,6 +817,8 @@ struct MuxApp {
     pane_calls: HashMap<PaneId, mux_terminal::Attention>,
     /// The panes that have called, the latest last.
     call_order: Vec<PaneId>,
+    /// The prompt row gone to last, washed for a moment.
+    prompt_flash: Option<prompt_flash::PromptFlash>,
     /// How far along each pane's program last said it was, and when.
     pane_progress: HashMap<PaneId, (mux_terminal::Progress, Instant)>,
     /// When stale progress reports will next be looked for, if they will.
@@ -1023,6 +1026,7 @@ impl MuxApp {
             pane_restart: None,
             pane_calls: HashMap::new(),
             call_order: Vec::new(),
+            prompt_flash: None,
             pane_progress: HashMap::new(),
             progress_sweep: None,
             finished_commands: Vec::new(),
@@ -5455,6 +5459,7 @@ impl MuxApp {
             )
             .children(self.render_quick_select_labels(pane_id, rect))
             .children(self.bell_flash_overlay(pane_id))
+            .children(self.prompt_flash_overlay(pane_id, rect))
             .children(self.render_thumb_grip(pane_id, body))
             .child(self.file_drop_target(pane_id, cx));
         surface.into_any_element()

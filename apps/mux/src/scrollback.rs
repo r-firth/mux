@@ -59,7 +59,7 @@ fn prompt_jump(
     prompts: &[usize],
     scroll: TerminalScrollState,
     older: bool,
-) -> Option<TerminalViewportScroll> {
+) -> Option<(TerminalViewportScroll, Option<usize>)> {
     let top = usize::try_from(scroll.offset).unwrap_or(usize::MAX);
     let target = if older {
         prompts.iter().rev().find(|&&row| row < top)
@@ -71,9 +71,9 @@ fn prompt_jump(
         Some(&row) => {
             let delta =
                 i64::try_from(row).unwrap_or(i64::MAX) - i64::try_from(top).unwrap_or(i64::MAX);
-            Some(TerminalViewportScroll::Delta(delta))
+            Some((TerminalViewportScroll::Delta(delta), Some(row)))
         }
-        None if !older && !bottom => Some(TerminalViewportScroll::Bottom),
+        None if !older && !bottom => Some((TerminalViewportScroll::Bottom, None)),
         None => None,
     }
 }
@@ -360,13 +360,17 @@ impl MuxApp {
                 }
                 prompt_jump(&prompts, scroll, older)
             }
-            None => scrollback_key(keystroke, pane.frame.rows, scroll.total > scroll.len),
+            None => scrollback_key(keystroke, pane.frame.rows, scroll.total > scroll.len)
+                .map(|movement| (movement, None)),
         };
-        let Some(movement) = movement else {
+        let Some((movement, prompt)) = movement else {
             return false;
         };
         if self.scroll_viewport(pane_id, movement) {
             cx.notify();
+        }
+        if let Some(prompt) = prompt {
+            self.flash_prompt(pane_id, prompt, cx);
         }
         true
     }
@@ -383,8 +387,11 @@ impl MuxApp {
         let prompts = pane
             .with_engine(|engine| engine.prompt_rows())
             .unwrap_or_default();
-        if let Some(movement) = prompt_jump(&prompts, pane.frame.scroll, older) {
+        if let Some((movement, row)) = prompt_jump(&prompts, pane.frame.scroll, older) {
             self.scroll_input_pane(movement, cx);
+            if let Some(row) = row {
+                self.flash_prompt(pane_id, row, cx);
+            }
         }
     }
 
@@ -696,7 +703,7 @@ impl MuxApp {
     }
 
     /// Bring a command's prompt to the top of its pane, and the keys there.
-    pub(super) fn go_to_command(&mut self, pane_id: PaneId, row: usize) {
+    pub(super) fn go_to_command(&mut self, pane_id: PaneId, row: usize, cx: &mut Context<Self>) {
         let Some(offset) = self
             .panes
             .get(&pane_id)
@@ -708,6 +715,7 @@ impl MuxApp {
         let delta =
             i64::try_from(row).unwrap_or(i64::MAX) - i64::try_from(offset).unwrap_or(i64::MAX);
         self.scroll_viewport(pane_id, TerminalViewportScroll::Delta(delta));
+        self.flash_prompt(pane_id, row, cx);
     }
 
     /// The pane's prompt rows, read again only when its screen has changed.
@@ -789,6 +797,7 @@ impl MuxApp {
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if this.scroll_viewport(pane_id, TerminalViewportScroll::Delta(delta)) {
+                        this.flash_prompt(pane_id, row, cx);
                         cx.notify();
                     }
                 }))
@@ -914,14 +923,23 @@ mod tests {
             offset,
             len: 40,
         };
-        let delta = TerminalViewportScroll::Delta;
-        assert_eq!(prompt_jump(&prompts, scroll(460), true), Some(delta(-160)));
-        assert_eq!(prompt_jump(&prompts, scroll(300), true), Some(delta(-180)));
+        let delta = |rows, to| (TerminalViewportScroll::Delta(rows), Some(to));
+        assert_eq!(
+            prompt_jump(&prompts, scroll(460), true),
+            Some(delta(-160, 300))
+        );
+        assert_eq!(
+            prompt_jump(&prompts, scroll(300), true),
+            Some(delta(-180, 120))
+        );
         assert_eq!(prompt_jump(&prompts, scroll(10), true), None);
-        assert_eq!(prompt_jump(&prompts, scroll(120), false), Some(delta(180)));
+        assert_eq!(
+            prompt_jump(&prompts, scroll(120), false),
+            Some(delta(180, 300))
+        );
         assert_eq!(
             prompt_jump(&[10, 120], scroll(120), false),
-            Some(TerminalViewportScroll::Bottom),
+            Some((TerminalViewportScroll::Bottom, None)),
             "past the newest prompt is the latest output"
         );
         assert_eq!(prompt_jump(&[10, 120], scroll(460), false), None);

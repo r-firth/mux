@@ -244,7 +244,8 @@ is what a pane starts with when Mux opens or moves to another session.
 | `Shift+PageUp` / `Shift+PageDown` | The same, unless the program has no history (a full-screen program keeps them) |
 | `Cmd+Up` / `Cmd+Down` | The prompt before, or after, the top of the view (`Cmd+Shift` as well, as in iTerm) |
 
-The shell marks where each prompt begins for `Cmd+Up` and `Cmd+Down`. Mux
+The shell marks where each prompt begins for `Cmd+Up` and `Cmd+Down`; the
+prompt gone to washes for a moment in the tab's ink, so the eye finds it. Mux
 starts zsh and bash so they do; fish marks its own. In a shell that marks
 none, the keys go to the program. While a pane is scrolled back, a faint
 tick beside its scroll thumb marks each prompt in its history, orange for

@@ -316,7 +316,7 @@ impl MuxApp {
             }
             Destination::Command(command) => self.run_palette_command(command, window, cx),
             Destination::Agent(index) => self.open_agent_from_palette(index, window, cx),
-            Destination::Ran(pane_id, row) => self.go_to_command(pane_id, row),
+            Destination::Ran(pane_id, row) => self.go_to_command(pane_id, row, cx),
             Destination::FindInPane => {
                 if let Some(query) = query {
                     self.find_text(query, window, cx);
