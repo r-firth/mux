@@ -96,6 +96,10 @@ restart or a protocol upgrade loses the running programs and scrollback but
 not the shape of the workspace. A file it cannot read, or one from another
 format version, is left alone.
 
+The window keeps its own frame beside it, in `window.json`: where it was
+last left and at what size, and whether it was zoomed. The app opens there
+when a display still shows that frame, and centred otherwise.
+
 Workspace mutations and focused terminal input share one ordered backend
 queue. This prevents keystrokes immediately following a pane, tab, or session
 change from being routed to the formerly focused PTY. A GUI can also select an

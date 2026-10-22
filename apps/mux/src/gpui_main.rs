@@ -29,6 +29,7 @@ mod session_sheet;
 mod settings;
 mod settings_sheet;
 mod sync_input;
+mod window_frame;
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -56,8 +57,7 @@ use gpui::{
     FocusHandle, FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
     KeyUpEvent, Menu, MenuItem, ObjectFit, ParentElement as _, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled, StyledImage as _, SystemMenuType, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, div, img, linear_color_stop, linear_gradient, point, px,
-    rgb, size,
+    Window, WindowOptions, div, img, linear_color_stop, linear_gradient, point, px, rgb, size,
 };
 use gpui_component::{
     InteractiveElementExt as _, Sizable as _, Theme as ComponentTheme, ThemeMode, TitleBar,
@@ -599,6 +599,8 @@ struct MuxApp {
     /// have taken in output.
     events: async_channel::Sender<UserEvent>,
     state_dir: Option<PathBuf>,
+    /// Counts the window's moves, so only the last of a run is kept.
+    window_frame_serial: u64,
     settings: AppSettings,
     profiles: Vec<AgentProfile>,
     session: Option<Session>,
@@ -795,6 +797,7 @@ impl MuxApp {
         // what it shows depends on whether the window is in front.
         cx.observe_window_activation(window, |_, _, cx| cx.notify())
             .detach();
+        Self::keep_window_frame(window, cx);
         let ground = ground::SharedGround::default();
         let ground_view = cx.new(|cx| ground::GroundView::new(Rc::clone(&ground), window, cx));
 
@@ -805,6 +808,7 @@ impl MuxApp {
             backend,
             events,
             state_dir,
+            window_frame_serial: 0,
             settings,
             profiles,
             session: None,
@@ -6330,11 +6334,14 @@ fn run_graphical_application(
         .with_assets(MuxAssets)
         .run(move |cx: &mut App| {
             initialize_graphical_application(cx);
-            let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
+            let bounds = window_frame::opening_bounds(state_dir.as_deref(), cx);
             let window = cx.open_window(
                 WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(560.0), px(360.0))),
+                    window_bounds: Some(bounds),
+                    window_min_size: Some(size(
+                        px(window_frame::MIN_WIDTH),
+                        px(window_frame::MIN_HEIGHT),
+                    )),
                     // Keep a native titled/resizable AppKit window while drawing content through
                     // its transparent titlebar. A missing GPUI titlebar drops the standard
                     // resizable/minimizable/closable style masks on macOS, which also prevents
