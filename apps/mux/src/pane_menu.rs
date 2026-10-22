@@ -32,7 +32,7 @@ pub(super) struct PaneMenu {
     pane_id: PaneId,
     position: gpui::Point<gpui::Pixels>,
     /// The link that was right-clicked, if one was.
-    link: Option<String>,
+    link: Option<links::Link>,
     /// The item the keys or the pointer are on.
     chosen: Option<usize>,
 }
@@ -54,9 +54,7 @@ impl MuxApp {
         rect: layout::Rect,
         position: gpui::Point<gpui::Pixels>,
     ) {
-        let link = self
-            .link_under(pane_id, rect, position)
-            .map(|link| link.url);
+        let link = self.link_under(pane_id, rect, position);
         self.pane_menu = Some(PaneMenu {
             pane_id,
             position,
@@ -89,8 +87,8 @@ impl MuxApp {
             rule_above,
         };
         let mut lines = Vec::new();
-        if let Some(url) = &menu.link {
-            let file = url.starts_with("file://");
+        if let Some(link) = &menu.link {
+            let file = link.path || link.url.starts_with("file://");
             let open = if file { "show in Finder" } else { "open link" };
             let copy = if file { "copy path" } else { "copy link" };
             lines.push(line(Item::OpenLink, open, "⌘click", true, false));
@@ -124,21 +122,24 @@ impl MuxApp {
     }
 
     fn run_pane_menu_item(&mut self, item: Item, window: &mut Window, cx: &mut Context<Self>) {
-        let link = self.pane_menu.take().and_then(|menu| menu.link);
+        let (pane_id, link) = self
+            .pane_menu
+            .take()
+            .map_or((None, None), |menu| (Some(menu.pane_id), menu.link));
         match item {
             Item::OpenLink => {
-                if let Some(url) = link {
-                    self.open_link_url(&url, cx);
+                if let (Some(pane_id), Some(link)) = (pane_id, link) {
+                    self.follow_link(pane_id, &link, cx);
                 }
             }
             Item::CopyLink => {
-                if let Some(url) = link
+                if let Some(link) = link
                     && let Some(clipboard) = &mut self.clipboard
                     && clipboard
-                        .set_text(links::link_text(&url).to_owned())
+                        .set_text(links::link_text(&link.url).to_owned())
                         .is_ok()
                 {
-                    let what = if url.starts_with("file://") {
+                    let what = if link.path || link.url.starts_with("file://") {
                         "copied the path"
                     } else {
                         "copied the link"

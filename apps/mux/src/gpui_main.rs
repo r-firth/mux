@@ -243,6 +243,8 @@ enum UserEvent {
         files: agent_completion::AgentFileIndex,
     },
     BackendError(String),
+    /// Something to say in the strip that went wrong.
+    StripProblem(String),
     /// What the panes of a close are running, by name; empty when nothing
     /// but their shells.
     RunningChecked {
@@ -1256,6 +1258,7 @@ impl MuxApp {
         cx.notify();
     }
 
+    #[allow(clippy::too_many_lines)]
     fn apply_user_event(&mut self, event: UserEvent, window: &mut Window, cx: &mut Context<Self>) {
         let result = match event {
             UserEvent::Attached(attachment) => {
@@ -1344,6 +1347,10 @@ impl MuxApp {
             UserEvent::BackendError(message) => {
                 self.pending_agent_prompt = None;
                 Err(anyhow!(message))
+            }
+            UserEvent::StripProblem(said) => {
+                self.say_in_strip(said, true, cx);
+                Ok(())
             }
             UserEvent::PaneParsed { pane_id, error } => {
                 if let Some(pane) = self.panes.get_mut(&pane_id) {
@@ -4933,6 +4940,7 @@ impl UserEvent {
             Self::Agent(_) => "agent",
             Self::AgentFiles { .. } => "agent-files",
             Self::BackendError(_) => "backend-error",
+            Self::StripProblem(_) => "strip-problem",
             Self::RunningChecked { .. } => "running-checked",
             Self::PaneParsed { .. } => "pane-parsed",
         }

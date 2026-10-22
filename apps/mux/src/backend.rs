@@ -84,6 +84,12 @@ pub enum CommandMessage {
     RefreshAgentFiles {
         pane_id: PaneId,
     },
+    /// Find a path written in a pane's output from the pane's working
+    /// directory and show it in Finder.
+    RevealPath {
+        pane_id: PaneId,
+        written: String,
+    },
     /// Clear a pane's screen and history, as Cmd+K does.
     ClearPane {
         pane_id: PaneId,
@@ -347,6 +353,30 @@ impl BackendConnection {
         }
     }
 
+    /// Show a path written in a pane's output, found from where its shell
+    /// is now, or say there is nothing there.
+    async fn reveal_path(&mut self, events: &EventSender, pane_id: PaneId, written: &str) {
+        let cwd = match self.client.pane_working_directory(pane_id).await {
+            Ok(cwd) => cwd,
+            Err(error) => {
+                report_backend_error(events, error);
+                return;
+            }
+        };
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let path = crate::links::resolve_written_path(written, &cwd, home.as_deref());
+        let said = if !path.exists() {
+            Some(format!("nothing at {written}"))
+        } else if let Err(error) = crate::links::reveal_path(&path) {
+            Some(format!("couldn't show {written}: {error}"))
+        } else {
+            None
+        };
+        if let Some(said) = said {
+            let _ = events.send_blocking(UserEvent::StripProblem(said));
+        }
+    }
+
     /// Ask what a close's panes are running and hand the answer back.
     async fn check_running(
         &mut self,
@@ -493,8 +523,29 @@ impl BackendConnection {
                         .await,
                 );
             }
+            command @ (CommandMessage::RefreshAgentFiles { .. }
+            | CommandMessage::RevealPath { .. }
+            | CommandMessage::ClearPane { .. }
+            | CommandMessage::CheckRunning { .. }) => {
+                self.handle_pane_question(command, events).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The commands that ask the daemon about a pane, or ask it to act on
+    /// one, outside its input and size.
+    async fn handle_pane_question(
+        &mut self,
+        command: CommandMessage,
+        events: &EventSender,
+    ) -> Result<()> {
+        match command {
             CommandMessage::RefreshAgentFiles { pane_id } => {
                 self.refresh_agent_files(events, pane_id).await?;
+            }
+            CommandMessage::RevealPath { pane_id, written } => {
+                self.reveal_path(events, pane_id, &written).await;
             }
             CommandMessage::ClearPane { pane_id } => {
                 report_client_result(events, self.client.clear_pane(pane_id).await);
@@ -502,6 +553,7 @@ impl BackendConnection {
             CommandMessage::CheckRunning { target, pane_ids } => {
                 self.check_running(events, target, pane_ids).await?;
             }
+            _ => {}
         }
         Ok(())
     }

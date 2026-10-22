@@ -199,6 +199,11 @@ written out in the text (even one wrapped across rows), to underline it and
 see where it goes in the strip. `Cmd`-click opens it. File links are shown in
 Finder rather than opened.
 
+A path written in the output, such as a compiler's `src/main.rs:12:5` or
+`~/notes.md`, is a link too: `Cmd`-click shows it in Finder, found from the
+directory the pane's shell is in now (a folder opens). The strip says when
+there is nothing there.
+
 ## Panes that call
 
 A pane out of sight that rings the bell, or sends a desktop notification
