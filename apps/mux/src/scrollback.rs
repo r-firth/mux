@@ -162,7 +162,11 @@ fn prompt_owning(prompts: &[usize], row: usize) -> Option<usize> {
 /// The rows a command printed, between its prompt and the next (or the end
 /// of the history), its trailing blank lines left out. None when it printed
 /// nothing.
-fn output_rows(prompts: &[usize], prompt: usize, lines: &[&str]) -> Option<(usize, usize)> {
+pub(super) fn output_rows(
+    prompts: &[usize],
+    prompt: usize,
+    lines: &[&str],
+) -> Option<(usize, usize)> {
     let next = prompts
         .iter()
         .find(|&&row| row > prompt)
@@ -546,7 +550,7 @@ impl MuxApp {
         [
             self.render_command_header(geometry, cx),
             self.render_prompt_ticks(geometry),
-            self.render_failure_marks(geometry),
+            self.render_failure_marks(geometry, cx),
             self.render_scroll_thumb(geometry),
             self.render_latest_pill(geometry, cx),
         ]
@@ -818,13 +822,15 @@ impl MuxApp {
         )
     }
 
-    /// While a pane is scrolled back, a faint tick beside the thumb for
-    /// each prompt in its history, so ⌘↑ and ⌘↓ have marks to go by. Find
-    /// draws its own ticks there instead.
     /// A slim peach bar in the left margin beside the prompt of each
     /// command on screen that failed, as iTerm marks them, so a failure
-    /// among many commands is seen at a glance.
-    fn render_failure_marks(&self, geometry: layout::PaneGeometry) -> Option<gpui::AnyElement> {
+    /// among many commands is seen at a glance. Hovering one says how the
+    /// command ended, and a click selects what it printed.
+    fn render_failure_marks(
+        &self,
+        geometry: layout::PaneGeometry,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
         let pane_id = geometry.pane_id;
         let pane = self.panes.get(&pane_id)?;
         let prompts = self.cached_prompt_rows(pane_id)?;
@@ -839,20 +845,44 @@ impl MuxApp {
         let marks = prompts
             .iter()
             .enumerate()
-            .filter(|&(index, _)| ending_at(endings, prompts.len(), index).failed().is_some())
-            .filter_map(|(_, &row)| {
-                let row = row.checked_sub(top)?;
-                (row < usize::from(frame.rows)).then_some(row)
+            .map(|(index, &row)| (row, ending_at(endings, prompts.len(), index)))
+            .filter(|(_, ending)| ending.failed().is_some())
+            .filter_map(|(prompt, ending)| {
+                let row = prompt.checked_sub(top)?;
+                (row < usize::from(frame.rows)).then_some((prompt, row, ending))
             })
-            .map(|row| {
+            .map(|(prompt, row, ending)| {
+                let words = ending_words(ending).unwrap_or_default();
+                // The bar is slim; the area that takes the pointer is wider.
                 div()
+                    .id(("failure-mark", prompt))
                     .absolute()
-                    .left(px(rect.x + (padding.left - 4.0).max(0.0)))
-                    .top(px(rect.y + padding.top + height * row as f32 + 2.0))
-                    .w(px(2.0))
-                    .h(px((height - 4.0).max(2.0)))
-                    .rounded_full()
-                    .bg(color(SIGNAL).opacity(0.85))
+                    .left(px(rect.x + (padding.left - 7.0).max(0.0)))
+                    .top(px(rect.y + padding.top + height * row as f32))
+                    .w(px(8.0))
+                    .h(px(height))
+                    .pl(px(3.0))
+                    .py(px(2.0))
+                    .cursor_pointer()
+                    .tooltip(move |_, cx| {
+                        super::strip_tooltip(
+                            format!("{words} · click to select its output"),
+                            None,
+                            cx,
+                        )
+                    })
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_output_of(pane_id, prompt, cx);
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .w(px(2.0))
+                            .h_full()
+                            .rounded_full()
+                            .bg(color(SIGNAL).opacity(0.85)),
+                    )
             })
             .collect::<Vec<_>>();
         (!marks.is_empty()).then(|| {

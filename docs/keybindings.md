@@ -261,8 +261,10 @@ a second or more; click it to go to the prompt.
 
 A command that failed also gets a slim peach bar in the left margin beside
 its prompt, as iTerm marks them, so a failure among many commands stands
-out at a glance. The marks stay when you close and reopen the window, since
-the session remembers how its commands ended.
+out at a glance. Hover a bar to see how the command ended (`exit 2 · 3m`),
+and click it to select what the command printed, ready for `Cmd+C`. The
+marks stay when you close and reopen the window, since the session
+remembers how its commands ended.
 
 ## Find
 

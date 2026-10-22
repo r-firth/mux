@@ -59,6 +59,43 @@ impl MuxApp {
             self.say_in_strip("the last command printed nothing", false, cx);
             return;
         };
+        self.select_output_rows(pane_id, first, last, cx);
+    }
+
+    /// Select what the command run from the prompt at history row `prompt`
+    /// printed, as a click on its failure mark does.
+    pub(super) fn select_output_of(
+        &mut self,
+        pane_id: PaneId,
+        prompt: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane) = self.panes.get(&pane_id) else {
+            return;
+        };
+        let prompts = pane
+            .with_engine(|engine| engine.prompt_rows())
+            .unwrap_or_default();
+        let text = pane
+            .with_engine(|engine| engine.screen_text())
+            .unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        let Some((first, last)) = super::scrollback::output_rows(&prompts, prompt, &lines) else {
+            self.say_in_strip("that command printed nothing", false, cx);
+            return;
+        };
+        self.select_output_rows(pane_id, first, last, cx);
+    }
+
+    /// Select history rows `first` to `last` of a pane, bring the first into
+    /// view, and say how much is selected.
+    fn select_output_rows(
+        &mut self,
+        pane_id: PaneId,
+        first: usize,
+        last: usize,
+        cx: &mut Context<Self>,
+    ) {
         if self.selected_pane != Some(pane_id)
             && let Some(previous) = self.selected_pane.take()
             && let Some(pane) = self.panes.get_mut(&previous)
