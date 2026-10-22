@@ -129,6 +129,22 @@ pub(super) fn bind_ghostty_keys(cx: &mut App) {
     cx.bind_keys(bindings);
 }
 
+/// Whether the user's Ghostty config unbinds `keystroke`, giving the key
+/// back to the program over a default of Ghostty's that Mux keeps too.
+pub(super) fn unbinds(keystroke: &Keystroke) -> bool {
+    // A Mac's arrows carry the function modifier, which triggers leave out.
+    let held = |modifiers: gpui::Modifiers| gpui::Modifiers {
+        function: false,
+        ..modifiers
+    };
+    KEYBINDS.get().into_iter().any(|(trigger, bound)| {
+        bound == Bound::Unbind
+            && Keystroke::parse(&trigger).is_ok_and(|unbound| {
+                unbound.key == keystroke.key && held(unbound.modifiers) == held(keystroke.modifiers)
+            })
+    })
+}
+
 impl MuxApp {
     pub(super) fn run_ghostty_keybind(
         &mut self,

@@ -2272,7 +2272,7 @@ impl MuxApp {
         let Some(pane_id) = pane_id else {
             return;
         };
-        if let Some(bytes) = mac_line_edit(keystroke) {
+        if let Some(bytes) = mac_line_edit(keystroke).filter(|_| !keybind::unbinds(keystroke)) {
             self.return_to_latest(pane_id, cx);
             self.clear_selection_on_typing(pane_id);
             for target in self.key_targets(pane_id) {
@@ -6424,15 +6424,22 @@ fn terminal_key_event(
 /// The line-editing keys of a Mac text field, as Ghostty sends them on a
 /// Mac: ⌘← and ⌘→ to the start and end of the line (^A, ^E) and ⌘⌫ to
 /// delete back to its start (^U), which shells and most line editors read.
+/// On a Mac, ⌥← and ⌥→ go a word back or on (Esc b, Esc f) too.
 fn mac_line_edit(keystroke: &gpui::Keystroke) -> Option<&'static [u8]> {
+    line_edit_keys(keystroke, cfg!(target_os = "macos"))
+}
+
+fn line_edit_keys(keystroke: &gpui::Keystroke, mac: bool) -> Option<&'static [u8]> {
     let modifiers = keystroke.modifiers;
-    if !modifiers.platform || modifiers.control || modifiers.alt || modifiers.shift {
+    if modifiers.control || modifiers.shift {
         return None;
     }
-    match keystroke.key.as_str() {
-        "left" => Some(b"\x01"),
-        "right" => Some(b"\x05"),
-        "backspace" => Some(b"\x15"),
+    match (modifiers.platform, modifiers.alt, keystroke.key.as_str()) {
+        (true, false, "left") => Some(b"\x01"),
+        (true, false, "right") => Some(b"\x05"),
+        (true, false, "backspace") => Some(b"\x15"),
+        (false, true, "left") if mac => Some(b"\x1bb"),
+        (false, true, "right") if mac => Some(b"\x1bf"),
         _ => None,
     }
 }
@@ -7128,9 +7135,9 @@ mod tests {
         AgentTabActivity, GridMetrics, PaneOutputUpdate, PaneReplica, PaneScrollState,
         agent_session_is_visible, agent_tab_activity, agent_tab_activity_label,
         command_needs_agent, format_agent_context_usage, format_session_pane_count,
-        input_position_at, layout, mac_line_edit, option_as_meta, or_list, pane_needs_live_frame,
-        pane_parser, paste_runs_lines, reconcile_pane_replicas, strip_wording,
-        take_terminal_key_release, terminal_frame_text, terminal_input_pane,
+        input_position_at, layout, line_edit_keys, mac_line_edit, option_as_meta, or_list,
+        pane_needs_live_frame, pane_parser, paste_runs_lines, reconcile_pane_replicas,
+        strip_wording, take_terminal_key_release, terminal_frame_text, terminal_input_pane,
         terminal_key_down_target, terminal_key_event, terminal_sizes_for_geometry,
         terminal_tab_keystroke,
     };
@@ -7369,6 +7376,22 @@ mod tests {
         assert_eq!(mac_line_edit(&key("left", false, false)), None);
         assert_eq!(mac_line_edit(&key("left", true, true)), None);
         assert_eq!(mac_line_edit(&key("up", true, false)), None);
+        let option = |key: &str| gpui::Keystroke {
+            modifiers: gpui::Modifiers {
+                alt: true,
+                ..gpui::Modifiers::default()
+            },
+            key: key.to_owned(),
+            key_char: None,
+        };
+        assert_eq!(line_edit_keys(&option("left"), true), Some(&b"\x1bb"[..]));
+        assert_eq!(line_edit_keys(&option("right"), true), Some(&b"\x1bf"[..]));
+        assert_eq!(
+            line_edit_keys(&option("left"), false),
+            None,
+            "a Mac's key only"
+        );
+        assert_eq!(line_edit_keys(&option("up"), true), None);
     }
 
     #[test]

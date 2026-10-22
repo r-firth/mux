@@ -52,6 +52,10 @@ your Ghostty config sets `macos-option-as-alt`: then Option is Meta, so
 Ghostty. Mux can't tell the two Option keys apart, so `left` and `right` both
 turn it on for either key.
 
+The line keys above (`Cmd+Left`, `Cmd+Right`, `Cmd+Backspace`, `Option+Left`
+and `Option+Right`) are Ghostty's defaults on a Mac; `unbind` one, such as
+`keybind = alt+left=unbind`, to send the program the key itself instead.
+
 ## Mac shortcuts
 
 The keys a Mac terminal answers to work beside Zellij's, from any mode and
@@ -69,6 +73,7 @@ from an agent pane too. They are in the menu bar's Shell and Window menus.
 | `Cmd+Shift+O` | Select what the last command printed, or what a running one has printed so far (needs the shell's prompt marks; see Scrollback) |
 | `Cmd+Left` / `Cmd+Right` | Go to the start or end of the line being typed (sends `Ctrl+a` / `Ctrl+e`, as Ghostty does) |
 | `Cmd+Backspace` | Delete back to the start of the line (sends `Ctrl+u`) |
+| `Option+Left` / `Option+Right` | Go back or on a word in the line being typed (sends `Esc b` / `Esc f`, as Ghostty does) |
 | `Cmd+J` | Go to the pane that called last (see Panes that call) |
 | `Cmd+K` | Clear the focused pane: its screen and history at the prompt, only its history with a program in front |
 | `Cmd+1` through `Cmd+8` | Select a numbered tab |
