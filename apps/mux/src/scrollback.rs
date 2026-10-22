@@ -86,6 +86,19 @@ fn command_above(prompts: &[usize], scroll: TerminalScrollState) -> Option<usize
     prompts.iter().rev().find(|&&row| row < top).copied()
 }
 
+/// How the command run from the prompt at `index` of `prompt_count` ended,
+/// if it failed: the shell's endings lined up with the prompts from the
+/// newest.
+fn failed_status(
+    endings: &std::collections::VecDeque<Option<i32>>,
+    prompt_count: usize,
+    index: usize,
+) -> Option<i32> {
+    let from_newest = prompt_count.checked_sub(index + 1)?;
+    let at = endings.len().checked_sub(from_newest + 1)?;
+    endings[at].filter(|&status| status != 0)
+}
+
 /// Each pane's prompt rows, with the frame they were read for.
 pub(super) type PromptRows = std::cell::RefCell<HashMap<PaneId, (u64, Rc<Vec<usize>>)>>;
 
@@ -482,6 +495,10 @@ impl MuxApp {
         }
         let prompts = self.cached_prompt_rows(pane_id)?;
         let row = command_above(&prompts, scroll)?;
+        let failed = prompts
+            .iter()
+            .position(|&prompt| prompt == row)
+            .and_then(|index| failed_status(pane.title.command_endings(), prompts.len(), index));
         let text = pane
             .with_engine(|engine| engine.row_text(row))
             .ok()
@@ -521,7 +538,14 @@ impl MuxApp {
                         cx.notify();
                     }
                 }))
-                .child(text)
+                .child(div().flex_1().overflow_hidden().child(text))
+                .children(failed.map(|status| {
+                    div()
+                        .flex_none()
+                        .pl(px(12.0))
+                        .text_color(color(SIGNAL))
+                        .child(format!("exit {status}"))
+                }))
                 .into_any_element(),
         )
     }
@@ -556,13 +580,21 @@ impl MuxApp {
             .w(px(4.0))
             .h(px(track));
         // One tick to a pixel row or two is all the edge can show.
+        let endings = pane.title.command_endings();
         let mut last = f32::NEG_INFINITY;
-        for &row in prompts.iter() {
+        for (index, &row) in prompts.iter().enumerate() {
             let y = (row as f32 + 0.5) / total * track;
-            if y - last < 2.0 {
+            // A failure always shows, in the colour progress fails in.
+            let failed = failed_status(endings, prompts.len(), index).is_some();
+            if y - last < 2.0 && !failed {
                 continue;
             }
             last = y;
+            let tint = if failed {
+                color(SIGNAL).opacity(0.9)
+            } else {
+                color(MUTED_TEXT).opacity(0.45)
+            };
             ticks = ticks.child(
                 div()
                     .absolute()
@@ -571,7 +603,7 @@ impl MuxApp {
                     .w(px(4.0))
                     .h(px(1.5))
                     .rounded_full()
-                    .bg(color(MUTED_TEXT).opacity(0.45)),
+                    .bg(tint),
             );
         }
         Some(ticks.into_any_element())
@@ -661,6 +693,18 @@ mod tests {
         assert_eq!(command_above(&prompts, scroll(11)), Some(10));
         assert_eq!(command_above(&prompts, scroll(299)), Some(120));
         assert_eq!(command_above(&prompts, scroll(460)), Some(300));
+    }
+
+    #[test]
+    fn failures_line_up_with_the_prompts_from_the_newest() {
+        let endings: std::collections::VecDeque<_> = [Some(1), Some(0), Some(2), None].into();
+        // Five prompts on screen, the oldest from before the shell's marks
+        // were followed.
+        assert_eq!(failed_status(&endings, 5, 0), None);
+        assert_eq!(failed_status(&endings, 5, 1), Some(1));
+        assert_eq!(failed_status(&endings, 5, 2), None, "it succeeded");
+        assert_eq!(failed_status(&endings, 5, 3), Some(2));
+        assert_eq!(failed_status(&endings, 5, 4), None, "still at its prompt");
     }
 
     #[test]

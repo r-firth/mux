@@ -237,9 +237,10 @@ is what a pane starts with when Mux opens or moves to another session.
 The shell marks where each prompt begins for `Cmd+Up` and `Cmd+Down`. Mux
 starts zsh and bash so they do; fish marks its own. In a shell that marks
 none, the keys go to the program. While a pane is scrolled back, a faint
-tick beside its scroll thumb marks each prompt in its history, and when
-the view starts partway through a command's output, that command's prompt
-line stays pinned to the top of the pane; click it to go to the prompt.
+tick beside its scroll thumb marks each prompt in its history, orange for
+a command that failed, and when the view starts partway through a
+command's output, that command's prompt line stays pinned to the top of the
+pane, with `exit 2` beside it if it failed; click it to go to the prompt.
 
 ## Find
 

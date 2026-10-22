@@ -17,7 +17,13 @@ pub struct TitleScanner {
     copied: Option<String>,
     progress: Option<Progress>,
     exit_status: Option<i32>,
+    commands: std::collections::VecDeque<Option<i32>>,
+    command_started: bool,
+    marks_starts: bool,
 }
+
+/// How many prompts' worth of command endings a pane remembers.
+const REMEMBERED_COMMANDS: usize = 10_000;
 
 /// A program asking to be noticed.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -128,6 +134,14 @@ impl TitleScanner {
     /// another has started since.
     pub fn take_exit_status(&mut self) -> Option<i32> {
         self.exit_status.take()
+    }
+
+    /// How the command run from each prompt ended, oldest first, one for
+    /// each prompt the shell marked; the newest is the prompt still
+    /// waiting. Line them up with the screen's prompts from the newest.
+    #[must_use]
+    pub fn command_endings(&self) -> &std::collections::VecDeque<Option<i32>> {
+        &self.commands
     }
 
     pub fn scan(&mut self, bytes: &[u8]) {
@@ -291,12 +305,34 @@ impl TitleScanner {
 impl TitleScanner {
     /// OSC 133: `C` as a command starts, `D ; status` as it ends. A command
     /// starting forgets how the one before ended.
+    ///
+    /// Each `A`, a prompt, starts a command's entry, and its `D` says how
+    /// it ended. A shell that marks where commands start (zsh's `C`) has
+    /// the `D` of an empty line left out; one that does not (bash) says
+    /// it again, so it is taken as given.
     fn commit_shell_mark(&mut self, text: &str) {
         let mut parts = text.split(';');
         match parts.next() {
-            Some("C") => self.exit_status = None,
+            Some("A") => {
+                if self.commands.len() == REMEMBERED_COMMANDS {
+                    self.commands.pop_front();
+                }
+                self.commands.push_back(None);
+                self.command_started = false;
+            }
+            Some("C") => {
+                self.exit_status = None;
+                self.command_started = true;
+                self.marks_starts = true;
+            }
             Some("D") => {
                 self.exit_status = parts.next().and_then(|status| status.trim().parse().ok());
+                if (self.command_started || !self.marks_starts)
+                    && let Some(ending) = self.commands.back_mut()
+                {
+                    *ending = self.exit_status;
+                }
+                self.command_started = false;
             }
             _ => {}
         }
@@ -415,6 +451,35 @@ mod tests {
         assert_eq!(scanner.take_exit_status(), None, "a new command forgets it");
         scanner.scan(b"\x1b]133;D\x07");
         assert_eq!(scanner.take_exit_status(), None);
+    }
+
+    #[test]
+    fn each_prompt_remembers_how_its_command_ended() {
+        let mut scanner = TitleScanner::default();
+        // zsh: an empty line's prompt has no `C`, and no ending.
+        scanner.scan(b"\x1b]133;A\x07$ \x1b]133;C\x07");
+        scanner.scan(b"\x1b]133;D;2\x07\x1b]133;A\x07$ ");
+        scanner.scan(b"\x1b]133;A\x07$ \x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;A\x07");
+        assert_eq!(
+            scanner
+                .command_endings()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [Some(2), None, Some(0), None]
+        );
+        // bash marks no starts: each `D` is taken as given.
+        let mut scanner = TitleScanner::default();
+        scanner.scan(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+        scanner.scan(b"\x1b]133;D;1\x07\x1b]133;A\x07$ ");
+        assert_eq!(
+            scanner
+                .command_endings()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [Some(1), None]
+        );
     }
 
     #[test]
