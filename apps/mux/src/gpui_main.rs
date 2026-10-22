@@ -460,6 +460,12 @@ fn terminal_metrics(font_family: &str, size: f32, cx: &App) -> GridMetrics {
     metrics
 }
 
+/// How far the wheel scrolls, as in the user's Ghostty.
+fn scroll_multiplier() -> mux_terminal_ghostty::ScrollMultiplier {
+    static MULTIPLIER: OnceLock<mux_terminal_ghostty::ScrollMultiplier> = OnceLock::new();
+    *MULTIPLIER.get_or_init(mux_terminal_ghostty::user_scroll_multiplier)
+}
+
 fn restore_pane_replica(
     pane: &PaneAttachment,
     ghostty_theme: &GhosttyTheme,
@@ -3939,10 +3945,11 @@ impl MuxApp {
         rect: layout::Rect,
         event: &gpui::ScrollWheelEvent,
     ) -> bool {
+        let multiplier = scroll_multiplier();
         let (delta_rows, reset_fraction) = match event.delta {
-            gpui::ScrollDelta::Lines(delta) => (-delta.y * 3.0, true),
+            gpui::ScrollDelta::Lines(delta) => (-delta.y * multiplier.discrete, true),
             gpui::ScrollDelta::Pixels(delta) => (
-                -f32::from(delta.y) / self.metrics.cell_height,
+                -f32::from(delta.y) * multiplier.precision / self.metrics.cell_height,
                 matches!(event.touch_phase, gpui::TouchPhase::Started),
             ),
         };

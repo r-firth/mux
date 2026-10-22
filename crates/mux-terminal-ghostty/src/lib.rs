@@ -345,6 +345,79 @@ fn parse_cell_height_adjust(contents: &str, adjust: &mut CellAdjust) {
     }
 }
 
+/// How far the wheel scrolls: `mouse-scroll-multiplier` from the user's
+/// Ghostty config, for trackpads (`precision`) and for wheels that click
+/// (`discrete`). A bare number sets both, as in Ghostty, which scrolls three
+/// rows a click and a trackpad's own distance by default.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollMultiplier {
+    pub precision: f32,
+    pub discrete: f32,
+}
+
+impl Default for ScrollMultiplier {
+    fn default() -> Self {
+        Self {
+            precision: 1.0,
+            discrete: 3.0,
+        }
+    }
+}
+
+/// The user's `mouse-scroll-multiplier`.
+#[must_use]
+pub fn user_scroll_multiplier() -> ScrollMultiplier {
+    let mut multiplier = ScrollMultiplier::default();
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_scroll_multiplier(&contents, &mut multiplier);
+            }
+        }
+    }
+    multiplier
+}
+
+fn parse_scroll_multiplier(contents: &str, multiplier: &mut ScrollMultiplier) {
+    let number = |value: &str| {
+        value
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(|value| value.clamp(0.01, 10_000.0))
+    };
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key != "mouse-scroll-multiplier" {
+            continue;
+        }
+        if value.trim().is_empty() {
+            *multiplier = ScrollMultiplier::default();
+        } else if let Some(both) = number(&value) {
+            *multiplier = ScrollMultiplier {
+                precision: both,
+                discrete: both,
+            };
+        } else {
+            for part in value.split(',') {
+                match part.split_once(':') {
+                    Some((name, value)) if name.trim() == "precision" => {
+                        if let Some(value) = number(value) {
+                            multiplier.precision = value;
+                        }
+                    }
+                    Some((name, value)) if name.trim() == "discrete" => {
+                        if let Some(value) = number(value) {
+                            multiplier.discrete = value;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 /// Whether a paste that would run commands is held for a second ⌘V:
 /// `clipboard-paste-protection` from the user's Ghostty config, on by
 /// default as in Ghostty.
@@ -3005,6 +3078,32 @@ mod theme_tests {
         assert!((CellAdjust::Points(-50.0).apply(20.0) - 10.0).abs() < f32::EPSILON);
         parse_cell_height_adjust("adjust-cell-height =\n", &mut adjust);
         assert_eq!(adjust, CellAdjust::None);
+    }
+
+    #[test]
+    fn scroll_multiplier_takes_one_number_or_each_kind() {
+        let mut multiplier = ScrollMultiplier::default();
+        parse_scroll_multiplier("mouse-scroll-multiplier = 2\n", &mut multiplier);
+        assert_eq!(
+            multiplier,
+            ScrollMultiplier {
+                precision: 2.0,
+                discrete: 2.0
+            }
+        );
+        parse_scroll_multiplier(
+            "mouse-scroll-multiplier = precision:0.5,discrete:5\n",
+            &mut multiplier,
+        );
+        assert_eq!(
+            multiplier,
+            ScrollMultiplier {
+                precision: 0.5,
+                discrete: 5.0
+            }
+        );
+        parse_scroll_multiplier("mouse-scroll-multiplier =\n", &mut multiplier);
+        assert_eq!(multiplier, ScrollMultiplier::default());
     }
 
     #[test]

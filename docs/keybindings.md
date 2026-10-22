@@ -160,6 +160,10 @@ at the bottom of the pane says how many lines are below, counting up while
 the pane carries on printing; click it to go back down. Typing also returns
 the pane to its latest output.
 
+`mouse-scroll-multiplier` in your Ghostty config sets how far the wheel goes,
+as in Ghostty: one number for both, or `precision:` for a trackpad and
+`discrete:` for a wheel that clicks (three rows a click by default).
+
 A pane keeps as much history as your Ghostty does: the `scrollback-limit` in
 its config, or Ghostty's own 10 MB, which is several thousand rows (more in a
 narrow pane). Tab switches, splits and closes leave it alone, even while the
