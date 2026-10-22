@@ -750,6 +750,9 @@ pub struct CommandFinishNotice {
     pub watched_too: bool,
     /// How long a command must run to be worth calling about.
     pub after: std::time::Duration,
+    /// Whether it also posts a desktop notification:
+    /// `notify-on-command-finish-action` with `notify`.
+    pub desktop: bool,
 }
 
 impl Default for CommandFinishNotice {
@@ -758,6 +761,7 @@ impl Default for CommandFinishNotice {
             enabled: true,
             watched_too: false,
             after: std::time::Duration::from_secs(10),
+            desktop: false,
         }
     }
 }
@@ -790,13 +794,20 @@ fn parse_command_finish_notice(contents: &str, notice: &mut CommandFinishNotice)
                     notice.after = after;
                 }
             }
+            ("notify-on-command-finish-action", value) => {
+                for action in value.split(',').map(str::trim) {
+                    match action {
+                        "notify" => notice.desktop = true,
+                        "no-notify" => notice.desktop = false,
+                        _ => {}
+                    }
+                }
+            }
             _ => {}
         }
     }
 }
 
-/// A Ghostty duration: whole numbers with units, run together or spaced,
-/// as in `5s`, `1m30s` or `1h 15m`.
 /// How long after a close Ghostty's undo can bring it back:
 /// `undo-timeout` from the user's Ghostty config, five seconds by default.
 #[must_use]
@@ -822,6 +833,8 @@ fn parse_undo_timeout(contents: &str, timeout: &mut std::time::Duration) {
     }
 }
 
+/// A Ghostty duration: whole numbers with units, run together or spaced,
+/// as in `5s`, `1m30s` or `1h 15m`.
 fn parse_duration(value: &str) -> Option<std::time::Duration> {
     let mut total = std::time::Duration::ZERO;
     let mut rest = value.trim();
@@ -3972,6 +3985,12 @@ mod theme_tests {
         );
         assert!(!notice.enabled);
         assert_eq!(notice.after, std::time::Duration::from_secs(90));
+        assert!(!notice.desktop);
+        parse_command_finish_notice(
+            "notify-on-command-finish-action = bell,notify\n",
+            &mut notice,
+        );
+        assert!(notice.desktop);
         assert_eq!(
             parse_duration("1h 15m"),
             Some(std::time::Duration::from_mins(75))
