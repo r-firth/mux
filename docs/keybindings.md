@@ -195,7 +195,9 @@ This keeps foreground Control-key input untouched except for `Ctrl+p` and
 A pane shows the cursor your Ghostty does: `cursor-style` in its config
 (`block`, `bar`, `underline` or `block_hollow`), a block by default. A program
 that picks its own cursor, as Vim does in insert mode, still gets it, and the
-pane goes back to yours when the program resets it.
+pane goes back to yours when the program resets it. The letter under a
+block reads in the background's colour, and a pane without the keys marks
+where its cursor is with a faint hollow block, as Ghostty does.
 
 At a zsh or bash prompt the cursor is a blinking bar, and the program's own
 while a command runs, as Ghostty's shell integration has it;
