@@ -121,8 +121,18 @@ pub(super) fn ending_words(ending: CommandEnding) -> Option<String> {
 
 /// The command on a prompt's line, after the prompt: what follows the
 /// first `$ `, `# `, `% `, `> ` or `❯ `, or the whole line when it has none.
+/// A line that ends in one of them, its space trimmed, is a prompt nothing
+/// was typed at.
 fn command_of(line: &str) -> &str {
-    ["$ ", "# ", "% ", "> ", "❯ "]
+    let line = line.trim_end();
+    let marks = ["$ ", "# ", "% ", "> ", "❯ "];
+    if marks.iter().any(|mark| line.ends_with(mark.trim_end())) {
+        let typed = marks.iter().filter_map(|mark| line.find(mark)).min();
+        if typed.is_none() {
+            return "";
+        }
+    }
+    marks
         .iter()
         .filter_map(|mark| line.find(mark).map(|at| at + mark.len()))
         .min()
@@ -583,7 +593,10 @@ impl MuxApp {
         let pane = self.panes.get(&pane_id)?;
         let point = self.selection_pointer(rect, &pane.frame, position).point?;
         let row = usize::try_from(pane.frame.scroll.offset).ok()? + usize::from(point.row);
-        prompt_owning(&self.cached_prompt_rows(pane_id)?, row)
+        let prompt = prompt_owning(&self.cached_prompt_rows(pane_id)?, row)?;
+        // A prompt nothing was typed at has no command to copy.
+        let line = pane.with_engine(|engine| engine.row_text(prompt)).ok()?;
+        (!command_of(&line).is_empty()).then_some(prompt)
     }
 
     /// Put on the clipboard the command run from a prompt, without the
@@ -970,6 +983,8 @@ mod tests {
         assert_eq!(command_of("❯ ls"), "ls");
         assert_eq!(command_of("ryan@mac src % "), "");
         assert_eq!(command_of("plain"), "plain");
+        assert_eq!(command_of("root@vm:~#"), "", "its space trimmed");
+        assert_eq!(command_of("~/src $ make >"), "make >");
     }
 
     #[test]
