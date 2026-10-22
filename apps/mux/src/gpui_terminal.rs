@@ -401,6 +401,7 @@ fn prepare_runs(
     let mut cache = cache.borrow_mut();
     cache.begin_frame(font_family, metrics.font_size);
     let minimum = minimum_contrast();
+    let cursor_text = cursor_colors().text.unwrap_or(frame.background);
 
     for row in 0..usize::from(frame.rows) {
         let mut column = 0;
@@ -416,7 +417,7 @@ fn prepare_runs(
                 // Under a block cursor the letter takes the background's
                 // colour, as Ghostty's default cursor-text, so it reads.
                 if cursor_cell == Some((row, column)) {
-                    return frame.background;
+                    return cursor_text;
                 }
                 let foreground = match selection_text {
                     Some(text) if cell.selected => text,
@@ -574,7 +575,8 @@ fn paint_cursor(
     under_text: bool,
     window: &mut Window,
 ) {
-    let (ink, hollow) = (chrome.cursor, chrome.hollow_cursor);
+    let ink = cursor_colors().cursor.map_or(chrome.cursor, terminal_color);
+    let hollow = chrome.hollow_cursor;
     let Some(mut cursor) = frame
         .cursor
         .filter(|cursor| cursor.visible && cursor.x < frame.cols && cursor.y < frame.rows)
@@ -686,6 +688,13 @@ fn effective_foreground(cell: &RenderCell) -> Rgb {
     } else {
         cell.foreground
     }
+}
+
+/// The user's own `cursor-color` and `cursor-text`.
+fn cursor_colors() -> mux_terminal_ghostty::CursorColors {
+    static COLORS: crate::ghostty_config::Reloadable<mux_terminal_ghostty::CursorColors> =
+        crate::ghostty_config::Reloadable::new(mux_terminal_ghostty::user_cursor_colors);
+    COLORS.get()
 }
 
 /// The user's `minimum-contrast`.

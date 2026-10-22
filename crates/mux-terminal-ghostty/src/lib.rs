@@ -398,6 +398,36 @@ fn parse_clipboard_write(contents: &str, allowed: &mut bool) {
     }
 }
 
+/// The cursor's colours the user's own Ghostty config sets with
+/// `cursor-color` and `cursor-text`. A theme's are left out, so the cursor
+/// keeps the tab's ink unless the user picked one themselves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CursorColors {
+    pub cursor: Option<Rgb>,
+    pub text: Option<Rgb>,
+}
+
+#[must_use]
+pub fn user_cursor_colors() -> CursorColors {
+    let mut colors = CursorColors::default();
+    for config in user_config_files() {
+        if let Ok(contents) = read_config(&config) {
+            parse_cursor_colors(&contents, &mut colors);
+        }
+    }
+    colors
+}
+
+fn parse_cursor_colors(contents: &str, colors: &mut CursorColors) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        match key.as_str() {
+            "cursor-color" => colors.cursor = parse_rgb(&value),
+            "cursor-text" => colors.text = parse_rgb(&value),
+            _ => {}
+        }
+    }
+}
+
 /// Whether programs may read the clipboard with OSC 52: `clipboard-read =
 /// allow` in the user's Ghostty config. Ghostty asks by default; Mux has no
 /// way to ask, so it refuses unless allowed.
@@ -4006,6 +4036,33 @@ mod theme_tests {
         assert!(allowed);
         parse_clipboard_read("clipboard-read = ask\n", &mut allowed);
         assert!(!allowed);
+    }
+
+    #[test]
+    fn cursor_colours_come_from_the_users_own_lines() {
+        let mut colors = CursorColors::default();
+        parse_cursor_colors(
+            "cursor-color = #ff8800\ncursor-text = 101010\n",
+            &mut colors,
+        );
+        assert_eq!(
+            colors.cursor,
+            Some(Rgb {
+                r: 0xff,
+                g: 0x88,
+                b: 0
+            })
+        );
+        assert_eq!(
+            colors.text,
+            Some(Rgb {
+                r: 0x10,
+                g: 0x10,
+                b: 0x10
+            })
+        );
+        parse_cursor_colors("cursor-color =\n", &mut colors);
+        assert_eq!(colors.cursor, None);
     }
 
     #[test]
