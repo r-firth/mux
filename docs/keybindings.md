@@ -138,6 +138,14 @@ keys stay put while output moves underneath them.
 | Backspace | Take back the last letter |
 | Escape or `Cmd+Shift+Space` | Close quick select |
 
+## Right click
+
+A right click on a terminal pane opens a menu by the pointer: copy and
+paste, split right or down, zoom, clear, find and close, each beside its
+keys. The arrows and Return work it too; Escape or a click elsewhere puts it
+away. A program that takes the mouse, such as an editor, gets the click
+instead, unless Shift is held.
+
 ## Links
 
 Hold `Cmd` over a link in a pane's output, an OSC 8 hyperlink or a URL

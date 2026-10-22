@@ -17,6 +17,7 @@ mod motion;
 mod palette;
 mod pane_calls;
 mod pane_exit;
+mod pane_menu;
 mod pane_parser;
 mod quick_select;
 mod scrollback;
@@ -599,6 +600,7 @@ struct MuxApp {
     tab_strip_follow: Cell<bool>,
     strip_message: Option<StripMessage>,
     strip_serial: u64,
+    pane_menu: Option<pane_menu::PaneMenu>,
     /// A close that found something running, and when: closing the same
     /// thing again soon after goes ahead.
     close_armed: Option<(CloseTarget, Instant)>,
@@ -779,6 +781,7 @@ impl MuxApp {
             strip_message: None,
             strip_serial: 0,
             close_armed: None,
+            pane_menu: None,
             size_readout: false,
             size_readout_pending: false,
             size_readout_serial: 0,
@@ -1862,6 +1865,10 @@ impl MuxApp {
             cx.stop_propagation();
             return;
         }
+        if self.pane_menu_open() && self.pane_menu_key(&event.keystroke, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.active_agent_pane() == self.terminal_input_pane_id() {
             // The focused pane is currently a native agent surface. Its input
             // and modal-key handlers own this event; never leak it through to
@@ -1911,41 +1918,14 @@ impl MuxApp {
         cx: &mut Context<Self>,
     ) {
         if keystroke.modifiers.platform && keystroke.key == "c" {
-            let selected = self.selected_pane.or_else(|| self.focused_pane_id());
-            if let Some(text) = selected
-                .and_then(|pane_id| self.panes.get(&pane_id))
-                .and_then(|pane| {
-                    pane.with_engine(|engine| engine.selected_text())
-                        .ok()
-                        .flatten()
-                })
-                && let Some(clipboard) = &mut self.clipboard
-            {
-                let lines = text.lines().count().max(1);
-                if clipboard.set_text(text).is_ok() {
-                    let copied = if lines == 1 {
-                        "copied 1 line".to_owned()
-                    } else {
-                        format!("copied {lines} lines")
-                    };
-                    self.say_in_strip(copied, false, cx);
-                }
-            }
+            self.copy_selection(cx);
             return;
         }
         if self.exited_pane_key(keystroke, held) || self.scrollback_key_down(keystroke, cx) {
             return;
         }
         if keystroke.modifiers.platform && keystroke.key == "v" {
-            if let Some(clipboard) = &mut self.clipboard
-                && let Ok(text) = clipboard.get_text()
-                && let Some(pane_id) = self.terminal_input_pane_id()
-                && let Some(pane) = self.panes.get(&pane_id)
-                && let Ok(bytes) = pane.with_engine(|engine| engine.encode_paste(&text))
-            {
-                self.write_focused(bytes);
-                self.return_to_latest(pane_id, cx);
-            }
+            self.paste_clipboard(cx);
             return;
         }
 
@@ -1964,6 +1944,47 @@ impl MuxApp {
         if self.send_terminal_key_to(pane_id, keystroke, false, held, caps_lock) && !held {
             self.terminal_key_presses
                 .insert(keystroke.key.clone(), pane_id);
+        }
+    }
+
+    /// The selected text, from the pane it was made in.
+    fn selected_text(&self) -> Option<String> {
+        let selected = self.selected_pane.or_else(|| self.focused_pane_id())?;
+        self.panes
+            .get(&selected)?
+            .with_engine(|engine| engine.selected_text())
+            .ok()
+            .flatten()
+    }
+
+    /// Copy the selection, and say how much in the strip.
+    fn copy_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = self.selected_text()
+            && let Some(clipboard) = &mut self.clipboard
+        {
+            let lines = text.lines().count().max(1);
+            if clipboard.set_text(text).is_ok() {
+                let copied = if lines == 1 {
+                    "copied 1 line".to_owned()
+                } else {
+                    format!("copied {lines} lines")
+                };
+                self.say_in_strip(copied, false, cx);
+            }
+        }
+    }
+
+    /// Paste the clipboard into the pane with the keys, as its program
+    /// asks for pastes, and show the pane's latest output.
+    fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
+        if let Some(clipboard) = &mut self.clipboard
+            && let Ok(text) = clipboard.get_text()
+            && let Some(pane_id) = self.terminal_input_pane_id()
+            && let Some(pane) = self.panes.get(&pane_id)
+            && let Ok(bytes) = pane.with_engine(|engine| engine.encode_paste(&text))
+        {
+            self.write_focused(bytes);
+            self.return_to_latest(pane_id, cx);
         }
     }
 
@@ -3348,8 +3369,10 @@ impl MuxApp {
             self.selection_drag = None;
             return;
         }
-        if event.button == gpui::MouseButton::Left {
-            self.begin_selection(pane_id, rect, event);
+        match event.button {
+            gpui::MouseButton::Left => self.begin_selection(pane_id, rect, event),
+            gpui::MouseButton::Right => self.open_pane_menu(pane_id, event.position),
+            _ => {}
         }
     }
 
@@ -4694,6 +4717,7 @@ impl Render for MuxApp {
             .children(self.render_session_sheet(cx))
             .children(self.render_settings_sheet(cx))
             .children(self.render_palette(viewport, cx))
+            .children(self.render_pane_menu(viewport, cx))
     }
 }
 
