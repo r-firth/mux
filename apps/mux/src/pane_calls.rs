@@ -10,7 +10,9 @@
 //! A long program finishing calls the same way: a build or a test run that
 //! ends in a pane out of sight, or while mux is in the background, says it
 //! is done and how long it took, or that it failed when the shell's marks
-//! say it did.
+//! say it did. Ghostty's `notify-on-command-finish` (`never`, `unfocused`,
+//! `always`) and `notify-on-command-finish-after` (ten seconds here unless
+//! it says otherwise) decide when.
 //!
 //! A bell in the pane you are looking at has nothing to mark, so the pane
 //! flashes instead, washed for a moment in its tab's ink.
@@ -18,8 +20,13 @@
 use super::*;
 use mux_terminal::Attention;
 
-/// A program that runs at least this long is worth saying has finished.
-const LONG_COMMAND_SECONDS: u64 = 10;
+/// When a program finishing is worth saying, from the user's Ghostty
+/// config.
+fn command_finish_notice() -> mux_terminal_ghostty::CommandFinishNotice {
+    static NOTICE: ghostty_config::Reloadable<mux_terminal_ghostty::CommandFinishNotice> =
+        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_command_finish_notice);
+    NOTICE.get()
+}
 
 /// How long a pane on screen flashes when its bell rings.
 const BELL_FLASH: Duration = Duration::from_millis(450);
@@ -32,7 +39,8 @@ impl MuxApp {
             .panes
             .get_mut(&pane_id)
             .and_then(|pane| pane.title.take_exit_status());
-        if seconds >= LONG_COMMAND_SECONDS {
+        let notice = command_finish_notice();
+        if notice.enabled && seconds >= notice.after.as_secs() {
             let words = finished_words(program, seconds, exit_status);
             self.finished_commands.push((pane_id, words));
         }
@@ -52,8 +60,9 @@ impl MuxApp {
         let mut fresh = false;
         let mut changed = false;
         let mut rung = None;
+        let watched_too = command_finish_notice().watched_too;
         for (pane_id, words) in std::mem::take(&mut self.finished_commands) {
-            if Some(pane_id) == watched || !self.panes.contains_key(&pane_id) {
+            if (Some(pane_id) == watched && !watched_too) || !self.panes.contains_key(&pane_id) {
                 continue;
             }
             let call = Attention::Notification(words);

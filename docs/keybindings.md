@@ -361,8 +361,12 @@ name, and in the tab on screen the pane's head says it. A program that ran for
 ten seconds or more and finishes out of sight, such as a build or a test run,
 calls the same way, with how long it took: `cargo done in 3m`, or
 `cargo failed (101) after 3m` when the shell says it failed (zsh and bash do,
-as Mux starts them). While Mux is in the background, the first call also bounces its Dock icon. A bell in the pane you
-are looking at flashes it for a moment in the tab's ink instead.
+as Mux starts them). Ghostty's `notify-on-command-finish-after` sets how
+long counts as long (`30s`, `1m30s`), and `notify-on-command-finish` turns
+it off (`never`) or on for the pane you are looking at too (`always`).
+While Mux is in the background, the first call also bounces its Dock icon.
+A bell in the pane you are looking at flashes it for a moment in the tab's
+ink instead.
 
 A program that reports its progress with OSC 9;4, as Ghostty shows, gets a
 thin bar along the top of its pane: the tab's ink while it goes, peach when

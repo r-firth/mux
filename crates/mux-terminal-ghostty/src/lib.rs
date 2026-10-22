@@ -450,6 +450,98 @@ fn parse_copy_on_select(contents: &str, copies: &mut bool) {
     }
 }
 
+/// When a long command finishing calls for attention:
+/// `notify-on-command-finish` and `notify-on-command-finish-after` from the
+/// user's Ghostty config. Mux calls by default, for a command of ten
+/// seconds or more that ends out of sight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommandFinishNotice {
+    /// Whether to call at all (`never` turns it off).
+    pub enabled: bool,
+    /// Whether to call even for the pane you are looking at (`always`).
+    pub watched_too: bool,
+    /// How long a command must run to be worth calling about.
+    pub after: std::time::Duration,
+}
+
+impl Default for CommandFinishNotice {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            watched_too: false,
+            after: std::time::Duration::from_secs(10),
+        }
+    }
+}
+
+#[must_use]
+pub fn user_command_finish_notice() -> CommandFinishNotice {
+    let mut notice = CommandFinishNotice::default();
+    for config in user_config_files() {
+        if let Ok(contents) = read_config(&config) {
+            parse_command_finish_notice(&contents, &mut notice);
+        }
+    }
+    notice
+}
+
+fn parse_command_finish_notice(contents: &str, notice: &mut CommandFinishNotice) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        match (key.as_str(), value.as_str()) {
+            ("notify-on-command-finish", "never") => notice.enabled = false,
+            ("notify-on-command-finish", "unfocused" | "") => {
+                notice.enabled = true;
+                notice.watched_too = false;
+            }
+            ("notify-on-command-finish", "always") => {
+                notice.enabled = true;
+                notice.watched_too = true;
+            }
+            ("notify-on-command-finish-after", value) => {
+                if let Some(after) = parse_duration(value) {
+                    notice.after = after;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A Ghostty duration: whole numbers with units, run together or spaced,
+/// as in `5s`, `1m30s` or `1h 15m`.
+fn parse_duration(value: &str) -> Option<std::time::Duration> {
+    let mut total = std::time::Duration::ZERO;
+    let mut rest = value.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    while !rest.is_empty() {
+        let digits = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let number: u64 = rest[..digits].parse().ok()?;
+        rest = &rest[digits..];
+        let unit_end = rest
+            .find(|c: char| c.is_ascii_digit() || c.is_whitespace())
+            .unwrap_or(rest.len());
+        let nanos_per = match &rest[..unit_end] {
+            "ns" => 1,
+            "us" | "µs" => 1_000,
+            "ms" => 1_000_000,
+            "s" => 1_000_000_000,
+            "m" => 60_000_000_000,
+            "h" => 3_600_000_000_000,
+            "d" => 86_400_000_000_000,
+            "w" => 604_800_000_000_000,
+            "y" => 31_536_000_000_000_000,
+            _ => return None,
+        };
+        total += std::time::Duration::from_nanos(number.checked_mul(nanos_per)?);
+        rest = rest[unit_end..].trim_start();
+    }
+    Some(total)
+}
+
 /// How much taller a cell is than the font makes it: `adjust-cell-height`
 /// from the user's Ghostty config, in points (`2`) or as a share of the
 /// height (`10%`), either of which may be negative.
@@ -3529,6 +3621,32 @@ mod theme_tests {
             &mut binds,
         );
         assert_eq!(binds, ["shift+enter=text:\\x1b\\r", "ctrl+==ignore"]);
+    }
+
+    #[test]
+    fn command_finish_notices_follow_ghostty() {
+        let mut notice = CommandFinishNotice::default();
+        parse_command_finish_notice(
+            "notify-on-command-finish = always\nnotify-on-command-finish-after = 1m30s\n",
+            &mut notice,
+        );
+        assert!(notice.enabled && notice.watched_too);
+        assert_eq!(notice.after, std::time::Duration::from_secs(90));
+        parse_command_finish_notice(
+            "notify-on-command-finish = never\nnotify-on-command-finish-after = soon\n",
+            &mut notice,
+        );
+        assert!(!notice.enabled);
+        assert_eq!(notice.after, std::time::Duration::from_secs(90));
+        assert_eq!(
+            parse_duration("1h 15m"),
+            Some(std::time::Duration::from_mins(75))
+        );
+        assert_eq!(
+            parse_duration("500ms"),
+            Some(std::time::Duration::from_millis(500))
+        );
+        assert_eq!(parse_duration("5"), None);
     }
 
     #[test]
