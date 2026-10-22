@@ -205,8 +205,9 @@ keys stay put while output moves underneath them.
 ## Right click
 
 A right click on a terminal pane opens a menu by the pointer: copy, paste
-and select all, split right or down, zoom, clear, find and close, each
-beside its keys. On a link it starts with opening or copying the link (for
+and select all, split right or down, zoom, even out the panes, name the
+pane or move it to a tab of its own, clear, find and close, each beside its
+keys. On a link it starts with opening or copying the link (for
 a file, showing it in Finder or copying its path). The arrows and Return
 work it too; Escape or a click elsewhere puts it away. A program that takes
 the mouse, such as an editor, gets the click instead, unless Shift is held.

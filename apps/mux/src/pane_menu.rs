@@ -1,8 +1,8 @@
 //! The menu a right click opens over a terminal pane, or over a tab's chip.
 //!
 //! What can be done to the pane, each beside the keys that do it, as a Mac
-//! app's context menu offers: copy and paste, splits, zoom, clear, find and
-//! close, and on a link, opening or copying it. A program that takes the mouse, such as an editor, gets the click
+//! app's context menu offers: copy and paste, splits, zoom, evening out,
+//! naming the pane or moving it to a tab of its own, clear, find and close, and on a link, opening or copying it. A program that takes the mouse, such as an editor, gets the click
 //! instead, unless Shift is held. Escape, a click elsewhere or a key that
 //! isn't the menu's puts it away.
 
@@ -23,6 +23,9 @@ enum Item {
     SplitRight,
     SplitDown,
     Zoom,
+    EvenOut,
+    NamePane,
+    BreakPane,
     Clear,
     Find,
     Close,
@@ -201,6 +204,9 @@ impl MuxApp {
                 split || zoomed,
                 false,
             ),
+            line(Item::EvenOut, "even out panes", "⌘⌃=", split, false),
+            line(Item::NamePane, "name pane…", "⌃p c", true, true),
+            line(Item::BreakPane, "move to new tab", "⌃t b", split, false),
             line(Item::Clear, "clear", "⌘k", true, true),
             line(Item::Find, "find…", "⌘f", true, false),
             line(Item::Close, "close pane", "⌘w", true, true),
@@ -258,6 +264,19 @@ impl MuxApp {
                 );
             }
             Item::Zoom => self.run_shortcut(Action::TogglePaneZoom, window, cx),
+            Item::EvenOut => self.run_shortcut(Action::EqualizePanes, window, cx),
+            Item::NamePane => {
+                if let Some(pane_id) = pane_id {
+                    self.request_pane_focus(pane_id);
+                }
+                self.open_rename_pane(window, cx);
+            }
+            Item::BreakPane => {
+                if let Some(pane_id) = pane_id {
+                    self.request_pane_focus(pane_id);
+                }
+                self.run_shortcut(Action::BreakPaneToTab, window, cx);
+            }
             Item::Clear => self.clear_pane(cx),
             Item::Find => self.open_find(window, cx),
             Item::Close => self.run_shortcut(Action::ClosePane, window, cx),
