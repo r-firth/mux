@@ -5,7 +5,8 @@
 //! pane to its latest output, as in Ghostty, so what is typed is never sent
 //! somewhere out of sight. While a pane is scrolled back, a thin thumb on its
 //! right edge says where in its history it is; drag it to move through the
-//! history, or click above or below it to jump there.
+//! history, or click above or below it to jump there. A pill at the bottom
+//! says how much is below the view, and a click on it goes back down.
 
 use super::*;
 use mux_terminal::TerminalScrollState;
@@ -49,6 +50,14 @@ pub(super) struct ThumbDrag {
     track_top: f32,
     track: f32,
     grab: f32,
+}
+
+/// How many rows of a scrolled-back pane are below its view, if any.
+fn rows_below(scroll: TerminalScrollState) -> Option<u64> {
+    let below = scroll
+        .total
+        .saturating_sub(scroll.offset.saturating_add(scroll.len));
+    (below > 0).then_some(below)
 }
 
 /// The history row the view starts at with the thumb's top `top` down a
@@ -229,6 +238,70 @@ impl MuxApp {
         true
     }
 
+    /// On a scrolled-back pane, how much is below the view, at the bottom
+    /// of its body; a click goes back to the latest output. It counts up as
+    /// the pane carries on printing out of sight.
+    pub(super) fn render_latest_pill(
+        &self,
+        geometry: layout::PaneGeometry,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let scroll = self.panes.get(&geometry.pane_id)?.frame.scroll;
+        let below = rows_below(scroll)?;
+        let pane_id = geometry.pane_id;
+        let rect = geometry.surface();
+        let words = if below == 1 {
+            "1 line below".to_owned()
+        } else {
+            format!("{below} lines below")
+        };
+        // Laid out in a box over the body that takes no pointer itself, so
+        // the pill can sit against its bottom right whatever its width.
+        let pill = h_flex()
+            .id(SharedString::from(format!("latest-{pane_id}")))
+            .h(px(24.0))
+            .px(px(10.0))
+            .gap(px(6.0))
+            .items_center()
+            .rounded_full()
+            .border_1()
+            .border_color(hairline(0.14))
+            .bg(color(SURFACE))
+            .shadow_md()
+            .block_mouse_except_scroll()
+            .cursor_pointer()
+            .font_family(EMBEDDED_TERMINAL_FONT)
+            .text_size(px(11.5))
+            .text_color(color(MUTED_TEXT))
+            .hover(|style| {
+                style
+                    .text_color(color(TEXT))
+                    .bg(color(SURFACE).blend(wash(0.06)))
+            })
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.scroll_viewport(pane_id, TerminalViewportScroll::Bottom) {
+                    cx.notify();
+                }
+            }))
+            .child("↓")
+            .child(words);
+        Some(
+            h_flex()
+                .absolute()
+                .left(px(rect.x))
+                .top(px(rect.y))
+                .w(px(rect.width))
+                .h(px(rect.height))
+                .justify_end()
+                .items_end()
+                .pr(px(THUMB_GRIP + 4.0))
+                .pb(px(10.0))
+                .child(pill)
+                .into_any_element(),
+        )
+    }
+
     /// The thumb on a scrolled-back pane's right edge. While find is open in
     /// a pane with history, it shows there too, beside the ticks for what was
     /// found.
@@ -297,6 +370,18 @@ mod tests {
             scrollback_key(&keystroke("pagedown", false, false), 40, true),
             None
         );
+    }
+
+    #[test]
+    fn the_pill_counts_the_rows_below_the_view() {
+        let scroll = |offset| TerminalScrollState {
+            total: 500,
+            offset,
+            len: 40,
+        };
+        assert_eq!(rows_below(scroll(460)), None, "at the latest output");
+        assert_eq!(rows_below(scroll(406)), Some(54));
+        assert_eq!(rows_below(scroll(0)), Some(460));
     }
 
     #[test]

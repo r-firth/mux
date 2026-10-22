@@ -5258,6 +5258,7 @@ impl Render for MuxApp {
                 }
                 root = root.children(self.render_pane_exit(geometry));
                 root = root.children(self.render_scroll_thumb(geometry));
+                root = root.children(self.render_latest_pill(geometry, cx));
                 root = root.children(self.render_find_ticks(geometry));
                 root = root.children(self.render_pane_find(geometry, cx));
                 root = root.children(self.render_link_underline(geometry));

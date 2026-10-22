@@ -137,8 +137,10 @@ The panes of a synced tab all take the keys, so none fades.
 
 The wheel or trackpad moves through a pane's history; a thin thumb on the
 pane's right edge shows where while it is scrolled back. Drag the thumb to
-move through the history, or click above or below it to jump there. Typing
-returns the pane to its latest output.
+move through the history, or click above or below it to jump there. A pill
+at the bottom of the pane says how many lines are below, counting up while
+the pane carries on printing; click it to go back down. Typing also returns
+the pane to its latest output.
 
 A pane keeps as much history as your Ghostty does: the `scrollback-limit` in
 its config, or Ghostty's own 10 MB, which is several thousand rows (more in a
