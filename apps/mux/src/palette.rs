@@ -90,6 +90,7 @@ enum Command {
     SmallerText,
     ActualSize,
     SelectOutput,
+    OpenHistory,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -314,6 +315,12 @@ impl MuxApp {
             }
             Command::SelectOutput => {
                 self.select_last_output(cx);
+                return;
+            }
+            Command::OpenHistory => {
+                if let Some(pane_id) = self.focused_pane_id() {
+                    self.open_history_in_editor(pane_id, cx);
+                }
                 return;
             }
             Command::NextPane => {
@@ -686,7 +693,7 @@ impl MuxApp {
     /// What mux can do, each with the keys that do it and other words it
     /// answers to. Some say what they will do to the pane or tab on screen.
     #[allow(clippy::too_many_lines)] // One entry per command.
-    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 28] {
+    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 29] {
         let zoomed = self.active_tab_zoomed();
         let agent_here = self
             .active_agent_pane()
@@ -792,6 +799,12 @@ impl MuxApp {
                 "⌘⇧o",
                 "select the last command's output",
                 "copy output result printed prompt",
+            ),
+            (
+                Command::OpenHistory,
+                "",
+                "open this pane's history in an editor",
+                "scrollback export save text file dump",
             ),
             (
                 Command::QuickSelect,

@@ -289,7 +289,9 @@ pane or move it to a tab of its own, clear, find and close, each beside its
 keys. On a link it starts with opening or copying the link (for
 a file, showing it in Finder or copying its path). On a command, or on
 what it printed, it offers to copy the command (without the prompt) or all
-of its output, when the shell marks its prompts. The arrows and Return
+of its output, when the shell marks its prompts; "open history in editor"
+writes all the pane holds, history and screen, to a text file and opens it
+in the system's text editor (also in `Cmd+P`). The arrows and Return
 work it too; Escape or a click elsewhere puts it away. A program that takes
 the mouse, such as an editor, gets the click instead, unless Shift is held.
 

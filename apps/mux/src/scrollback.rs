@@ -165,6 +165,19 @@ fn output_rows(prompts: &[usize], prompt: usize, lines: &[&str]) -> Option<(usiz
     Some((first, last))
 }
 
+/// A pane's text as a file holds it: each line's trailing blanks and the
+/// blank lines at the end left off, ending in a newline.
+fn history_text(screen: &str) -> String {
+    let mut text = screen
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n");
+    text.truncate(text.trim_end().len());
+    text.push('\n');
+    text
+}
+
 /// Each pane's prompt rows, with the frame they were read for.
 pub(super) type PromptRows = std::cell::RefCell<HashMap<PaneId, (u64, Rc<Vec<usize>>)>>;
 
@@ -627,6 +640,48 @@ impl MuxApp {
         }
     }
 
+    /// Write all a pane holds, its history and screen, to a text file and
+    /// open it in the system's text editor, to read, search or keep.
+    pub(super) fn open_history_in_editor(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
+        let Some(text) = self
+            .panes
+            .get(&pane_id)
+            .and_then(|pane| pane.with_engine(|engine| engine.screen_text()).ok())
+        else {
+            return;
+        };
+        let text = history_text(&text);
+        let lines = text.lines().count();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        let path = std::env::temp_dir().join(format!("mux-history-{stamp}.txt"));
+        let opened = std::fs::write(&path, text).and_then(|()| {
+            let mut command = if cfg!(target_os = "macos") {
+                let mut open = std::process::Command::new("/usr/bin/open");
+                open.arg("-t");
+                open
+            } else {
+                std::process::Command::new("xdg-open")
+            };
+            command.arg(&path).spawn().map(|_| ())
+        });
+        match opened {
+            Ok(()) => {
+                let words = if lines == 1 {
+                    "opened 1 line in your editor".to_owned()
+                } else {
+                    format!("opened {lines} lines in your editor")
+                };
+                self.say_in_strip(words, false, cx);
+            }
+            Err(error) => {
+                error!(%pane_id, %error, "could not open the pane's history");
+                self.say_in_strip("could not open the history in an editor", true, cx);
+            }
+        }
+    }
+
     /// Bring a command's prompt to the top of its pane, and the keys there.
     pub(super) fn go_to_command(&mut self, pane_id: PaneId, row: usize) {
         let Some(offset) = self
@@ -928,6 +983,11 @@ mod tests {
         assert_eq!(output_rows(&prompts, 2, &lines), Some((3, 4)));
         assert_eq!(output_rows(&prompts, 6, &lines), Some((7, 7)));
         assert_eq!(output_rows(&[2, 3], 2, &lines), None, "printed nothing");
+    }
+
+    #[test]
+    fn history_is_written_without_trailing_blanks() {
+        assert_eq!(history_text("$ ls   \na b\n\n\n   \n"), "$ ls\na b\n");
     }
 
     #[test]

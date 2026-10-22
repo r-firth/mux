@@ -33,6 +33,7 @@ enum Item {
     BreakPane,
     Clear,
     Find,
+    OpenHistory,
     Close,
     RenameTab,
     TabInk,
@@ -224,6 +225,7 @@ impl MuxApp {
             line(Item::BreakPane, "move to new tab", "⌃t b", split, false),
             line(Item::Clear, "clear", "⌘k", true, true),
             line(Item::Find, "find…", "⌘f", true, false),
+            line(Item::OpenHistory, "open history in editor", "", true, false),
             line(Item::Close, "close pane", "⌘w", true, true),
         ]);
         lines
@@ -308,6 +310,11 @@ impl MuxApp {
             }
             Item::Clear => self.clear_pane(cx),
             Item::Find => self.open_find(window, cx),
+            Item::OpenHistory => {
+                if let Some(pane_id) = pane_id {
+                    self.open_history_in_editor(pane_id, cx);
+                }
+            }
             Item::Close => self.run_shortcut(Action::ClosePane, window, cx),
             _ => {}
         }
