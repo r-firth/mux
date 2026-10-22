@@ -58,6 +58,7 @@ enum Command {
     FindSelection,
     Copy,
     Paste,
+    PasteSelection,
     SelectAll,
     Scroll(TerminalViewportScroll),
     ScrollPage(bool),
@@ -191,6 +192,7 @@ impl MuxApp {
         let action: Box<dyn gpui::Action> = match command {
             Command::Copy => return self.copy_selection(cx),
             Command::Paste => return self.paste_clipboard(cx),
+            Command::PasteSelection => return self.paste_selection_clipboard(cx),
             Command::SelectAll => {
                 self.select_all();
                 return cx.notify();
@@ -406,6 +408,7 @@ fn parse_action(action: &str) -> Option<Bound> {
         "search_selection" => Command::FindSelection,
         "copy_to_clipboard" => Command::Copy,
         "paste_from_clipboard" => Command::Paste,
+        "paste_from_selection" => Command::PasteSelection,
         "select_all" => Command::SelectAll,
         "scroll_to_top" => Command::Scroll(TerminalViewportScroll::Top),
         "scroll_to_bottom" => Command::Scroll(TerminalViewportScroll::Bottom),

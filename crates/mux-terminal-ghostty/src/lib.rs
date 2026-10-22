@@ -487,13 +487,23 @@ fn parse_cursor_click_to_move(contents: &str, moves: &mut bool) {
     }
 }
 
-/// Whether a selection goes on the clipboard as it is made:
-/// `copy-on-select = clipboard` in the user's Ghostty config. Ghostty's
-/// default, `true`, copies to a selection clipboard a Mac does not have, so
-/// it leaves the clipboard alone, and so does Mux.
+/// Where a selection goes as it is made: `copy-on-select` in the user's
+/// Ghostty config.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CopyOnSelect {
+    /// `false`: nowhere.
+    Off,
+    /// `true`, Ghostty's default: to the selection clipboard, which
+    /// ⌘⇧V pastes from, leaving the clipboard alone.
+    #[default]
+    Selection,
+    /// `clipboard`: to the clipboard as well.
+    Clipboard,
+}
+
 #[must_use]
-pub fn user_copy_on_select() -> bool {
-    let mut copies = false;
+pub fn user_copy_on_select() -> CopyOnSelect {
+    let mut copies = CopyOnSelect::default();
     if let Some((_, configs)) = user_config_paths() {
         for config in configs {
             if let Ok(contents) = read_config(&config) {
@@ -504,10 +514,14 @@ pub fn user_copy_on_select() -> bool {
     copies
 }
 
-fn parse_copy_on_select(contents: &str, copies: &mut bool) {
+fn parse_copy_on_select(contents: &str, copies: &mut CopyOnSelect) {
     for (key, value) in contents.lines().filter_map(parse_config_entry) {
         if key == "copy-on-select" {
-            *copies = value == "clipboard";
+            *copies = match value.as_str() {
+                "clipboard" => CopyOnSelect::Clipboard,
+                "false" => CopyOnSelect::Off,
+                _ => CopyOnSelect::Selection,
+            };
         }
     }
 }
@@ -3767,12 +3781,15 @@ mod theme_tests {
     }
 
     #[test]
-    fn copy_on_select_only_for_the_clipboard() {
-        let mut copies = false;
+    fn copy_on_select_to_the_selection_or_the_clipboard() {
+        let mut copies = CopyOnSelect::default();
+        assert_eq!(copies, CopyOnSelect::Selection);
         parse_copy_on_select("copy-on-select = clipboard\n", &mut copies);
-        assert!(copies);
+        assert_eq!(copies, CopyOnSelect::Clipboard);
+        parse_copy_on_select("copy-on-select = false\n", &mut copies);
+        assert_eq!(copies, CopyOnSelect::Off);
         parse_copy_on_select("copy-on-select = true\n", &mut copies);
-        assert!(!copies);
+        assert_eq!(copies, CopyOnSelect::Selection);
     }
 
     #[test]

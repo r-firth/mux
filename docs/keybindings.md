@@ -41,7 +41,7 @@ actions for what Mux has a key for do what that key does: `new_tab`,
 `goto_tab`, `last_tab`, the font size actions, `reload_config`,
 `open_config` (the settings), `toggle_fullscreen`, `clear_screen`, `quit`,
 `toggle_command_palette`, `start_search`, `search_selection`,
-`copy_to_clipboard`, `paste_from_clipboard`, `select_all`, the scroll
+`copy_to_clipboard`, `paste_from_clipboard`, `paste_from_selection`, `select_all`, the scroll
 actions and `jump_to_prompt`. Sequences (`ctrl+a>n`), `global:` binds and
 actions Mux has nothing for are left out. `Cmd+Shift+,` picks up new and
 changed binds; one taken out of the config gives its key back to the pane.
@@ -333,6 +333,9 @@ pastes it. A shell that brackets its pastes, as bash, zsh and fish do,
 gets the paste at once, since it holds it as text until Return. Setting
 `clipboard-paste-protection = false` in your Ghostty config turns this off.
 
+`Cmd+Shift+V` pastes what you last selected with the pointer instead of the
+clipboard (Ghostty's `paste_from_selection`).
+
 A program can copy to the clipboard itself with OSC 52, as Neovim, tmux
 and programs over ssh do; the strip says how many lines it copied.
 `clipboard-write = deny` in your Ghostty config stops it. Reading the
@@ -351,10 +354,10 @@ Shift with an arrow moves the end of a selection a character or a row, as
 Ghostty's does, to take in a little more or less before copying. With
 nothing selected, the keys go to the program.
 
-With `copy-on-select = clipboard` in your Ghostty config, a selection goes on
-the clipboard as you make it. Ghostty's default copies to a selection
-clipboard a Mac does not have, so Mux leaves the clipboard alone unless
-asked.
+A selection you make with the pointer is kept for `Cmd+Shift+V`, which
+pastes it without touching the clipboard, as in Ghostty and Terminal.app.
+With `copy-on-select = clipboard` in your Ghostty config, it goes on the
+clipboard as well, and `copy-on-select = false` keeps nothing.
 
 ## Shift-click
 

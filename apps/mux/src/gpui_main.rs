@@ -467,10 +467,9 @@ fn focus_follows_mouse() -> bool {
     FOLLOWS.get()
 }
 
-/// Whether a selection goes on the clipboard as it is made, as in the
-/// user's Ghostty.
-fn copy_on_select() -> bool {
-    static COPIES: ghostty_config::Reloadable<bool> =
+/// Where a selection goes as it is made, as in the user's Ghostty.
+fn copy_on_select() -> mux_terminal_ghostty::CopyOnSelect {
+    static COPIES: ghostty_config::Reloadable<mux_terminal_ghostty::CopyOnSelect> =
         ghostty_config::Reloadable::new(mux_terminal_ghostty::user_copy_on_select);
     COPIES.get()
 }
@@ -783,6 +782,8 @@ struct MuxApp {
     /// A paste that would run lines, and when: pasting it again soon after
     /// goes ahead.
     paste_armed: Option<(u64, Instant)>,
+    /// What was last selected with the pointer, for ⌘⇧V.
+    selection_clipboard: Option<String>,
     /// The focused pane's size shows in its head while sizes are changing
     /// (and in resize mode), then gets out of the way.
     size_readout: bool,
@@ -1005,6 +1006,7 @@ impl MuxApp {
             bell_serial: 0,
             close_armed: None,
             paste_armed: None,
+            selection_clipboard: None,
             pane_menu: None,
             size_readout: false,
             size_readout_pending: false,
@@ -2254,7 +2256,11 @@ impl MuxApp {
             return;
         }
         if keystroke.modifiers.platform && keystroke.key == "v" {
-            self.paste_clipboard(cx);
+            if keystroke.modifiers.shift {
+                self.paste_selection_clipboard(cx);
+            } else {
+                self.paste_clipboard(cx);
+            }
             return;
         }
 
@@ -2359,16 +2365,25 @@ impl MuxApp {
         }
     }
 
-    /// With `copy-on-select = clipboard` in the user's Ghostty config, a
-    /// selection made with the pointer goes on the clipboard as it is made,
-    /// without a word in the strip.
+    /// A selection made with the pointer goes to the selection clipboard
+    /// for ⌘⇧V, as in Ghostty, and with `copy-on-select = clipboard` in the
+    /// user's Ghostty config on the clipboard too, without a word in the
+    /// strip.
     fn copy_on_select(&mut self) {
-        if copy_on_select()
-            && let Some(text) = self.selected_text()
+        use mux_terminal_ghostty::CopyOnSelect;
+        let copies = copy_on_select();
+        if copies == CopyOnSelect::Off {
+            return;
+        }
+        let Some(text) = self.selected_text() else {
+            return;
+        };
+        if copies == CopyOnSelect::Clipboard
             && let Some(clipboard) = &mut self.clipboard
         {
-            let _ = clipboard.set_text(text);
+            let _ = clipboard.set_text(text.clone());
         }
+        self.selection_clipboard = Some(text);
     }
 
     /// Paste the clipboard into the pane with the keys, as its program
@@ -2376,11 +2391,26 @@ impl MuxApp {
     fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
         if let Some(clipboard) = &mut self.clipboard
             && let Ok(text) = clipboard.get_text()
-            && let Some(pane_id) = self.terminal_input_pane_id()
-            && let Some(pane) = self.panes.get(&pane_id)
-            && let Ok(bytes) = pane.with_engine(|engine| engine.encode_paste(&text))
         {
-            if self.hold_unsafe_paste(&text, &bytes, cx) {
+            self.paste_text(&text, cx);
+        }
+    }
+
+    /// Paste what was last selected with the pointer, as Ghostty's ⌘⇧V
+    /// does, without going through the clipboard.
+    fn paste_selection_clipboard(&mut self, cx: &mut Context<Self>) {
+        match self.selection_clipboard.clone() {
+            Some(text) => self.paste_text(&text, cx),
+            None => self.say_in_strip("nothing selected to paste yet", false, cx),
+        }
+    }
+
+    fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if let Some(pane_id) = self.terminal_input_pane_id()
+            && let Some(pane) = self.panes.get(&pane_id)
+            && let Ok(bytes) = pane.with_engine(|engine| engine.encode_paste(text))
+        {
+            if self.hold_unsafe_paste(text, &bytes, cx) {
                 return;
             }
             self.write_focused(bytes);
@@ -2389,7 +2419,7 @@ impl MuxApp {
             // asks for pastes.
             for target in self.key_targets(pane_id).into_iter().skip(1) {
                 if let Some(pane) = self.panes.get(&target)
-                    && let Ok(bytes) = pane.with_engine(|engine| engine.encode_paste(&text))
+                    && let Ok(bytes) = pane.with_engine(|engine| engine.encode_paste(text))
                 {
                     self.backend.send(CommandMessage::Write {
                         pane_id: target,
