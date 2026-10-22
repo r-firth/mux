@@ -285,6 +285,66 @@ fn parse_copy_on_select(contents: &str, copies: &mut bool) {
     }
 }
 
+/// How much taller a cell is than the font makes it: `adjust-cell-height`
+/// from the user's Ghostty config, in points (`2`) or as a share of the
+/// height (`10%`), either of which may be negative.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum CellAdjust {
+    #[default]
+    None,
+    Points(f32),
+    Percent(f32),
+}
+
+impl CellAdjust {
+    /// `height` with the adjustment made, never shorter than half of it.
+    #[must_use]
+    pub fn apply(self, height: f32) -> f32 {
+        let adjusted = match self {
+            Self::None => height,
+            Self::Points(points) => height + points,
+            Self::Percent(percent) => height * (1.0 + percent / 100.0),
+        };
+        ((adjusted * 2.0).round() / 2.0).max(height / 2.0)
+    }
+}
+
+/// The user's `adjust-cell-height`, if their Ghostty config sets one.
+#[must_use]
+pub fn user_cell_height_adjust() -> CellAdjust {
+    let mut adjust = CellAdjust::None;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_cell_height_adjust(&contents, &mut adjust);
+            }
+        }
+    }
+    adjust
+}
+
+fn parse_cell_height_adjust(contents: &str, adjust: &mut CellAdjust) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key != "adjust-cell-height" {
+            continue;
+        }
+        let value = value.trim();
+        if value.is_empty() {
+            *adjust = CellAdjust::None;
+        } else if let Some(percent) = value.strip_suffix('%') {
+            if let Ok(percent) = percent.trim().parse::<f32>()
+                && percent.is_finite()
+            {
+                *adjust = CellAdjust::Percent(percent);
+            }
+        } else if let Ok(points) = value.parse::<f32>()
+            && points.is_finite()
+        {
+            *adjust = CellAdjust::Points(points);
+        }
+    }
+}
+
 /// Whether a paste that would run commands is held for a second ⌘V:
 /// `clipboard-paste-protection` from the user's Ghostty config, on by
 /// default as in Ghostty.
@@ -2929,6 +2989,22 @@ mod theme_tests {
         assert!(copies);
         parse_copy_on_select("copy-on-select = true\n", &mut copies);
         assert!(!copies);
+    }
+
+    #[test]
+    fn cell_height_takes_points_or_a_share() {
+        let mut adjust = CellAdjust::None;
+        parse_cell_height_adjust("adjust-cell-height = 10%\n", &mut adjust);
+        assert_eq!(adjust, CellAdjust::Percent(10.0));
+        assert!((adjust.apply(20.0) - 22.0).abs() < f32::EPSILON);
+        parse_cell_height_adjust("adjust-cell-height = -3\n", &mut adjust);
+        assert_eq!(adjust, CellAdjust::Points(-3.0));
+        assert!((adjust.apply(20.0) - 17.0).abs() < f32::EPSILON);
+        parse_cell_height_adjust("adjust-cell-height = tall\n", &mut adjust);
+        assert_eq!(adjust, CellAdjust::Points(-3.0));
+        assert!((CellAdjust::Points(-50.0).apply(20.0) - 10.0).abs() < f32::EPSILON);
+        parse_cell_height_adjust("adjust-cell-height =\n", &mut adjust);
+        assert_eq!(adjust, CellAdjust::None);
     }
 
     #[test]

@@ -147,6 +147,10 @@ A split without the keys fades back, as in Ghostty, by
 `unfocused-split-opacity` in its config (0.7 by default; 1 turns it off).
 The panes of a synced tab all take the keys, so none fades.
 
+Rows are as tall as your Ghostty makes them: `adjust-cell-height` in its
+config adds points (`2`) or a share of the height (`10%`), or takes them
+away with a minus.
+
 ## Scrollback
 
 The wheel or trackpad moves through a pane's history; a thin thumb on the

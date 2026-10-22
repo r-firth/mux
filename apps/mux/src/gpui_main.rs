@@ -449,6 +449,17 @@ fn copy_on_select() -> bool {
     *COPIES.get_or_init(mux_terminal_ghostty::user_copy_on_select)
 }
 
+/// The grid for `font_family` at `size`, its rows as tall as the user's
+/// Ghostty makes them with `adjust-cell-height`.
+fn terminal_metrics(font_family: &str, size: f32, cx: &App) -> GridMetrics {
+    static ADJUST: OnceLock<mux_terminal_ghostty::CellAdjust> = OnceLock::new();
+    let mut metrics = GridMetrics::from_font(font_family, size, cx.text_system());
+    metrics.cell_height = ADJUST
+        .get_or_init(mux_terminal_ghostty::user_cell_height_adjust)
+        .apply(metrics.cell_height);
+    metrics
+}
+
 fn restore_pane_replica(
     pane: &PaneAttachment,
     ghostty_theme: &GhosttyTheme,
@@ -981,7 +992,7 @@ impl MuxApp {
             font_size,
             "resolved GPUI terminal font"
         );
-        let metrics = GridMetrics::from_font(&terminal_font, font_size, cx.text_system());
+        let metrics = terminal_metrics(&terminal_font, font_size, cx);
         info!(
             cell_width = metrics.cell_width,
             cell_height = metrics.cell_height,
@@ -1006,7 +1017,7 @@ impl MuxApp {
             self.say_in_strip(edge, false, cx);
             return;
         }
-        self.metrics = GridMetrics::from_font(&self.terminal_font, size, cx.text_system());
+        self.metrics = terminal_metrics(&self.terminal_font, size, cx);
         let said = if (size - self.configured_font_size).abs() < f32::EPSILON {
             format!("text back to {}", font_size_words(size))
         } else {
