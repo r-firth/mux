@@ -542,6 +542,41 @@ impl Session {
         Ok(panes)
     }
 
+    /// Move a tab to another place in the strip, between 0 and the last
+    /// place. Numbered tabs take the numbers of their new places.
+    pub fn move_tab(&mut self, tab_id: TabId, to: usize) -> Result<(), WorkspaceError> {
+        let from = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == tab_id)
+            .ok_or(WorkspaceError::UnknownTab(tab_id))?;
+        let to = to.min(self.tabs.len() - 1);
+        if from != to {
+            let tab = self.tabs.remove(from);
+            self.tabs.insert(to, tab);
+            self.normalize_numeric_tab_titles();
+        }
+        Ok(())
+    }
+
+    /// Take the active tab's focused pane out into a tab of its own, just
+    /// after the one it left, and show it there. The pane keeps running; a
+    /// tab with only that pane has nothing to break it from.
+    pub fn break_focused_pane(&mut self) -> Result<TabId, WorkspaceError> {
+        let index = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == self.active_tab)
+            .ok_or(WorkspaceError::UnknownTab(self.active_tab))?;
+        let pane_id = self.tabs[index].close_focused()?;
+        let tab = Tab::with_panes((self.tabs.len() + 1).to_string(), &[pane_id])?;
+        let id = tab.id;
+        self.tabs.insert(index + 1, tab);
+        self.active_tab = id;
+        self.normalize_numeric_tab_titles();
+        Ok(id)
+    }
+
     pub fn select_tab(&mut self, tab_id: TabId) -> Result<(), WorkspaceError> {
         if self.tabs.iter().any(|tab| tab.id == tab_id) {
             self.active_tab = tab_id;
@@ -621,6 +656,9 @@ pub enum Action {
     OpenCommandPalette,
     OpenAgentSurface,
     OpenSettings,
+    /// Move the active tab one place along the strip.
+    MoveTab(Direction),
+    BreakPaneToTab,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -648,6 +686,14 @@ pub enum WorkspaceCommand {
         second: PaneId,
         ratio: SplitRatio,
     },
+    /// Put a tab at another place in the strip. See [`Session::move_tab`].
+    MoveTab {
+        tab: TabId,
+        to: usize,
+    },
+    /// Give the focused pane a tab of its own. See
+    /// [`Session::break_focused_pane`].
+    BreakPaneToTab,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -909,6 +955,30 @@ impl Keymap {
     fn bind_zellij_tab_mode(&mut self) {
         self.bind(
             InputMode::Tab,
+            KeyChord::plain(Key::Character('b')),
+            Action::Sequence(vec![
+                Action::BreakPaneToTab,
+                Action::EnterMode(InputMode::Normal),
+            ]),
+        );
+        // Shift moves the tab itself where h and l move between tabs.
+        for (key, arrow, direction) in [
+            ('h', Key::ArrowLeft, Direction::Left),
+            ('l', Key::ArrowRight, Direction::Right),
+        ] {
+            for key in [Key::Character(key), arrow] {
+                self.bind(
+                    InputMode::Tab,
+                    KeyChord {
+                        key,
+                        modifiers: Modifiers::SHIFT,
+                    },
+                    Action::MoveTab(direction),
+                );
+            }
+        }
+        self.bind(
+            InputMode::Tab,
             KeyChord::plain(Key::Character('r')),
             Action::RenameTab,
         );
@@ -1165,6 +1235,73 @@ mod tests {
             .map(|tab| tab.title.as_str())
             .collect::<Vec<_>>();
         assert_eq!(titles, vec!["1", "2", "3"]);
+    }
+
+    #[test]
+    fn a_moved_tab_takes_its_new_place_and_number() {
+        let mut session = Session::with_panes("daily", &[PaneId::new()]).expect("session");
+        let first = session.active_tab;
+        session.add_tab(PaneId::new()).expect("second tab");
+        let third = session.add_tab(PaneId::new()).expect("third tab");
+        session.tabs[1].title = "build".to_owned();
+
+        session.move_tab(third, 0).expect("move third to the front");
+        let order = session.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>();
+        assert_eq!(order[0], third);
+        assert_eq!(order[1], first);
+        let titles = session
+            .tabs
+            .iter()
+            .map(|tab| tab.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, vec!["1", "2", "build"]);
+
+        session
+            .move_tab(third, 99)
+            .expect("past the end lands last");
+        assert_eq!(session.tabs[2].id, third);
+        assert_eq!(
+            session.active_tab, third,
+            "moving a tab doesn't change which is shown"
+        );
+    }
+
+    #[test]
+    fn a_broken_out_pane_gets_the_next_tab_and_the_focus() {
+        let left = PaneId::new();
+        let right = PaneId::new();
+        let mut session = Session::with_panes("daily", &[left, right]).expect("session");
+        let original = session.active_tab;
+        session.add_tab(PaneId::new()).expect("second tab");
+        session.select_tab(original).expect("back to the split tab");
+        session
+            .active_tab_mut()
+            .unwrap()
+            .focus(right)
+            .expect("focus right");
+
+        let broken = session.break_focused_pane().expect("break right out");
+
+        assert_eq!(session.active_tab, broken);
+        assert_eq!(session.tabs[1].id, broken);
+        assert_eq!(session.tabs[1].layout, PaneLayout::Leaf(right));
+        assert_eq!(session.tabs[0].layout, PaneLayout::Leaf(left));
+        assert_eq!(session.tabs[0].focused_pane, left);
+        let titles = session
+            .tabs
+            .iter()
+            .map(|tab| tab.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, vec!["1", "2", "3"]);
+
+        assert!(
+            matches!(
+                session.break_focused_pane(),
+                Err(WorkspaceError::CannotCloseLastPane)
+            ),
+            "a pane alone in its tab stays put"
+        );
+        assert_eq!(session.tabs.len(), 3);
     }
 
     #[test]

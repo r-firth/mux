@@ -540,6 +540,10 @@ impl SessionRuntime {
             WorkspaceCommand::RenameSession(name) => {
                 self.model.write().name = validated_name("session", &name)?;
             }
+            WorkspaceCommand::MoveTab { tab, to } => self.model.write().move_tab(tab, to)?,
+            WorkspaceCommand::BreakPaneToTab => {
+                self.model.write().break_focused_pane()?;
+            }
         }
         Ok(self.attachment()?)
     }

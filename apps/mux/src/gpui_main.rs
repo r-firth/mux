@@ -2043,6 +2043,8 @@ impl MuxApp {
             Action::OpenAgentSurface => self.toggle_agents(window, cx),
             Action::OpenSettings => self.toggle_settings_sheet(window, cx),
             Action::OpenCommandPalette => self.toggle_palette(window, cx),
+            Action::MoveTab(direction) => self.move_active_tab(direction),
+            Action::BreakPaneToTab => self.break_pane_to_tab(cx),
         }
         cx.notify();
     }
@@ -2100,6 +2102,47 @@ impl MuxApp {
         });
         self.mode = InputMode::Normal;
         cx.notify();
+    }
+
+    /// Move the tab on screen one place along the strip; at either end it
+    /// stays where it is.
+    fn move_active_tab(&mut self, direction: Direction) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let Some(from) = session
+            .tabs
+            .iter()
+            .position(|tab| tab.id == session.active_tab)
+        else {
+            return;
+        };
+        let to = match direction {
+            Direction::Left => from.checked_sub(1),
+            Direction::Right => Some(from + 1).filter(|to| *to < session.tabs.len()),
+            Direction::Up | Direction::Down => None,
+        };
+        if let Some(to) = to {
+            self.send_workspace(WorkspaceCommand::MoveTab {
+                tab: session.active_tab,
+                to,
+            });
+        }
+    }
+
+    /// Give the focused pane a tab of its own, next to this one. A pane
+    /// alone in its tab already has one, and the strip says so.
+    fn break_pane_to_tab(&mut self, cx: &mut Context<Self>) {
+        let alone = self
+            .session
+            .as_ref()
+            .and_then(Session::active_tab)
+            .is_some_and(|tab| matches!(tab.layout, mux_workspace::PaneLayout::Leaf(_)));
+        if alone {
+            self.say_in_strip("this pane already has the tab to itself", false, cx);
+            return;
+        }
+        self.send_workspace(WorkspaceCommand::BreakPaneToTab);
     }
 
     fn finish_tab_rename(&mut self, keep: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -3791,6 +3834,8 @@ impl MuxApp {
                     ("1-9", "jump"),
                     ("n", "new"),
                     ("r", "rename"),
+                    ("⇧hl", "move"),
+                    ("b", "break out"),
                     ("c", "ink"),
                     ("x", "close"),
                 ],

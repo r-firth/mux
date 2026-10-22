@@ -71,6 +71,9 @@ enum Command {
     Settings,
     ClosePane,
     CloseTab,
+    BreakPane,
+    MoveTabLeft,
+    MoveTabRight,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -267,6 +270,9 @@ impl MuxApp {
             Command::Settings => Action::OpenSettings,
             Command::ClosePane => Action::ClosePane,
             Command::CloseTab => Action::CloseTab,
+            Command::BreakPane => Action::BreakPaneToTab,
+            Command::MoveTabLeft => Action::MoveTab(mux_workspace::Direction::Left),
+            Command::MoveTabRight => Action::MoveTab(mux_workspace::Direction::Right),
             Command::TabInk => {
                 self.cycle_active_tab_ink();
                 return;
@@ -607,7 +613,8 @@ impl MuxApp {
 
     /// What mux can do, each with the keys that do it and other words it
     /// answers to. Some say what they will do to the pane or tab on screen.
-    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 15] {
+    #[allow(clippy::too_many_lines)] // One entry per command.
+    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 18] {
         let zoomed = self
             .session
             .as_ref()
@@ -642,6 +649,24 @@ impl MuxApp {
             ),
             (Command::Resize, "⌃p ⌃n", "resize panes", "size grow shrink"),
             (Command::RenameTab, "⌃t r", "rename this tab", "name title"),
+            (
+                Command::MoveTabLeft,
+                "⌃t ⇧h",
+                "move this tab left",
+                "reorder order shift earlier",
+            ),
+            (
+                Command::MoveTabRight,
+                "⌃t ⇧l",
+                "move this tab right",
+                "reorder order shift later",
+            ),
+            (
+                Command::BreakPane,
+                "⌃t b",
+                "move this pane to a new tab",
+                "break out detach pop split own",
+            ),
             (
                 Command::TabInk,
                 "⌃t c",

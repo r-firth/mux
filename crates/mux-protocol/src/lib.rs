@@ -24,7 +24,9 @@ use tokio::task::JoinHandle;
 /// Version 8 adds daemon-stamped times, file diffs, tool locations, turn ends
 /// and queued prompts to agent snapshots and events, a remembered title on
 /// each pane attachment, and a workspace command that sets a split's ratio.
-pub const PROTOCOL_VERSION: u16 = 8;
+/// Version 9 adds workspace commands that move a tab along the strip and
+/// break a pane out into a tab of its own.
+pub const PROTOCOL_VERSION: u16 = 9;
 /// Request id zero is reserved for latency-sensitive messages whose successful
 /// completion does not require a response.
 pub const UNACKNOWLEDGED_REQUEST_ID: u64 = 0;

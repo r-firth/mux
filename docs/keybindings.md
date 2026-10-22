@@ -72,9 +72,13 @@ a double click evens the split out.
 | `n` | Create a tab and return to Normal |
 | `r` | Rename the active tab in its chip; Return keeps it, Escape puts it back |
 | `c` | Give the active tab the next ink |
+| `Shift+h` / `Shift+Left` | Move the active tab one place left |
+| `Shift+l` / `Shift+Right` | Move the active tab one place right |
+| `b` | Move the focused pane to a tab of its own, next to this one |
 | `x` | Close the active tab and return to Normal |
 
-Clearing a tab's name hands it back to whatever its shell shows.
+Clearing a tab's name hands it back to whatever its shell shows. A moved
+tab keeps its name; a numbered tab takes the number of its new place.
 
 Zellij's `Ctrl+o` session prefix intentionally has no Normal-mode binding yet.
 This keeps foreground Control-key input untouched except for `Ctrl+p` and
