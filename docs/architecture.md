@@ -86,6 +86,16 @@ Closing the GUI does not terminate the daemon or its shells. A daemon crash
 remains distinct from closing the GUI and currently ends the live processes it
 owns.
 
+The daemon writes its workspace to `workspace.json` in the state directory
+(mode 0600): each session's layout, tab names and inks, spawn command, and
+the live working directory of every pane. It writes on each workspace change
+and every five seconds if anything, such as a pane's directory, has moved.
+A daemon that starts finds the file before it accepts clients and spawns a
+fresh shell for every saved pane, keeping the pane, tab and session ids, so a
+restart or a protocol upgrade loses the running programs and scrollback but
+not the shape of the workspace. A file it cannot read, or one from another
+format version, is left alone.
+
 Workspace mutations and focused terminal input share one ordered backend
 queue. This prevents keystrokes immediately following a pane, tab, or session
 change from being routed to the formerly focused PTY. A GUI can also select an

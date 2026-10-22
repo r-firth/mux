@@ -16,6 +16,10 @@ use crate::state::DaemonState;
 /// How often panes are looked at for programs that have finished.
 const FINISHED_COMMAND_POLL: Duration = Duration::from_secs(1);
 
+/// How many of those looks go by between writing the workspace down, to
+/// catch panes that have changed directory.
+const SAVE_EVERY_POLLS: u32 = 5;
+
 #[derive(Clone, Debug)]
 pub struct DaemonConfig {
     pub state_dir: PathBuf,
@@ -59,6 +63,7 @@ impl DaemonServer {
         reject_live_or_remove_stale_socket(&self.config.socket_path).await?;
         let listener = UnixListener::bind(&self.config.socket_path)?;
         set_private_socket_permissions(&self.config.socket_path)?;
+        self.state.restore_workspace();
         info!(socket = %self.config.socket_path.display(), "workspace daemon listening");
 
         // Programs finishing in a pane are noticed by looking, once a second:
@@ -66,9 +71,14 @@ impl DaemonServer {
         let watched = Arc::clone(&self.state);
         tokio::spawn(async move {
             let mut ticks = tokio::time::interval(FINISHED_COMMAND_POLL);
+            let mut polls = 0_u32;
             loop {
                 ticks.tick().await;
                 watched.announce_finished_commands();
+                polls = (polls + 1) % SAVE_EVERY_POLLS;
+                if polls == 0 {
+                    watched.save_workspace();
+                }
             }
         });
 

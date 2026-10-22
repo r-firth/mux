@@ -20,11 +20,15 @@ use tokio::sync::broadcast;
 
 use crate::pane::{ForegroundChange, PaneRuntime};
 
+mod restore;
+
 pub struct DaemonState {
     state_dir: PathBuf,
     replay_bytes_per_pane: usize,
     sessions: RwLock<HashMap<SessionId, Arc<SessionRuntime>>>,
     agents: AgentManager,
+    /// The workspace as last written to disk.
+    saved_workspace: Mutex<String>,
 }
 
 impl DaemonState {
@@ -34,6 +38,7 @@ impl DaemonState {
             replay_bytes_per_pane,
             sessions: RwLock::new(HashMap::new()),
             agents: AgentManager::new(),
+            saved_workspace: Mutex::new(String::new()),
         }
     }
 
@@ -460,6 +465,7 @@ impl DaemonState {
         writer.flush()?;
         writer.get_ref().sync_all()?;
         fs::rename(temporary, destination)?;
+        self.save_workspace();
         Ok(())
     }
 }
