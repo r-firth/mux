@@ -400,6 +400,7 @@ fn prepare_runs(
     let mut runs = Vec::new();
     let mut cache = cache.borrow_mut();
     cache.begin_frame(font_family, metrics.font_size);
+    let minimum = minimum_contrast();
 
     for row in 0..usize::from(frame.rows) {
         let mut column = 0;
@@ -419,7 +420,11 @@ fn prepare_runs(
                 }
                 let foreground = match selection_text {
                     Some(text) if cell.selected => text,
-                    _ => effective_foreground(cell),
+                    _ => with_contrast(
+                        effective_foreground(cell),
+                        effective_background(cell),
+                        minimum,
+                    ),
                 };
                 marks.text_at(row, column, foreground)
             };
@@ -683,6 +688,50 @@ fn effective_foreground(cell: &RenderCell) -> Rgb {
     }
 }
 
+/// The user's `minimum-contrast`.
+fn minimum_contrast() -> f32 {
+    static MINIMUM: crate::ghostty_config::Reloadable<f32> =
+        crate::ghostty_config::Reloadable::new(mux_terminal_ghostty::user_minimum_contrast);
+    MINIMUM.get()
+}
+
+/// Text lifted to white or black when it falls short of `minimum` contrast
+/// against its background, as Ghostty does.
+fn with_contrast(foreground: Rgb, background: Rgb, minimum: f32) -> Rgb {
+    if minimum <= 1.0 || contrast(foreground, background) >= minimum {
+        return foreground;
+    }
+    let white = Rgb {
+        r: 255,
+        g: 255,
+        b: 255,
+    };
+    let black = Rgb::default();
+    if contrast(white, background) >= contrast(black, background) {
+        white
+    } else {
+        black
+    }
+}
+
+/// WCAG's contrast ratio, from 1 (the same) to 21 (black and white).
+fn contrast(a: Rgb, b: Rgb) -> f32 {
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+fn luminance(color: Rgb) -> f32 {
+    let channel = |value: u8| {
+        let value = f32::from(value) / 255.0;
+        if value <= 0.039_28 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+}
+
 fn effective_background(cell: &RenderCell) -> Rgb {
     if cell.style.inverse {
         cell.foreground
@@ -724,5 +773,30 @@ mod tests {
     fn balances_only_the_normal_sub_cell_remainder() {
         assert_eq!(balanced_axis_padding(100.0, 90.0, 10.0, 2.0), (5.0, 5.0));
         assert_eq!(balanced_axis_padding(100.0, 80.0, 10.0, 2.0), (2.0, 18.0));
+    }
+
+    #[test]
+    fn faint_text_is_lifted_only_when_a_minimum_contrast_asks() {
+        let grey = Rgb {
+            r: 40,
+            g: 40,
+            b: 40,
+        };
+        let black = Rgb::default();
+        assert_eq!(with_contrast(grey, black, 1.0), grey);
+        assert_eq!(
+            with_contrast(grey, black, 3.0),
+            Rgb {
+                r: 255,
+                g: 255,
+                b: 255
+            }
+        );
+        let white = Rgb {
+            r: 255,
+            g: 255,
+            b: 255,
+        };
+        assert_eq!(with_contrast(white, black, 21.0), white);
     }
 }

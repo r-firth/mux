@@ -222,6 +222,8 @@ composes nothing.
 Selected text takes `selection-background` and `selection-foreground` from
 your Ghostty config or theme when they are set, and a warm wash over the
 text's own colours when not.
+`minimum-contrast` (from 1, the default, to 21) lifts text that would read
+fainter than that against its background to white or black, as Ghostty does.
 
 The cursor blinks when its program asks it to, as Vim's insert-mode bar
 can, or always with `cursor-style-blink = true` in your Ghostty config;

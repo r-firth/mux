@@ -467,6 +467,35 @@ fn parse_inherit_working_directory(contents: &str, inherit: &mut Inherit) {
     }
 }
 
+/// The least contrast text keeps against its background: Ghostty's
+/// `minimum-contrast`, from 1 (none asked, the default) to 21 (black on
+/// white).
+#[must_use]
+pub fn user_minimum_contrast() -> f32 {
+    let mut minimum = 1.0;
+    if let Some((_, configs)) = user_config_paths() {
+        for config in configs {
+            if let Ok(contents) = read_config(&config) {
+                parse_minimum_contrast(&contents, &mut minimum);
+            }
+        }
+    }
+    minimum
+}
+
+fn parse_minimum_contrast(contents: &str, minimum: &mut f32) {
+    for (key, value) in contents.lines().filter_map(parse_config_entry) {
+        if key != "minimum-contrast" {
+            continue;
+        }
+        if value.is_empty() {
+            *minimum = 1.0;
+        } else if let Some(ratio) = value.parse::<f32>().ok().filter(|ratio| ratio.is_finite()) {
+            *minimum = ratio.clamp(1.0, 21.0);
+        }
+    }
+}
+
 /// Whether programs' desktop notifications (OSC 9, OSC 777) are heeded:
 /// `desktop-notifications` from the user's Ghostty config, on by default
 /// as in Ghostty.
@@ -3933,6 +3962,17 @@ mod theme_tests {
         assert_eq!(inherit.tab, None);
         parse_inherit_working_directory("window-inherit-working-directory =\n", &mut inherit);
         assert_eq!(inherit.window, None);
+    }
+
+    #[test]
+    fn minimum_contrast_stays_between_one_and_twenty_one() {
+        let mut minimum = 1.0;
+        parse_minimum_contrast("minimum-contrast = 3.5\n", &mut minimum);
+        assert!((minimum - 3.5).abs() < f32::EPSILON);
+        parse_minimum_contrast("minimum-contrast = 40\n", &mut minimum);
+        assert!((minimum - 21.0).abs() < f32::EPSILON);
+        parse_minimum_contrast("minimum-contrast =\n", &mut minimum);
+        assert!((minimum - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
