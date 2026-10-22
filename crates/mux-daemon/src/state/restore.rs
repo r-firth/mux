@@ -1,12 +1,14 @@
 //! The workspace kept on disk, so a daemon that starts again, after a
 //! restart of the Mac or an upgrade that replaced the old one, brings back
 //! the sessions it had: their tabs and splits, names and colours, each pane
-//! in the directory it was last in. The programs that were running and what
-//! the panes showed are gone with the old daemon; each pane starts a new
-//! shell.
+//! in the directory it was last in. The programs that were running are gone
+//! with the old daemon, and each pane starts a new shell; what the panes
+//! showed is kept beside the workspace, as text, and comes back above the
+//! new shell's prompt.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
+use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,6 +25,11 @@ use super::{DaemonState, SessionRuntime, SpawnTemplate};
 use crate::pane::PaneRuntime;
 
 const WORKSPACE_FILE: &str = "workspace.json";
+/// Where each pane's text is kept, one file a pane.
+const PANE_TEXT_DIR: &str = "pane-text";
+/// The most lines of a pane's text kept: the end of its history and its
+/// screen.
+const PANE_TEXT_LINES: usize = 1_000;
 const WORKSPACE_VERSION: u32 = 1;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -59,6 +66,59 @@ impl DaemonState {
         match write_private(&self.state_dir, WORKSPACE_FILE, &text) {
             Ok(()) => *last = text,
             Err(error) => warn!(%error, "could not save the workspace"),
+        }
+    }
+
+    /// Write down what each pane shows, where it has changed since it was
+    /// last written, and forget the panes that have gone.
+    pub fn save_pane_text(&self) {
+        let directory = self.state_dir.join(PANE_TEXT_DIR);
+        let mut saved = self.saved_pane_text.lock();
+        let mut live = HashSet::new();
+        for session in self.sessions.read().values() {
+            for (pane_id, pane) in session.panes.read().iter() {
+                live.insert(*pane_id);
+                let Some(text) = pane.screen_text() else {
+                    continue;
+                };
+                let text = worth_keeping(last_lines(&text, PANE_TEXT_LINES));
+                let mut hasher = DefaultHasher::new();
+                text.hash(&mut hasher);
+                let hash = hasher.finish();
+                if saved.get(pane_id) == Some(&hash) {
+                    continue;
+                }
+                let file = pane_text_file(*pane_id);
+                let written = if text.is_empty() {
+                    match fs::remove_file(directory.join(&file)) {
+                        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+                        _ => Ok(()),
+                    }
+                } else {
+                    write_private(&directory, &file, text)
+                };
+                match written {
+                    Ok(()) => {
+                        saved.insert(*pane_id, hash);
+                    }
+                    Err(error) => warn!(%pane_id, %error, "could not save a pane's text"),
+                }
+            }
+        }
+        saved.retain(|pane_id, _| live.contains(pane_id));
+        let Ok(entries) = fs::read_dir(&directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let gone = name
+                .to_str()
+                .and_then(|name| name.strip_suffix(".txt"))
+                .and_then(|id| id.parse::<PaneId>().ok())
+                .is_none_or(|pane_id| !live.contains(&pane_id));
+            if gone {
+                let _ = fs::remove_file(entry.path());
+            }
         }
     }
 
@@ -124,7 +184,13 @@ impl DaemonState {
                 .get(&pane_id)
                 .filter(|cwd| cwd.is_dir())
                 .unwrap_or(&session_cwd);
-            let pane = PaneRuntime::spawn(
+            let history = fs::read_to_string(
+                self.state_dir
+                    .join(PANE_TEXT_DIR)
+                    .join(pane_text_file(pane_id)),
+            )
+            .ok();
+            let pane = PaneRuntime::spawn_with_history(
                 saved.model.id,
                 pane_id,
                 cwd,
@@ -132,6 +198,7 @@ impl DaemonState {
                 saved.size,
                 self.replay_bytes_per_pane,
                 events.clone(),
+                history.as_deref(),
             );
             match pane {
                 Ok(pane) => {
@@ -162,6 +229,34 @@ impl DaemonState {
         self.sessions.write().insert(id, runtime);
         Ok(count)
     }
+}
+
+fn pane_text_file(pane_id: PaneId) -> String {
+    format!("{pane_id}.txt")
+}
+
+/// What of a pane's text is worth bringing back: nothing for a pane with
+/// only its prompt on it, and for a pane untouched since it was itself
+/// brought back, what it was brought back with, so an idle pane does not
+/// gather a rule and a prompt at every restart.
+fn worth_keeping(mut text: &str) -> &str {
+    while let Some((before, after)) = text.rsplit_once(crate::pane::HISTORY_RULE)
+        && !after.trim().contains('\n')
+    {
+        text = before.trim_end();
+    }
+    if text.contains('\n') { text } else { "" }
+}
+
+/// The last `count` lines of `text` that hold anything, without the blank
+/// rows under them.
+fn last_lines(text: &str, count: usize) -> &str {
+    let text = text.trim_end();
+    let start = text
+        .rmatch_indices('\n')
+        .nth(count.saturating_sub(1))
+        .map_or(0, |(at, _)| at + 1);
+    &text[start..]
 }
 
 /// The workspace written down at `path`, and its text, if there is one
@@ -210,6 +305,26 @@ mod tests {
     use mux_workspace::{SplitAxis, WorkspaceCommand};
 
     use super::*;
+
+    #[test]
+    fn idle_panes_keep_what_they_came_back_with() {
+        let rule = crate::pane::HISTORY_RULE;
+        assert_eq!(worth_keeping("$"), "", "only a prompt");
+        assert_eq!(worth_keeping("$ ls\nsrc\n$"), "$ ls\nsrc\n$");
+        let idle = format!("$ ls\nsrc\n$\n{rule}\n$");
+        assert_eq!(worth_keeping(&idle), "$ ls\nsrc\n$", "untouched since");
+        let used = format!("$ ls\nsrc\n$\n{rule}\n$ pwd\n/\n$");
+        assert_eq!(worth_keeping(&used), used);
+        let twice = format!("$\n{rule}\n$\n{rule}\n$");
+        assert_eq!(worth_keeping(&twice), "");
+    }
+
+    #[test]
+    fn only_the_last_lines_are_kept() {
+        assert_eq!(last_lines("a\nb\nc\n\n  \n", 2), "b\nc");
+        assert_eq!(last_lines("a\nb", 5), "a\nb");
+        assert_eq!(last_lines("\n\n", 5), "");
+    }
 
     #[test]
     fn a_new_daemon_brings_back_the_workspace_of_the_last() {

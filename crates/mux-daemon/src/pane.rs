@@ -227,6 +227,26 @@ pub enum ForegroundChange {
     Finished(String, Duration),
 }
 
+/// The rule under the text a pane showed before a restart.
+pub const HISTORY_RULE: &str = "── before Mux restarted ──";
+
+/// Text a pane showed before a restart, as output for a new terminal: each
+/// line as it was, without anything that would act as a control, then a
+/// faint rule saying where the past ends.
+fn history_output(history: &str) -> Vec<u8> {
+    let mut output = Vec::with_capacity(history.len() + 64);
+    for line in history.trim_end().lines() {
+        let line = line
+            .chars()
+            .filter(|character| !character.is_control())
+            .collect::<String>();
+        output.extend_from_slice(line.trim_end().as_bytes());
+        output.extend_from_slice(b"\r\n");
+    }
+    output.extend_from_slice(format!("\x1b[2m{HISTORY_RULE}\x1b[0m\r\n").as_bytes());
+    output
+}
+
 /// Whether an inherited variable belongs to the terminal the daemon was
 /// started from rather than to Mux.
 fn names_another_terminal(key: &str) -> bool {
@@ -258,6 +278,32 @@ impl PaneRuntime {
         replay_bytes: usize,
         events: broadcast::Sender<ServerEvent>,
     ) -> Result<Arc<Self>, PaneError> {
+        Self::spawn_with_history(
+            session_id,
+            id,
+            cwd,
+            command,
+            size,
+            replay_bytes,
+            events,
+            None,
+        )
+    }
+
+    /// Start a pane that first shows `history`, the text a pane of the
+    /// same place showed before Mux restarted, above a rule, so it reads
+    /// as the past before the new shell's prompt comes up under it.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub fn spawn_with_history(
+        session_id: SessionId,
+        id: PaneId,
+        cwd: &std::path::Path,
+        command: &SpawnCommand,
+        size: TerminalSize,
+        replay_bytes: usize,
+        events: broadcast::Sender<ServerEvent>,
+        history: Option<&str>,
+    ) -> Result<Arc<Self>, PaneError> {
         let size = size.validate()?;
         let pair = native_pty_system().openpty(to_pty_size(size))?;
 
@@ -288,8 +334,14 @@ impl PaneRuntime {
         let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
         drop(pair.slave);
 
-        let terminal: Arc<Mutex<Box<dyn TerminalEngine>>> =
-            Arc::new(Mutex::new(create_terminal_engine(size, replay_bytes)?));
+        let mut engine = create_terminal_engine(size, replay_bytes)?;
+        if let Some(history) = history.filter(|history| !history.trim().is_empty()) {
+            // Before the reader starts, so it lands ahead of the shell's
+            // first output.
+            let sequence = engine.next_output_sequence();
+            engine.apply_output(sequence, &history_output(history))?;
+        }
+        let terminal: Arc<Mutex<Box<dyn TerminalEngine>>> = Arc::new(Mutex::new(engine));
         let exit_status = Arc::new(Mutex::new(None));
         let master = Arc::new(Mutex::new(pair.master));
         let title = Arc::new(Mutex::new(TitleScanner::default()));
@@ -399,6 +451,12 @@ impl PaneRuntime {
             return None;
         }
         Some(process_name(foreground))
+    }
+
+    /// What the pane shows, history first, as plain text.
+    #[must_use]
+    pub fn screen_text(&self) -> Option<String> {
+        self.terminal.lock().screen_text()
     }
 
     /// Clear the pane, as Cmd+K does in a Mac terminal. At the shell's
@@ -605,8 +663,19 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        ForegroundProcessTracker, OUTPUT_BATCH_SIZE, collect_output_batch, names_another_terminal,
+        ForegroundProcessTracker, OUTPUT_BATCH_SIZE, collect_output_batch, history_output,
+        names_another_terminal,
     };
+
+    #[test]
+    fn history_comes_back_as_plain_lines_under_a_rule() {
+        let output = history_output("$ ls\nsrc  \x1b[31mtarget\n\n\n");
+        let output = String::from_utf8(output).expect("text");
+        assert_eq!(
+            output,
+            "$ ls\r\nsrc  [31mtarget\r\n\x1b[2m── before Mux restarted ──\x1b[0m\r\n"
+        );
+    }
 
     #[test]
     fn the_terminal_mux_was_started_from_is_not_passed_on() {

@@ -1170,6 +1170,10 @@ mod linked {
             &self.descriptor
         }
 
+        fn screen_text(&self) -> Option<String> {
+            Self::screen_text(self).ok()
+        }
+
         fn next_output_sequence(&self) -> u64 {
             self.next_sequence
         }

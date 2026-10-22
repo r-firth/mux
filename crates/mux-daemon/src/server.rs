@@ -78,6 +78,7 @@ impl DaemonServer {
                 polls = (polls + 1) % SAVE_EVERY_POLLS;
                 if polls == 0 {
                     watched.save_workspace();
+                    watched.save_pane_text();
                 }
             }
         });

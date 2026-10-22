@@ -30,6 +30,8 @@ pub struct DaemonState {
     agents: AgentManager,
     /// The workspace as last written to disk.
     saved_workspace: Mutex<String>,
+    /// What each pane's text was when last written to disk, as a hash.
+    saved_pane_text: Mutex<HashMap<PaneId, u64>>,
 }
 
 impl DaemonState {
@@ -40,6 +42,7 @@ impl DaemonState {
             sessions: RwLock::new(HashMap::new()),
             agents: AgentManager::new(),
             saved_workspace: Mutex::new(String::new()),
+            saved_pane_text: Mutex::new(HashMap::new()),
         }
     }
 

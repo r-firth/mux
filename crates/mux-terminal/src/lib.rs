@@ -514,6 +514,12 @@ pub trait TerminalEngine: Send {
         Ok(0)
     }
 
+    /// What the terminal shows, history first, as plain text with one line
+    /// per row, to keep a copy of. Engines that cannot say give `None`.
+    fn screen_text(&self) -> Option<String> {
+        None
+    }
+
     /// Return the emulator to legacy keyboard encoding without advancing the
     /// PTY output sequence. Callers must mirror the control sequence to every
     /// render replica as part of the current ordered output event.

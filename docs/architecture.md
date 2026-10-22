@@ -92,9 +92,17 @@ the live working directory of every pane. It writes on each workspace change
 and every five seconds if anything, such as a pane's directory, has moved.
 A daemon that starts finds the file before it accepts clients and spawns a
 fresh shell for every saved pane, keeping the pane, tab and session ids, so a
-restart or a protocol upgrade loses the running programs and scrollback but
-not the shape of the workspace. A file it cannot read, or one from another
-format version, is left alone.
+restart or a protocol upgrade loses the running programs but not the shape of
+the workspace. A file it cannot read, or one from another format version, is
+left alone.
+
+What each pane showed is kept beside it, as plain text, in
+`pane-text/<pane id>.txt` (mode 0600): the last thousand lines of its history
+and screen, written every five seconds when they have changed, and removed
+with the pane. A restored pane shows that text above a faint rule before its
+new shell's prompt. A pane with only its prompt on it keeps nothing, and one
+untouched since it was itself restored keeps what it came back with, so an
+idle pane does not gather a rule at every restart.
 
 The window keeps its own frame beside it, in `window.json`: where it was
 last left and at what size, and whether it was zoomed. The app opens there
