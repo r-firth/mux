@@ -177,6 +177,7 @@ gpui::actions!(
         ClearMuxPane,
         CloseFind,
         CloseMuxPane,
+        CloseMuxTab,
         ClosePalette,
         DismissAgentCompletion,
         FindNewer,
@@ -4935,6 +4936,9 @@ impl MuxApp {
             .on_action(cx.listener(|this, _: &CloseMuxPane, window, cx| {
                 this.run_shortcut(Action::ClosePane, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &CloseMuxTab, window, cx| {
+                this.run_shortcut(Action::CloseTab, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &NextMuxTab, window, cx| {
                 this.run_shortcut(Action::NextTab, window, cx);
             }))
@@ -6667,6 +6671,7 @@ fn configure_application_menu(cx: &mut App) {
                 MenuItem::action("Clear", ClearMuxPane),
                 MenuItem::separator(),
                 MenuItem::action("Close Pane", CloseMuxPane),
+                MenuItem::action("Close Tab", CloseMuxTab),
             ],
         },
         Menu {
@@ -6701,6 +6706,7 @@ fn bind_mac_shortcuts(cx: &mut App) {
         KeyBinding::new("cmd-shift-d", SplitMuxDown, None),
         KeyBinding::new("cmd-shift-enter", ZoomMuxPane, None),
         KeyBinding::new("cmd-w", CloseMuxPane, None),
+        KeyBinding::new("cmd-alt-w", CloseMuxTab, None),
         KeyBinding::new("cmd-k", ClearMuxPane, None),
         KeyBinding::new("cmd-}", NextMuxTab, None),
         KeyBinding::new("cmd-{", PreviousMuxTab, None),

@@ -35,6 +35,7 @@ enum Command {
     SplitDown,
     SplitAuto,
     ClosePane,
+    CloseTab,
     Focus(Direction),
     NextPane,
     PreviousPane,
@@ -222,6 +223,7 @@ impl MuxApp {
             Command::SplitDown => Box::new(SplitMuxDown),
             Command::SplitAuto => Box::new(SplitMuxAuto),
             Command::ClosePane => Box::new(CloseMuxPane),
+            Command::CloseTab => Box::new(CloseMuxTab),
             Command::NextPane => Box::new(NextMuxPane),
             Command::PreviousPane => Box::new(PreviousMuxPane),
             Command::Equalize => Box::new(EqualizeMuxPanes),
@@ -383,6 +385,7 @@ fn parse_action(action: &str) -> Option<Bound> {
             _ => Command::SplitRight,
         },
         "close_surface" => Command::ClosePane,
+        "close_tab" if matches!(parameter, "" | "this") => Command::CloseTab,
         "goto_split" => match parameter {
             "next" => Command::NextPane,
             "previous" => Command::PreviousPane,
@@ -494,6 +497,11 @@ mod tests {
             parse_keybind("cmd+d=new_split:down"),
             Some(("cmd-d".to_owned(), Bound::Run(Command::SplitDown)))
         );
+        assert_eq!(
+            parse_keybind("super+alt+w=close_tab:this"),
+            Some(("cmd-alt-w".to_owned(), Bound::Run(Command::CloseTab)))
+        );
+        assert_eq!(parse_keybind("super+alt+w=close_tab:other"), None);
         assert_eq!(
             parse_keybind("cmd+k=unbind"),
             Some(("cmd-k".to_owned(), Bound::Unbind))
