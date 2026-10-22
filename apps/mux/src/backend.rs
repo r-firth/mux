@@ -101,11 +101,12 @@ pub enum CommandMessage {
     },
 }
 
-/// What a close is for: the focused pane, or the tab on screen.
+/// What a close is for: the focused pane, a tab, or every tab but one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CloseTarget {
     Pane(PaneId),
     Tab(TabId),
+    OtherTabs(TabId),
 }
 
 #[derive(Clone)]

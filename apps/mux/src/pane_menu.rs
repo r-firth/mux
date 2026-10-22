@@ -1,4 +1,4 @@
-//! The menu a right click opens over a terminal pane.
+//! The menu a right click opens over a terminal pane, or over a tab's chip.
 //!
 //! What can be done to the pane, each beside the keys that do it, as a Mac
 //! app's context menu offers: copy and paste, splits, zoom, clear, find and
@@ -26,10 +26,19 @@ enum Item {
     Clear,
     Find,
     Close,
+    RenameTab,
+    TabInk,
+    SyncTab,
+    MoveTabLeft,
+    MoveTabRight,
+    CloseTab,
+    CloseOtherTabs,
 }
 
 pub(super) struct PaneMenu {
     pane_id: PaneId,
+    /// The tab whose chip was right-clicked, for a tab's menu.
+    tab: Option<TabId>,
     position: gpui::Point<gpui::Pixels>,
     /// The link that was right-clicked, if one was.
     link: Option<links::Link>,
@@ -57,10 +66,85 @@ impl MuxApp {
         let link = self.link_under(pane_id, rect, position);
         self.pane_menu = Some(PaneMenu {
             pane_id,
+            tab: None,
             position,
             link,
             chosen: None,
         });
+    }
+
+    /// A tab's menu, by its chip: what the Tab mode keys do to it. The tab
+    /// is shown first, so the menu acts on what is on screen.
+    pub(super) fn open_tab_menu(&mut self, tab_id: TabId, position: gpui::Point<gpui::Pixels>) {
+        let Some(tab) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.tabs.iter().find(|tab| tab.id == tab_id))
+        else {
+            return;
+        };
+        let pane_id = tab.focused_pane;
+        if self.active_tab_id() != Some(tab_id) {
+            self.send_workspace(WorkspaceCommand::SelectTab(tab_id));
+        }
+        self.pane_menu = Some(PaneMenu {
+            pane_id,
+            tab: Some(tab_id),
+            // Under the strip, so the chip stays in sight.
+            position: gpui::point(position.x, position.y.max(px(30.0))),
+            link: None,
+            chosen: None,
+        });
+    }
+
+    fn tab_menu_lines(&self, tab_id: TabId) -> Vec<Line> {
+        let (place, count) = self
+            .session
+            .as_ref()
+            .and_then(|session| {
+                let place = session.tabs.iter().position(|tab| tab.id == tab_id)?;
+                Some((place, session.tabs.len()))
+            })
+            .unwrap_or((0, 1));
+        let synced = self.synced_tabs.contains(&tab_id);
+        let line = |item, label, keys, enabled, rule_above| Line {
+            item,
+            label,
+            keys,
+            enabled,
+            rule_above,
+        };
+        vec![
+            line(Item::RenameTab, "rename", "⌃t r", true, false),
+            line(Item::TabInk, "change colour", "⌃t c", true, false),
+            line(
+                Item::SyncTab,
+                if synced {
+                    "stop typing into every pane"
+                } else {
+                    "type into every pane"
+                },
+                "⌃t s",
+                true,
+                false,
+            ),
+            line(Item::MoveTabLeft, "move left", "⌃t ⇧h", place > 0, true),
+            line(
+                Item::MoveTabRight,
+                "move right",
+                "⌃t ⇧l",
+                place + 1 < count,
+                false,
+            ),
+            line(Item::CloseTab, "close tab", "⌃t x", count > 1, true),
+            line(
+                Item::CloseOtherTabs,
+                "close other tabs",
+                "",
+                count > 1,
+                false,
+            ),
+        ]
     }
 
     pub(super) fn pane_menu_open(&self) -> bool {
@@ -68,6 +152,9 @@ impl MuxApp {
     }
 
     fn pane_menu_lines(&self, menu: &PaneMenu) -> Vec<Line> {
+        if let Some(tab_id) = menu.tab {
+            return self.tab_menu_lines(tab_id);
+        }
         let pane_id = menu.pane_id;
         let zoomed = self
             .session
@@ -122,10 +209,18 @@ impl MuxApp {
     }
 
     fn run_pane_menu_item(&mut self, item: Item, window: &mut Window, cx: &mut Context<Self>) {
-        let (pane_id, link) = self
-            .pane_menu
-            .take()
-            .map_or((None, None), |menu| (Some(menu.pane_id), menu.link));
+        let Some(PaneMenu {
+            pane_id, tab, link, ..
+        }) = self.pane_menu.take()
+        else {
+            return;
+        };
+        if let Some(tab_id) = tab {
+            self.run_tab_menu_item(item, tab_id, window, cx);
+            cx.notify();
+            return;
+        }
+        let pane_id = Some(pane_id);
         match item {
             Item::OpenLink => {
                 if let (Some(pane_id), Some(link)) = (pane_id, link) {
@@ -166,8 +261,30 @@ impl MuxApp {
             Item::Clear => self.clear_pane(cx),
             Item::Find => self.open_find(window, cx),
             Item::Close => self.run_shortcut(Action::ClosePane, window, cx),
+            _ => {}
         }
         cx.notify();
+    }
+
+    fn run_tab_menu_item(
+        &mut self,
+        item: Item,
+        tab_id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match item {
+            Item::RenameTab => self.open_rename_tab(window, cx),
+            Item::TabInk => self.cycle_active_tab_ink(),
+            Item::SyncTab => self.run_shortcut(Action::ToggleSyncTab, window, cx),
+            Item::MoveTabLeft => self.run_shortcut(Action::MoveTab(Direction::Left), window, cx),
+            Item::MoveTabRight => {
+                self.run_shortcut(Action::MoveTab(Direction::Right), window, cx);
+            }
+            Item::CloseTab => self.request_close(CloseTarget::Tab(tab_id)),
+            Item::CloseOtherTabs => self.request_close(CloseTarget::OtherTabs(tab_id)),
+            _ => {}
+        }
     }
 
     /// The keys while the menu is open: the arrows choose, Return does the

@@ -112,7 +112,8 @@ With the mouse, drag a tab's chip along the strip to move it, and
 double-click the chip of the tab on screen to rename it. A chip's dot turns
 into a close mark under the pointer; click it, or middle-click the chip, to
 close that tab without leaving the one on screen. A tab with something
-running asks first.
+running asks first. Right-click a chip for a menu of what Tab mode does to it,
+with close other tabs besides.
 
 Zellij's `Ctrl+o` session prefix intentionally has no Normal-mode binding yet.
 This keeps foreground Control-key input untouched except for `Ctrl+p` and

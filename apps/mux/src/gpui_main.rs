@@ -2325,6 +2325,15 @@ impl MuxApp {
                     panes
                 })
                 .unwrap_or_default(),
+            CloseTarget::OtherTabs(kept) => {
+                let mut panes = Vec::new();
+                for tab in self.session.iter().flat_map(|session| &session.tabs) {
+                    if tab.id != kept {
+                        tab.layout.pane_ids(&mut panes);
+                    }
+                }
+                panes
+            }
         };
         // A pane whose shell has ended runs nothing.
         let pane_ids = pane_ids
@@ -2352,6 +2361,7 @@ impl MuxApp {
             CloseTarget::Pane(_) => "here",
             CloseTarget::Tab(tab_id) if self.active_tab_id() == Some(tab_id) => "in this tab",
             CloseTarget::Tab(_) => "in that tab",
+            CloseTarget::OtherTabs(_) => "in the other tabs",
         };
         self.say_in_strip(
             format!(
@@ -2378,6 +2388,18 @@ impl MuxApp {
                     .is_some_and(|session| session.tabs.iter().any(|tab| tab.id == tab_id)) =>
             {
                 self.send_workspace(WorkspaceCommand::CloseTabWithId(tab_id));
+            }
+            CloseTarget::OtherTabs(kept) => {
+                let others = self
+                    .session
+                    .iter()
+                    .flat_map(|session| &session.tabs)
+                    .map(|tab| tab.id)
+                    .filter(|tab_id| *tab_id != kept)
+                    .collect::<Vec<_>>();
+                for tab_id in others {
+                    self.send_workspace(WorkspaceCommand::CloseTabWithId(tab_id));
+                }
             }
             CloseTarget::Pane(_) | CloseTarget::Tab(_) => {}
         }
@@ -3962,7 +3984,10 @@ impl MuxApp {
             .items_center()
             .rounded(px(6.0))
             .cursor_pointer()
-            .tooltip(move |_, cx| strip_tooltip(tooltip.clone(), None, cx))
+            // A menu open by the chip keeps its tooltip from covering it.
+            .when(self.pane_menu.is_none(), |chip| {
+                chip.tooltip(move |_, cx| strip_tooltip(tooltip.clone(), None, cx))
+            })
             .on_click(
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                     // A second click on the tab, now on screen, names it.
@@ -4082,14 +4107,23 @@ impl MuxApp {
                     .group_hover(group.clone(), |style| style.opacity(1.0))
                     .child("×"),
             );
-        chip.child(close).on_mouse_down(
-            gpui::MouseButton::Middle,
-            cx.listener(move |this, _, _, cx| {
-                cx.stop_propagation();
-                this.request_close(CloseTarget::Tab(tab_id));
-                cx.notify();
-            }),
-        )
+        chip.child(close)
+            .on_mouse_down(
+                gpui::MouseButton::Middle,
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.request_close(CloseTarget::Tab(tab_id));
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.open_tab_menu(tab_id, event.position);
+                    cx.notify();
+                }),
+            )
     }
 
     /// A chip dragged along the strip takes the place of the one it is
