@@ -72,6 +72,7 @@ enum Command {
     ClosePane,
     CloseTab,
     BreakPane,
+    SyncTab,
     MoveTabLeft,
     MoveTabRight,
     Clear,
@@ -276,6 +277,7 @@ impl MuxApp {
             Command::ClosePane => Action::ClosePane,
             Command::CloseTab => Action::CloseTab,
             Command::BreakPane => Action::BreakPaneToTab,
+            Command::SyncTab => Action::ToggleSyncTab,
             Command::MoveTabLeft => Action::MoveTab(mux_workspace::Direction::Left),
             Command::MoveTabRight => Action::MoveTab(mux_workspace::Direction::Right),
             Command::TabInk => {
@@ -636,7 +638,7 @@ impl MuxApp {
     /// What mux can do, each with the keys that do it and other words it
     /// answers to. Some say what they will do to the pane or tab on screen.
     #[allow(clippy::too_many_lines)] // One entry per command.
-    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 23] {
+    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 24] {
         let zoomed = self
             .session
             .as_ref()
@@ -694,6 +696,16 @@ impl MuxApp {
                 "⌃t b",
                 "move this pane to a new tab",
                 "break out detach pop split own",
+            ),
+            (
+                Command::SyncTab,
+                "⌃t s",
+                if self.active_tab_synced() {
+                    "stop typing into every pane"
+                } else {
+                    "type into every pane in this tab"
+                },
+                "sync synchronize broadcast all panes",
             ),
             (
                 Command::TabInk,

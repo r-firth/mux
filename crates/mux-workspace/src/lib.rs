@@ -695,6 +695,8 @@ pub enum Action {
     /// Move the active tab one place along the strip.
     MoveTab(Direction),
     BreakPaneToTab,
+    /// Type into every pane of the tab on screen at once, or stop.
+    ToggleSyncTab,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -998,6 +1000,14 @@ impl Keymap {
     fn bind_zellij_tab_mode(&mut self) {
         self.bind(
             InputMode::Tab,
+            KeyChord::plain(Key::Character('s')),
+            Action::Sequence(vec![
+                Action::ToggleSyncTab,
+                Action::EnterMode(InputMode::Normal),
+            ]),
+        );
+        self.bind(
+            InputMode::Tab,
             KeyChord::plain(Key::Character('b')),
             Action::Sequence(vec![
                 Action::BreakPaneToTab,
@@ -1182,6 +1192,13 @@ mod tests {
         assert_eq!(
             keymap.resolve(InputMode::Tab, KeyChord::plain(Key::Character('r'))),
             Some(&Action::RenameTab),
+        );
+        assert_eq!(
+            keymap.resolve(InputMode::Tab, KeyChord::plain(Key::Character('s'))),
+            Some(&Action::Sequence(vec![
+                Action::ToggleSyncTab,
+                Action::EnterMode(InputMode::Normal),
+            ])),
         );
         assert_eq!(
             keymap.resolve(InputMode::Normal, KeyChord::control('n')),

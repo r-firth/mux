@@ -28,6 +28,7 @@ mod select_extend;
 mod session_sheet;
 mod settings;
 mod settings_sheet;
+mod sync_input;
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -663,6 +664,8 @@ struct MuxApp {
     size_readout: bool,
     size_readout_pending: bool,
     size_readout_serial: u64,
+    /// Tabs whose panes all take what is typed into any one of them.
+    synced_tabs: HashSet<TabId>,
     session_sheet: Option<session_sheet::SessionSheet>,
     settings_sheet: Option<settings_sheet::SettingsSheet>,
     palette: Option<palette::Palette>,
@@ -844,6 +847,7 @@ impl MuxApp {
             size_readout: false,
             size_readout_pending: false,
             size_readout_serial: 0,
+            synced_tabs: HashSet::new(),
             session_sheet: None,
             settings_sheet: None,
             palette: None,
@@ -2070,6 +2074,18 @@ impl MuxApp {
         {
             self.write_focused(bytes);
             self.return_to_latest(pane_id, cx);
+            // A synced tab's other panes get the paste too, each as it
+            // asks for pastes.
+            for target in self.key_targets(pane_id).into_iter().skip(1) {
+                if let Some(pane) = self.panes.get(&target)
+                    && let Ok(bytes) = pane.with_engine(|engine| engine.encode_paste(&text))
+                {
+                    self.backend.send(CommandMessage::Write {
+                        pane_id: target,
+                        bytes,
+                    });
+                }
+            }
         }
     }
 
@@ -2081,26 +2097,38 @@ impl MuxApp {
         held: bool,
         caps_lock: bool,
     ) -> bool {
-        let Some(pane) = self.panes.get(&pane_id) else {
+        if !self.panes.contains_key(&pane_id) {
             return false;
-        };
+        }
         let mut terminal_event = terminal_key_event(keystroke, release, held, caps_lock);
         if option_as_alt() {
             option_as_meta(&mut terminal_event, keystroke);
         }
-        match pane.with_engine(|engine| engine.encode_key(&terminal_event)) {
-            Ok(bytes) => {
-                if !bytes.is_empty() {
-                    self.note_pane_key(pane_id);
-                    self.backend.send(CommandMessage::Write { pane_id, bytes });
+        // Each pane encodes the key for itself: one shell may have asked
+        // for application cursor keys or the kitty protocol, another not.
+        for target in self.key_targets(pane_id) {
+            let Some(pane) = self.panes.get(&target) else {
+                continue;
+            };
+            match pane.with_engine(|engine| engine.encode_key(&terminal_event)) {
+                Ok(bytes) => {
+                    if !bytes.is_empty() {
+                        self.note_pane_key(target);
+                        self.backend.send(CommandMessage::Write {
+                            pane_id: target,
+                            bytes,
+                        });
+                    }
                 }
-                true
-            }
-            Err(error) => {
-                error!(%error, "encode terminal key");
-                false
+                Err(error) => {
+                    error!(%error, "encode terminal key");
+                    if target == pane_id {
+                        return false;
+                    }
+                }
             }
         }
+        true
     }
 
     fn forward_terminal_tab(&mut self, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -2187,6 +2215,15 @@ impl MuxApp {
             Action::OpenCommandPalette => self.toggle_palette(window, cx),
             Action::MoveTab(direction) => self.move_active_tab(direction),
             Action::BreakPaneToTab => self.break_pane_to_tab(cx),
+            Action::ToggleSyncTab => {
+                self.toggle_sync_tab();
+                let said = if self.active_tab_synced() {
+                    "typing into every pane in this tab · ⌃t s to stop"
+                } else {
+                    "typing into one pane again"
+                };
+                self.say_in_strip(said, false, cx);
+            }
         }
         cx.notify();
     }
@@ -4203,6 +4240,7 @@ impl MuxApp {
                     ("⇧hl", "move"),
                     ("b", "break out"),
                     ("c", "ink"),
+                    ("s", "sync"),
                     ("x", "close"),
                 ],
                 InputMode::Session => &[("w", "switch"), ("d", "detach")],
@@ -4572,6 +4610,17 @@ impl MuxApp {
         let pane = self.panes.get(&geometry.pane_id);
         let agent_pane = self.active_agent_pane() == Some(geometry.pane_id);
         let agent = self.active_agent().filter(|_| agent_pane);
+        // Every pane of a synced tab takes the keys, so each wears the ink.
+        let synced = self.pane_synced(self.active_tab_id(), geometry.pane_id);
+        let edge = |rest: f32| {
+            if ringed {
+                ink.color().opacity(0.55)
+            } else if synced {
+                ink.color().opacity(0.3)
+            } else {
+                hairline(rest)
+            }
+        };
         let title: SharedString = if agent_pane {
             agent.map_or_else(
                 || "agent".into(),
@@ -4601,11 +4650,7 @@ impl MuxApp {
                         .px(px(6.0))
                         .rounded(px(5.0))
                         .border_1()
-                        .border_color(if ringed {
-                            ink.color().opacity(0.55)
-                        } else {
-                            hairline(0.10)
-                        })
+                        .border_color(edge(0.10))
                         .bg(color(SURFACE))
                         .overflow_hidden()
                         .font_family(EMBEDDED_TERMINAL_FONT)
@@ -4680,6 +4725,9 @@ impl MuxApp {
         if zoomed {
             head = head.child(div().flex_none().text_color(ink.color()).child("zoom"));
         }
+        if synced {
+            head = head.child(div().flex_none().text_color(ink.color()).child("sync"));
+        }
         // A dragged seam resizes every pane on either side of it, so each
         // says its size while it moves.
         let sizing = (focused && (self.size_readout || self.mode == InputMode::Resize))
@@ -4702,11 +4750,7 @@ impl MuxApp {
             .rounded(px(12.0))
             .bg(color(SURFACE))
             .border_1()
-            .border_color(if ringed {
-                ink.color().opacity(0.55)
-            } else {
-                hairline(0.07)
-            })
+            .border_color(edge(0.07))
             // A slab gliding in starts narrower than its head.
             .overflow_hidden()
             .when(opacity < 1.0, |slab| slab.opacity(opacity))

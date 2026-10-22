@@ -89,7 +89,12 @@ a double click evens the split out.
 | `Shift+h` / `Shift+Left` | Move the active tab one place left |
 | `Shift+l` / `Shift+Right` | Move the active tab one place right |
 | `b` | Move the focused pane to a tab of its own, next to this one |
+| `s` | Type into every pane of the tab at once, or stop, and return to Normal |
 | `x` | Close the active tab and return to Normal |
+
+While a tab is synced, each key and paste goes to every shell in it, each
+pane's head says `sync`, and their edges take the tab's ink. An agent pane,
+or one whose shell has exited, is left out.
 
 Clearing a tab's name hands it back to whatever its shell shows. A moved
 tab keeps its name; a numbered tab takes the number of its new place.
