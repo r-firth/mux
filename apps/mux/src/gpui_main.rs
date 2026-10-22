@@ -8,6 +8,7 @@ mod agent_completion;
 mod agent_view;
 mod backend;
 mod chrome;
+mod file_drop;
 mod find;
 mod gpui_terminal;
 mod ground;
@@ -4623,7 +4624,8 @@ impl MuxApp {
                     .h(px(rect.height))
                     .child(terminal.cached(gpui::StyleRefinement::default().size_full())),
             )
-            .children(self.render_quick_select_labels(pane_id, rect));
+            .children(self.render_quick_select_labels(pane_id, rect))
+            .child(self.file_drop_target(pane_id, cx));
         surface.into_any_element()
     }
 }

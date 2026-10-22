@@ -149,6 +149,13 @@ keys. The arrows and Return work it too; Escape or a click elsewhere puts it
 away. A program that takes the mouse, such as an editor, gets the click
 instead, unless Shift is held.
 
+## Dropping files
+
+Drop files from the Finder on a pane to type their paths at its cursor,
+each escaped for the shell and followed by a space, as Terminal does. The
+pane lights in the tab's ink while files are held over it. The paths go in
+as a paste, so nothing runs until Return.
+
 ## Links
 
 Hold `Cmd` over a link in a pane's output, an OSC 8 hyperlink or a URL
