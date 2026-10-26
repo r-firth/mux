@@ -5,8 +5,7 @@
 //! What they hand over is typed into the pane as it is.
 //!
 //! Plain keys still reach the pane as keys, so a program that asked for the
-//! kitty keyboard protocol hears them as such. With Option as Meta, Option
-//! composes nothing, so nothing here listens.
+//! kitty keyboard protocol hears them as such.
 
 use std::ops::Range;
 
@@ -23,10 +22,7 @@ impl MuxApp {
         geometry: layout::PaneGeometry,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
-        if option_as_alt()
-            || self.terminal_input_pane_id() != Some(geometry.pane_id)
-            || self.field_has_keyboard()
-        {
+        if self.terminal_input_pane_id() != Some(geometry.pane_id) || self.field_has_keyboard() {
             return Vec::new();
         }
         let Some(pane) = self.panes.get(&geometry.pane_id) else {

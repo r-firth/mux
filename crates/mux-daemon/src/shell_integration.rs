@@ -27,50 +27,10 @@ const BASH_PROMPT_COMMAND: &str = concat!(
 
 /// Where a command starts, printed from bash's PS0.
 const BASH_COMMAND_START: &str = r"\e]133;C\a";
-/// The prompt's blinking bar cursor, or a steady one, and the program's own
-/// cursor back as a command starts, as Ghostty's shell integration does.
+/// The prompt's blinking bar cursor, and the program's own cursor back as a
+/// command starts, as Ghostty's shell integration does.
 const BASH_PROMPT_CURSOR: &str = r"builtin printf '\033[5 q'; ";
-const BASH_STEADY_PROMPT_CURSOR: &str = r"builtin printf '\033[6 q'; ";
 const BASH_COMMAND_CURSOR: &str = r"\e[0 q";
-
-/// Whether the prompt's bar holds still: `cursor:steady` in the user's
-/// Ghostty config.
-fn steady_cursor() -> bool {
-    #[cfg(feature = "ghostty")]
-    {
-        mux_terminal_ghostty::user_prompt_cursor_steady()
-    }
-    #[cfg(not(feature = "ghostty"))]
-    {
-        false
-    }
-}
-
-/// Whether the prompt shows a bar cursor: Ghostty's `cursor` shell
-/// integration feature, on unless the user's Ghostty config turns it off.
-fn prompt_cursor() -> bool {
-    #[cfg(feature = "ghostty")]
-    {
-        mux_terminal_ghostty::user_prompt_cursor()
-    }
-    #[cfg(not(feature = "ghostty"))]
-    {
-        true
-    }
-}
-
-/// Whether the shell titles its pane with where it is and what it runs:
-/// Ghostty's `title` shell integration feature, on unless turned off.
-fn shell_title() -> bool {
-    #[cfg(feature = "ghostty")]
-    {
-        mux_terminal_ghostty::user_shell_title()
-    }
-    #[cfg(not(feature = "ghostty"))]
-    {
-        true
-    }
-}
 
 /// The pane's title as bash's prompt comes back: where the shell is, as
 /// Ghostty's shell integration sets it.
@@ -120,26 +80,12 @@ pub fn environment(program: &Path) -> Vec<(OsString, OsString)> {
             if let Some(user) = std::env::var_os("ZDOTDIR") {
                 environment.push((OsString::from("MUX_USER_ZDOTDIR"), user));
             }
-            if prompt_cursor() {
-                let shape = if steady_cursor() { "6" } else { "5" };
-                environment.push((OsString::from("MUX_PROMPT_CURSOR"), OsString::from(shape)));
-            }
-            if shell_title() {
-                environment.push((OsString::from("MUX_SHELL_TITLE"), OsString::from("1")));
-            }
+            environment.push((OsString::from("MUX_PROMPT_CURSOR"), OsString::from("5")));
+            environment.push((OsString::from("MUX_SHELL_TITLE"), OsString::from("1")));
             environment
         }
         Some("bash") => {
-            let cursor = prompt_cursor();
-            let extras = format!(
-                "{}{}",
-                match (cursor, steady_cursor()) {
-                    (false, _) => "",
-                    (true, false) => BASH_PROMPT_CURSOR,
-                    (true, true) => BASH_STEADY_PROMPT_CURSOR,
-                },
-                if shell_title() { BASH_TITLE } else { "" }
-            );
+            let extras = format!("{BASH_PROMPT_CURSOR}{BASH_TITLE}");
             let ours = BASH_PROMPT_COMMAND.replacen(
                 "__mux_status=$?; ",
                 &format!("__mux_status=$?; {extras}"),
@@ -152,8 +98,7 @@ pub fn environment(program: &Path) -> Vec<(OsString, OsString)> {
             // PS0 prints as a command starts (bash 4.4 and later), so an
             // empty line is told from a command and a command can be timed.
             let start = format!(
-                "{BASH_COMMAND_START}{}{}",
-                if cursor { BASH_COMMAND_CURSOR } else { "" },
+                "{BASH_COMMAND_START}{BASH_COMMAND_CURSOR}{}",
                 std::env::var("PS0").unwrap_or_default()
             );
             vec![

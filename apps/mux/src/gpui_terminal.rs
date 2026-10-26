@@ -21,14 +21,11 @@ pub struct GridMetrics {
 }
 
 /// Colours the window chrome lends the terminal: the slab it sits on, the
-/// tab's ink for the cursor, and any selection colours the user's Ghostty
-/// config chose.
+/// tab's ink for the cursor.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TerminalChrome {
     pub surface: Hsla,
     pub cursor: Hsla,
-    pub selection: Option<Rgb>,
-    pub selection_text: Option<Rgb>,
     /// Whether a pane without the keys marks its cursor with a hollow block.
     pub hollow_cursor: bool,
 }
@@ -173,7 +170,7 @@ struct CachedShapedRun {
 /// cache with the size of scrollback.
 #[derive(Default)]
 pub struct TerminalRenderCache {
-    font_key: Option<(String, u32, u64)>,
+    font_key: Option<(String, u32)>,
     generation: u64,
     shaped_runs: HashMap<ShapedRunKey, CachedShapedRun>,
 }
@@ -181,17 +178,13 @@ pub struct TerminalRenderCache {
 impl TerminalRenderCache {
     fn begin_frame(&mut self, font_family: &str, font_size: f32) {
         let font_size = font_size.to_bits();
-        // A reloaded config may have changed the font's features.
-        let generation = crate::ghostty_config::generation();
         if !self
             .font_key
             .as_ref()
-            .is_some_and(|(family, size, read_at)| {
-                family == font_family && *size == font_size && *read_at == generation
-            })
+            .is_some_and(|(family, size)| family == font_family && *size == font_size)
         {
             self.shaped_runs.clear();
-            self.font_key = Some((font_family.to_owned(), font_size, generation));
+            self.font_key = Some((font_family.to_owned(), font_size));
         }
         if self.generation == u64::MAX {
             self.shaped_runs.clear();
@@ -227,7 +220,6 @@ impl TerminalRenderCache {
         }
 
         let mut run_font = font(font_family.to_owned());
-        run_font.features = terminal_font_features();
         apply_font_style(&mut run_font, style);
         let color = terminal_color(foreground).alpha(if style.faint { 0.58 } else { 1.0 });
         let underline = (style.underline != 0).then_some(UnderlineStyle {
@@ -363,7 +355,6 @@ pub fn terminal_canvas(
                 &font_family,
                 metrics,
                 &prepaint_marks,
-                chrome.selection_text,
                 block_cursor_cell(&prepaint_frame, focused),
                 window,
             )
@@ -385,14 +376,12 @@ pub fn terminal_canvas(
     .size_full()
 }
 
-#[allow(clippy::too_many_arguments)] // Each is one thing the text's colour hangs on.
 fn prepare_runs(
     frame: &RenderFrame,
     cache: &Rc<RefCell<TerminalRenderCache>>,
     font_family: &str,
     metrics: GridMetrics,
     marks: &TerminalMarks,
-    selection_text: Option<Rgb>,
     cursor_cell: Option<(usize, usize)>,
     window: &mut Window,
 ) -> PreparedTerminal {
@@ -400,8 +389,7 @@ fn prepare_runs(
     let mut runs = Vec::new();
     let mut cache = cache.borrow_mut();
     cache.begin_frame(font_family, metrics.font_size);
-    let minimum = minimum_contrast();
-    let cursor_text = cursor_colors().text.unwrap_or(frame.background);
+    let cursor_text = frame.background;
 
     for row in 0..usize::from(frame.rows) {
         let mut column = 0;
@@ -419,15 +407,7 @@ fn prepare_runs(
                 if cursor_cell == Some((row, column)) {
                     return cursor_text;
                 }
-                let foreground = match selection_text {
-                    Some(text) if cell.selected => text,
-                    _ => with_contrast(
-                        effective_foreground(cell),
-                        effective_background(cell),
-                        minimum,
-                    ),
-                };
-                marks.text_at(row, column, foreground)
+                marks.text_at(row, column, effective_foreground(cell))
             };
             let run_style = RunStyle {
                 foreground: foreground_at(column, cell),
@@ -518,7 +498,7 @@ fn paint_terminal(
             }
             let (background, selected) = run;
             let color = if selected {
-                selection_color(background, chrome.selection)
+                selection_color(background)
             } else {
                 terminal_color(background)
             };
@@ -575,11 +555,7 @@ fn paint_cursor(
     under_text: bool,
     window: &mut Window,
 ) {
-    let colors = cursor_colors();
-    let ink = colors.cursor.map_or(chrome.cursor, terminal_color);
-    let opacity = colors
-        .opacity
-        .map_or(1.0, |hundredths| f32::from(hundredths) / 100.0);
+    let ink = chrome.cursor;
     let hollow = chrome.hollow_cursor;
     let Some(mut cursor) = frame
         .cursor
@@ -603,7 +579,7 @@ fn paint_cursor(
         ),
         size(px(metrics.cell_width), px(metrics.cell_height)),
     );
-    let cursor_color = ink.alpha(if focused { 0.88 } else { 0.5 } * opacity);
+    let cursor_color = ink.alpha(if focused { 0.88 } else { 0.5 });
     let cursor_bounds = match cursor.style {
         CursorStyle::Block => cell_bounds,
         CursorStyle::HollowBlock => {
@@ -694,57 +670,6 @@ fn effective_foreground(cell: &RenderCell) -> Rgb {
     }
 }
 
-/// The user's own `cursor-color` and `cursor-text`.
-fn cursor_colors() -> mux_terminal_ghostty::CursorColors {
-    static COLORS: crate::ghostty_config::Reloadable<mux_terminal_ghostty::CursorColors> =
-        crate::ghostty_config::Reloadable::new(mux_terminal_ghostty::user_cursor_colors);
-    COLORS.get()
-}
-
-/// The user's `minimum-contrast`.
-fn minimum_contrast() -> f32 {
-    static MINIMUM: crate::ghostty_config::Reloadable<f32> =
-        crate::ghostty_config::Reloadable::new(mux_terminal_ghostty::user_minimum_contrast);
-    MINIMUM.get()
-}
-
-/// Text lifted to white or black when it falls short of `minimum` contrast
-/// against its background, as Ghostty does.
-fn with_contrast(foreground: Rgb, background: Rgb, minimum: f32) -> Rgb {
-    if minimum <= 1.0 || contrast(foreground, background) >= minimum {
-        return foreground;
-    }
-    let white = Rgb {
-        r: 255,
-        g: 255,
-        b: 255,
-    };
-    let black = Rgb::default();
-    if contrast(white, background) >= contrast(black, background) {
-        white
-    } else {
-        black
-    }
-}
-
-/// WCAG's contrast ratio, from 1 (the same) to 21 (black and white).
-fn contrast(a: Rgb, b: Rgb) -> f32 {
-    let (a, b) = (luminance(a), luminance(b));
-    (a.max(b) + 0.05) / (a.min(b) + 0.05)
-}
-
-fn luminance(color: Rgb) -> f32 {
-    let channel = |value: u8| {
-        let value = f32::from(value) / 255.0;
-        if value <= 0.039_28 {
-            value / 12.92
-        } else {
-            ((value + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
-}
-
 fn effective_background(cell: &RenderCell) -> Rgb {
     if cell.style.inverse {
         cell.foreground
@@ -753,25 +678,11 @@ fn effective_background(cell: &RenderCell) -> Rgb {
     }
 }
 
-/// The OpenType features the user's Ghostty sets for its font.
-fn terminal_font_features() -> gpui::FontFeatures {
-    static FEATURES: crate::ghostty_config::Reloadable<gpui::FontFeatures> =
-        crate::ghostty_config::Reloadable::new(|| {
-            gpui::FontFeatures(std::sync::Arc::new(
-                mux_terminal_ghostty::user_font_features(),
-            ))
-        });
-    FEATURES.get()
-}
-
 fn terminal_color(color: Rgb) -> Hsla {
     gpui::rgb((u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)).into()
 }
 
-fn selection_color(background: Rgb, chosen: Option<Rgb>) -> Hsla {
-    if let Some(chosen) = chosen {
-        return terminal_color(chosen);
-    }
+fn selection_color(background: Rgb) -> Hsla {
     let base = terminal_color(background);
     // A warm translucent selection remains legible across arbitrary terminal
     // themes without replacing the application's actual ANSI colours.
@@ -786,30 +697,5 @@ mod tests {
     fn balances_only_the_normal_sub_cell_remainder() {
         assert_eq!(balanced_axis_padding(100.0, 90.0, 10.0, 2.0), (5.0, 5.0));
         assert_eq!(balanced_axis_padding(100.0, 80.0, 10.0, 2.0), (2.0, 18.0));
-    }
-
-    #[test]
-    fn faint_text_is_lifted_only_when_a_minimum_contrast_asks() {
-        let grey = Rgb {
-            r: 40,
-            g: 40,
-            b: 40,
-        };
-        let black = Rgb::default();
-        assert_eq!(with_contrast(grey, black, 1.0), grey);
-        assert_eq!(
-            with_contrast(grey, black, 3.0),
-            Rgb {
-                r: 255,
-                g: 255,
-                b: 255
-            }
-        );
-        let white = Rgb {
-            r: 255,
-            g: 255,
-            b: 255,
-        };
-        assert_eq!(with_contrast(white, black, 21.0), white);
     }
 }

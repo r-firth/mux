@@ -774,21 +774,6 @@ impl Session {
         Ok(id)
     }
 
-    /// Open a new tab just after the active one, rather than at the end of
-    /// the strip, and show it.
-    pub fn add_tab_after_active(&mut self, pane_id: PaneId) -> Result<TabId, WorkspaceError> {
-        let at = self
-            .tabs
-            .iter()
-            .position(|tab| tab.id == self.active_tab)
-            .map_or(self.tabs.len(), |index| index + 1);
-        let id = self.add_tab(pane_id)?;
-        if let Some(tab) = self.tabs.pop() {
-            self.insert_tab(tab, at);
-        }
-        Ok(id)
-    }
-
     /// Put a tab back at a place in the strip, or at its end when the strip
     /// is shorter now, and show it. Numbered tabs take their places'
     /// numbers.
@@ -2096,25 +2081,5 @@ mod tests {
         session.close_tab(tab).expect("close");
         session.rename_pane(left, "api").expect("rename");
         assert_eq!(session.pane_names.len(), 1);
-    }
-
-    #[test]
-    fn a_tab_can_open_just_after_the_active_one() {
-        let mut session = Session::with_panes("work", &[PaneId::new()]).expect("session");
-        let second = session.add_tab(PaneId::new()).expect("second tab");
-        session.add_tab(PaneId::new()).expect("third tab");
-        session.select_tab(second).expect("select second tab");
-        let new = session
-            .add_tab_after_active(PaneId::new())
-            .expect("new tab");
-        let order = session.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>();
-        assert_eq!(order[2], new);
-        assert_eq!(session.active_tab, new);
-        let titles = session
-            .tabs
-            .iter()
-            .map(|tab| tab.title.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(titles, ["1", "2", "3", "4"]);
     }
 }

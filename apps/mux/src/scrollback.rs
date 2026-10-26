@@ -39,31 +39,6 @@ fn scrollback_key(
     }
 }
 
-/// The scroll that brings the next prompt above the view's top, or below
-/// it, to the top. Past the newest prompt is the latest output.
-fn prompt_jump(
-    prompts: &[usize],
-    scroll: TerminalScrollState,
-    older: bool,
-) -> Option<(TerminalViewportScroll, Option<usize>)> {
-    let top = usize::try_from(scroll.offset).unwrap_or(usize::MAX);
-    let target = if older {
-        prompts.iter().rev().find(|&&row| row < top)
-    } else {
-        prompts.iter().find(|&&row| row > top)
-    };
-    let bottom = scroll.offset.saturating_add(scroll.len) >= scroll.total;
-    match target {
-        Some(&row) => {
-            let delta =
-                i64::try_from(row).unwrap_or(i64::MAX) - i64::try_from(top).unwrap_or(i64::MAX);
-            Some((TerminalViewportScroll::Delta(delta), Some(row)))
-        }
-        None if !older && !bottom => Some((TerminalViewportScroll::Bottom, None)),
-        None => None,
-    }
-}
-
 /// The prompt of the command whose output starts the view: the last one
 /// above the view's top. None when the view starts on a prompt, or before
 /// any.
@@ -367,39 +342,6 @@ impl MuxApp {
             cx.notify();
         }
         true
-    }
-
-    /// Step the pane with the keys to the prompt before, or after, the top
-    /// of its view.
-    pub(super) fn jump_to_prompt(&mut self, older: bool, cx: &mut Context<Self>) {
-        let Some(pane_id) = self.terminal_input_pane_id() else {
-            return;
-        };
-        let Some(pane) = self.panes.get(&pane_id) else {
-            return;
-        };
-        let prompts = pane
-            .with_engine(|engine| engine.prompt_rows())
-            .unwrap_or_default();
-        if let Some((movement, row)) = prompt_jump(&prompts, pane.frame.scroll, older) {
-            self.scroll_input_pane(movement, cx);
-            if let Some(row) = row {
-                self.flash_prompt(pane_id, row, cx);
-            }
-        }
-    }
-
-    /// Move the pane with the keys through its history.
-    pub(super) fn scroll_input_pane(
-        &mut self,
-        movement: TerminalViewportScroll,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(pane_id) = self.terminal_input_pane_id()
-            && self.scroll_viewport(pane_id, movement)
-        {
-            cx.notify();
-        }
     }
 
     /// Typing into a pane scrolled back through its history brings it back to
@@ -1055,36 +997,6 @@ mod tests {
             scrollback_key(&keystroke("pagedown", false, false), 40, true),
             None
         );
-    }
-
-    #[test]
-    fn command_arrows_step_through_the_prompts() {
-        let prompts = [10, 120, 300, 470];
-        let scroll = |offset| TerminalScrollState {
-            total: 500,
-            offset,
-            len: 40,
-        };
-        let delta = |rows, to| (TerminalViewportScroll::Delta(rows), Some(to));
-        assert_eq!(
-            prompt_jump(&prompts, scroll(460), true),
-            Some(delta(-160, 300))
-        );
-        assert_eq!(
-            prompt_jump(&prompts, scroll(300), true),
-            Some(delta(-180, 120))
-        );
-        assert_eq!(prompt_jump(&prompts, scroll(10), true), None);
-        assert_eq!(
-            prompt_jump(&prompts, scroll(120), false),
-            Some(delta(180, 300))
-        );
-        assert_eq!(
-            prompt_jump(&[10, 120], scroll(120), false),
-            Some((TerminalViewportScroll::Bottom, None)),
-            "past the newest prompt is the latest output"
-        );
-        assert_eq!(prompt_jump(&[10, 120], scroll(460), false), None);
     }
 
     #[test]

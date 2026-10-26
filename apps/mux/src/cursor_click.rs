@@ -5,16 +5,15 @@
 //! click that stays put moves the cursor.
 //!
 //! A plain click does the same on the line being typed at a shell's prompt,
-//! as in Ghostty, unless its config sets `cursor-click-to-move = false`. The
-//! shell's prompt marks say where that line is, so a click on what a command
-//! printed only selects, and the walk stops at the ends of what is typed so
-//! the shell has no reason to ring.
+//! as in Ghostty. The shell's prompt marks say where that line is, so a
+//! click on what a command printed only selects, and the walk stops at the
+//! ends of what is typed so the shell has no reason to ring.
 
 use std::rc::Rc;
 
 use mux_terminal::{RenderFrame, TerminalInteraction as _, TerminalPoint};
 
-use super::{CommandMessage, MuxApp, PaneId, ghostty_config, layout, terminal_key_event};
+use super::{CommandMessage, MuxApp, PaneId, layout, terminal_key_event};
 
 /// The furthest a click walks the cursor, so a click far from a short
 /// prompt doesn't send a flood of arrows.
@@ -27,13 +26,6 @@ pub(super) struct CursorClick {
     at: gpui::Point<gpui::Pixels>,
     /// A plain click, which moves the cursor only on the prompt's line.
     plain: bool,
-}
-
-/// Whether a plain click at a prompt moves the cursor.
-fn plain_click_moves() -> bool {
-    static MOVES: ghostty_config::Reloadable<bool> =
-        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_cursor_click_to_move);
-    MOVES.get()
 }
 
 impl MuxApp {
@@ -50,8 +42,7 @@ impl MuxApp {
         let plain = !modifiers.modified();
         let clicks = event.button == gpui::MouseButton::Left
             && event.click_count == 1
-            && ((modifiers.alt && !modifiers.shift && !modifiers.platform)
-                || (plain && had_keys && plain_click_moves()));
+            && ((modifiers.alt && !modifiers.shift && !modifiers.platform) || (plain && had_keys));
         self.cursor_click = clicks.then_some(CursorClick {
             pane_id,
             rect,

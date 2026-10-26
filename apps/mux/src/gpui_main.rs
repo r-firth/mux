@@ -14,11 +14,9 @@ mod desktop_notice;
 mod early_typing;
 mod file_drop;
 mod find;
-mod ghostty_config;
 mod gpui_terminal;
 mod ground;
 mod ime;
-mod keybind;
 mod layout;
 mod links;
 mod motion;
@@ -50,8 +48,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use agent_completion::{
@@ -201,7 +199,6 @@ gpui::actions!(
         GoToMuxCall,
         OpenMuxPalette,
         OpenMuxSettings,
-        ReloadMuxConfig,
         OpenQuickSelect,
         PastePaletteRow,
         PreviousAgentChoice,
@@ -447,95 +444,12 @@ impl PaneReplica {
 /// Ghostty does. The daemon keeps less, so a pane restored from it starts
 /// with the daemon's share and grows from there while the window has it.
 fn pane_history_bytes() -> usize {
-    static LIMIT: ghostty_config::Reloadable<usize> =
-        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_history_limit);
-    LIMIT.get()
+    static LIMIT: OnceLock<usize> = OnceLock::new();
+    *LIMIT.get_or_init(mux_terminal_ghostty::user_history_limit)
 }
 
-/// The cursor a pane shows until its program picks one, as in the user's
-/// Ghostty.
-fn pane_cursor_style() -> mux_terminal::CursorStyle {
-    static STYLE: ghostty_config::Reloadable<mux_terminal::CursorStyle> =
-        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_cursor_style);
-    STYLE.get()
-}
-
-/// How much of an unfocused split shows through, as in the user's Ghostty.
-fn unfocused_split_opacity() -> f32 {
-    static OPACITY: ghostty_config::Reloadable<f32> =
-        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_unfocused_split_opacity);
-    OPACITY.get()
-}
-
-/// Whether programs may copy to the clipboard, as in the user's Ghostty.
-fn clipboard_write_allowed() -> bool {
-    static ALLOWED: ghostty_config::Reloadable<bool> =
-        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_clipboard_write);
-    ALLOWED.get()
-}
-
-/// Whether programs' desktop notifications call, as in the user's Ghostty.
-fn desktop_notifications() -> bool {
-    static HEEDED: ghostty_config::Reloadable<bool> =
-        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_desktop_notifications);
-    HEEDED.get()
-}
-
-/// What programs' clipboard reads get, as in the user's Ghostty.
-fn clipboard_read() -> mux_terminal_ghostty::ClipboardRead {
-    static READ: ghostty_config::Reloadable<mux_terminal_ghostty::ClipboardRead> =
-        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_clipboard_read);
-    READ.get()
-}
-
-/// Whether the pane under the pointer takes the keys, as in the user's
-/// Ghostty.
-fn focus_follows_mouse() -> bool {
-    static FOLLOWS: ghostty_config::Reloadable<bool> =
-        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_focus_follows_mouse);
-    FOLLOWS.get()
-}
-
-/// Whether typing lets go of a selection, as in the user's Ghostty.
-fn selection_clear_on_typing() -> bool {
-    static CLEARS: ghostty_config::Reloadable<bool> =
-        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_selection_clear_on_typing);
-    CLEARS.get()
-}
-
-/// Where a selection goes as it is made, as in the user's Ghostty.
-fn copy_on_select() -> mux_terminal_ghostty::CopyOnSelect {
-    static COPIES: ghostty_config::Reloadable<mux_terminal_ghostty::CopyOnSelect> =
-        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_copy_on_select);
-    COPIES.get()
-}
-
-/// The grid for `font_family` at `size`, its rows as tall as the user's
-/// Ghostty makes them with `adjust-cell-height`.
-fn terminal_metrics(font_family: &str, size: f32, cx: &App) -> GridMetrics {
-    static ADJUST: ghostty_config::Reloadable<mux_terminal_ghostty::CellAdjust> =
-        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_cell_height_adjust);
-    static PADDING: ghostty_config::Reloadable<(f32, f32)> =
-        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_window_padding);
-    let mut metrics = GridMetrics::from_font(font_family, size, cx.text_system());
-    metrics.cell_height = ADJUST.get().apply(metrics.cell_height);
-    (metrics.padding_x, metrics.padding_y) = PADDING.get();
-    metrics
-}
-
-/// How far the wheel scrolls, as in the user's Ghostty.
-fn scroll_multiplier() -> mux_terminal_ghostty::ScrollMultiplier {
-    static MULTIPLIER: ghostty_config::Reloadable<mux_terminal_ghostty::ScrollMultiplier> =
-        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_scroll_multiplier);
-    MULTIPLIER.get()
-}
-
-/// When closing asks first, as in the user's Ghostty.
-fn close_confirm() -> mux_terminal_ghostty::CloseConfirm {
-    static CONFIRM: ghostty_config::Reloadable<mux_terminal_ghostty::CloseConfirm> =
-        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_close_confirm);
-    CONFIRM.get()
-}
+/// How much of an unfocused split shows through.
+const UNFOCUSED_SPLIT_OPACITY: f32 = 0.7;
 
 fn restore_pane_replica(
     pane: &PaneAttachment,
@@ -554,14 +468,6 @@ fn restore_pane_replica(
     engine
         .set_history_limit(pane_history_bytes())
         .with_context(|| format!("set the history of terminal pane {}", pane.pane_id))?;
-    engine
-        .set_default_cursor_style(pane_cursor_style())
-        .with_context(|| format!("set the cursor of terminal pane {}", pane.pane_id))?;
-    if cursor_blink::cursor_blink_setting() == Some(true) {
-        engine
-            .set_default_cursor_blink(true)
-            .with_context(|| format!("set the cursor of terminal pane {}", pane.pane_id))?;
-    }
     // The daemon remembers the title; the sequence that set it may predate
     // the checkpoint, so the replay alone cannot be trusted to carry it.
     let mut title = TitleScanner::seeded(pane.title.clone());
@@ -815,14 +721,9 @@ struct MuxApp {
     /// A close that found something running, and when: closing the same
     /// thing again soon after goes ahead.
     close_armed: Option<(CloseTarget, Instant)>,
-    /// A paste that would run lines, and when: pasting it again soon after
-    /// goes ahead.
-    paste_armed: Option<(u64, Instant)>,
     /// A program's clipboard read waiting on a ⌘V: the pane, the clipboard
     /// it named, and the strip message that asks.
     clipboard_read_asked: Option<(PaneId, String, u64)>,
-    /// What was last selected, for Ghostty's `paste_from_selection`.
-    selection_clipboard: Option<String>,
     /// The focused pane's size shows in its head while sizes are changing
     /// (and in resize mode), then gets out of the way.
     size_readout: bool,
@@ -1031,9 +932,7 @@ impl MuxApp {
             bell_flash: None,
             bell_serial: 0,
             close_armed: None,
-            paste_armed: None,
             clipboard_read_asked: None,
-            selection_clipboard: None,
             pane_menu: None,
             size_readout: false,
             size_readout_pending: false,
@@ -1116,7 +1015,7 @@ impl MuxApp {
             font_size,
             "resolved GPUI terminal font"
         );
-        let metrics = terminal_metrics(&terminal_font, font_size, cx);
+        let metrics = GridMetrics::from_font(&terminal_font, font_size, cx.text_system());
         info!(
             cell_width = metrics.cell_width,
             cell_height = metrics.cell_height,
@@ -1141,7 +1040,7 @@ impl MuxApp {
             self.say_in_strip(edge, false, cx);
             return;
         }
-        self.metrics = terminal_metrics(&self.terminal_font, size, cx);
+        self.metrics = GridMetrics::from_font(&self.terminal_font, size, cx.text_system());
         let said = if (size - self.configured_font_size).abs() < f32::EPSILON {
             format!("text back to {}", font_size_words(size))
         } else {
@@ -2301,10 +2200,9 @@ impl MuxApp {
     }
 
     /// Typing into a pane lets go of what was selected in it, as Ghostty
-    /// does, so a highlight never sits over text that has since changed,
-    /// unless `selection-clear-on-typing = false` keeps it.
+    /// does, so a highlight never sits over text that has since changed.
     fn clear_selection_on_typing(&mut self, pane_id: PaneId) {
-        if self.selected_pane != Some(pane_id) || !selection_clear_on_typing() {
+        if self.selected_pane != Some(pane_id) {
             return;
         }
         self.selected_pane = None;
@@ -2355,7 +2253,7 @@ impl MuxApp {
             }
         }
         self.answer_clipboard_reads(reads, cx);
-        let Some(text) = copied.filter(|_| clipboard_write_allowed()) else {
+        let Some(text) = copied else {
             return;
         };
         if let Some(clipboard) = &mut self.clipboard {
@@ -2371,22 +2269,14 @@ impl MuxApp {
         }
     }
 
-    /// Give programs that asked to read the clipboard what is on it, as
-    /// the user's Ghostty says: at once with `allow`, never with `deny`,
-    /// and by default after asking in the strip, a ⌘V handing it over.
+    /// Ask in the strip before giving a program that asked to read the
+    /// clipboard what is on it, as Ghostty does: a ⌘V hands it over.
     fn answer_clipboard_reads(&mut self, reads: Vec<(PaneId, String)>, cx: &mut Context<Self>) {
-        use mux_terminal_ghostty::ClipboardRead;
         let Some((pane_id, place)) = reads.into_iter().last() else {
             return;
         };
-        match clipboard_read() {
-            ClipboardRead::Allow => self.give_clipboard(pane_id, &place, cx),
-            ClipboardRead::Deny => {}
-            ClipboardRead::Ask => {
-                self.say_in_strip("a program asks for the clipboard · ⌘v gives it", true, cx);
-                self.clipboard_read_asked = Some((pane_id, place, self.strip_serial));
-            }
-        }
+        self.say_in_strip("a program asks for the clipboard · ⌘v gives it", true, cx);
+        self.clipboard_read_asked = Some((pane_id, place, self.strip_serial));
     }
 
     fn give_clipboard(&mut self, pane_id: PaneId, place: &str, cx: &mut Context<Self>) {
@@ -2423,27 +2313,6 @@ impl MuxApp {
         true
     }
 
-    /// A selection, made with the pointer or the keys, goes to the
-    /// selection clipboard for `paste_from_selection`, as in Ghostty, and with
-    /// `copy-on-select = clipboard` in the user's Ghostty config on the
-    /// clipboard too, without a word in the strip.
-    fn copy_on_select(&mut self) {
-        use mux_terminal_ghostty::CopyOnSelect;
-        let copies = copy_on_select();
-        if copies == CopyOnSelect::Off {
-            return;
-        }
-        let Some(text) = self.selected_text() else {
-            return;
-        };
-        if copies == CopyOnSelect::Clipboard
-            && let Some(clipboard) = &mut self.clipboard
-        {
-            let _ = clipboard.set_text(text.clone());
-        }
-        self.selection_clipboard = Some(text);
-    }
-
     /// Paste the clipboard into the pane with the keys, as its program
     /// asks for pastes, and show the pane's latest output.
     fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
@@ -2457,23 +2326,11 @@ impl MuxApp {
         }
     }
 
-    /// Paste what was last selected, as Ghostty's `paste_from_selection`
-    /// does, without going through the clipboard.
-    fn paste_selection_clipboard(&mut self, cx: &mut Context<Self>) {
-        match self.selection_clipboard.clone() {
-            Some(text) => self.paste_text(&text, cx),
-            None => self.say_in_strip("nothing selected to paste yet", false, cx),
-        }
-    }
-
     fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
         if let Some(pane_id) = self.terminal_input_pane_id()
             && let Some(pane) = self.panes.get(&pane_id)
             && let Ok(bytes) = pane.with_engine(|engine| engine.encode_paste(text))
         {
-            if self.hold_unsafe_paste(text, &bytes, cx) {
-                return;
-            }
             self.write_focused(bytes);
             self.return_to_latest(pane_id, cx);
             // A synced tab's other panes get the paste too, each as it
@@ -2491,39 +2348,6 @@ impl MuxApp {
         }
     }
 
-    /// A paste with a line break, into a program that hasn't asked for
-    /// bracketed pastes, runs each line as it lands, as Ghostty warns.
-    /// The first ⌘V says so and the second within a few seconds goes
-    /// ahead. Returns whether the paste is held.
-    fn hold_unsafe_paste(&mut self, text: &str, bytes: &[u8], cx: &mut Context<Self>) -> bool {
-        if !paste_runs_lines(text, bytes) || !paste_protection() {
-            return false;
-        }
-        let key = {
-            use std::hash::{Hash as _, Hasher as _};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            text.hash(&mut hasher);
-            hasher.finish()
-        };
-        if self
-            .paste_armed
-            .take()
-            .is_some_and(|(armed, at)| armed == key && at.elapsed() < CLOSE_AGAIN_WINDOW)
-        {
-            self.strip_message = None;
-            return false;
-        }
-        self.paste_armed = Some((key, Instant::now()));
-        let lines = text.trim_end_matches('\n').lines().count().max(1);
-        let said = if lines == 1 {
-            "this paste ends in a line break, so it would run · ⌘v again to paste".to_owned()
-        } else {
-            format!("this paste would run {lines} lines · ⌘v again to paste")
-        };
-        self.say_in_strip(said, true, cx);
-        true
-    }
-
     fn send_terminal_key_to(
         &self,
         pane_id: PaneId,
@@ -2535,10 +2359,7 @@ impl MuxApp {
         if !self.panes.contains_key(&pane_id) {
             return false;
         }
-        let mut terminal_event = terminal_key_event(keystroke, release, held, caps_lock);
-        if option_as_alt() {
-            option_as_meta(&mut terminal_event, keystroke);
-        }
+        let terminal_event = terminal_key_event(keystroke, release, held, caps_lock);
         // Each pane encodes the key for itself: one shell may have asked
         // for application cursor keys or the kitty protocol, another not.
         for target in self.key_targets(pane_id) {
@@ -2695,10 +2516,6 @@ impl MuxApp {
             self.close_now(target);
             return;
         }
-        if close_confirm() == mux_terminal_ghostty::CloseConfirm::Never {
-            self.close_now(target);
-            return;
-        }
         let pane_ids = match target {
             CloseTarget::Pane(pane_id) => vec![pane_id],
             CloseTarget::Tab(tab_id) => self
@@ -2738,23 +2555,11 @@ impl MuxApp {
     /// goes ahead. Otherwise the strip names what would end, and the next
     /// close of the same thing goes ahead.
     fn finish_close(&mut self, target: CloseTarget, running: &[String], cx: &mut Context<Self>) {
-        let always = close_confirm() == mux_terminal_ghostty::CloseConfirm::Always;
-        if running.is_empty() && !always {
+        if running.is_empty() {
             self.close_now(target);
             return;
         }
         self.close_armed = Some((target, Instant::now()));
-        if running.is_empty() {
-            // `confirm-close-surface = always` asks even with only shells.
-            let what = match target {
-                CloseTarget::Pane(_) => "this pane",
-                CloseTarget::Tab(tab_id) if self.active_tab_id() == Some(tab_id) => "this tab",
-                CloseTarget::Tab(_) => "that tab",
-                CloseTarget::OtherTabs(_) => "the other tabs",
-            };
-            self.say_in_strip(format!("close again to close {what}"), true, cx);
-            return;
-        }
         let what = match target {
             CloseTarget::Pane(_) => "here",
             CloseTarget::Tab(tab_id) if self.active_tab_id() == Some(tab_id) => "in this tab",
@@ -3998,13 +3803,7 @@ impl MuxApp {
         }
     }
 
-    fn pointer_down(
-        &mut self,
-        pane_id: PaneId,
-        rect: layout::Rect,
-        event: &gpui::MouseDownEvent,
-        cx: &mut Context<Self>,
-    ) {
+    fn pointer_down(&mut self, pane_id: PaneId, rect: layout::Rect, event: &gpui::MouseDownEvent) {
         let had_keys = self.terminal_input_pane_id() == Some(pane_id);
         self.request_pane_focus(pane_id);
         let button = terminal_mouse_button(event.button);
@@ -4024,42 +3823,13 @@ impl MuxApp {
             return;
         }
         match event.button {
-            gpui::MouseButton::Left if self.extend_selection(pane_id, rect, event) => {
-                self.copy_on_select();
-            }
+            gpui::MouseButton::Left if self.extend_selection(pane_id, rect, event) => {}
             gpui::MouseButton::Left => {
                 self.begin_cursor_click(pane_id, rect, event, had_keys);
                 self.begin_selection(pane_id, rect, event);
             }
-            gpui::MouseButton::Right => self.right_click(pane_id, rect, event.position, cx),
+            gpui::MouseButton::Right => self.open_pane_menu(pane_id, rect, event.position),
             _ => {}
-        }
-    }
-
-    /// A right-click in a pane: its menu, or what the user's Ghostty has
-    /// right-click do instead.
-    fn right_click(
-        &mut self,
-        pane_id: PaneId,
-        rect: layout::Rect,
-        position: gpui::Point<gpui::Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        use mux_terminal_ghostty::RightClick;
-        static ACTION: ghostty_config::Reloadable<RightClick> =
-            ghostty_config::Reloadable::new(mux_terminal_ghostty::user_right_click);
-        match ACTION.get() {
-            RightClick::Menu => self.open_pane_menu(pane_id, rect, position),
-            RightClick::Copy => self.copy_selection(cx),
-            RightClick::CopyOrPaste if self.selected_text().is_some() => {
-                self.copy_selection(cx);
-                // Let go of it, so the next right-click pastes.
-                if let Some(selected) = self.selected_pane {
-                    self.clear_selection_on_typing(selected);
-                }
-            }
-            RightClick::Paste | RightClick::CopyOrPaste => self.paste_clipboard(cx),
-            RightClick::Ignore => {}
         }
     }
 
@@ -4120,23 +3890,6 @@ impl MuxApp {
         ended
     }
 
-    /// With `focus-follows-mouse` in the user's Ghostty config, the pane
-    /// under the pointer takes the keys, unless a button is held or
-    /// something is open over the panes.
-    fn follow_mouse_focus(&mut self, pane_id: PaneId, event: &gpui::MouseMoveEvent, active: bool) {
-        if active
-            && event.pressed_button.is_none()
-            && focus_follows_mouse()
-            && self.palette.is_none()
-            && self.pane_menu.is_none()
-            && self.session_sheet.is_none()
-            && self.settings_sheet.is_none()
-            && !self.seam_dragging()
-        {
-            self.request_pane_focus(pane_id);
-        }
-    }
-
     fn pointer_hover(
         &mut self,
         pane_id: PaneId,
@@ -4185,7 +3938,6 @@ impl MuxApp {
         {
             self.end_selection(capture, event);
             self.finish_cursor_click();
-            self.copy_on_select();
             return true;
         }
         false
@@ -4269,11 +4021,10 @@ impl MuxApp {
         rect: layout::Rect,
         event: &gpui::ScrollWheelEvent,
     ) -> bool {
-        let multiplier = scroll_multiplier();
         let (delta_rows, reset_fraction) = match event.delta {
-            gpui::ScrollDelta::Lines(delta) => (-delta.y * multiplier.discrete, true),
+            gpui::ScrollDelta::Lines(delta) => (-delta.y * 3.0, true),
             gpui::ScrollDelta::Pixels(delta) => (
-                -f32::from(delta.y) * multiplier.precision / self.metrics.cell_height,
+                -f32::from(delta.y) / self.metrics.cell_height,
                 matches!(event.touch_phase, gpui::TouchPhase::Started),
             ),
         };
@@ -5099,22 +4850,12 @@ impl MuxApp {
         .on_action(cx.listener(|this, _: &EqualizeMuxPanes, window, cx| {
             this.run_shortcut(Action::EqualizePanes, window, cx);
         }))
-        .on_action(cx.listener(|this, _: &ReloadMuxConfig, _, cx| {
-            this.reload_ghostty_config(cx);
-        }))
-        .on_action(
-            cx.listener(|this, bind: &keybind::GhosttyKeybind, window, cx| {
-                this.run_ghostty_keybind(bind, window, cx);
-            }),
-        )
     }
 
     /// Name the window for the tab on screen and its session, as the
     /// Window menu, Mission Control and the Dock list it.
     fn sync_window_title(&mut self, window: &mut Window) {
-        static FIXED: ghostty_config::Reloadable<Option<String>> =
-            ghostty_config::Reloadable::new(mux_terminal_ghostty::user_window_title);
-        let title = FIXED.get().unwrap_or_else(|| self.window_title_for_tab());
+        let title = self.window_title_for_tab();
         if title != self.window_title {
             window.set_window_title(&title);
             self.window_title = title;
@@ -5266,7 +5007,7 @@ impl MuxApp {
             && !geometry.focused
             && !self.pane_synced(self.active_tab_id(), geometry.pane_id)
         {
-            opacity * unfocused_split_opacity()
+            opacity * UNFOCUSED_SPLIT_OPACITY
         } else {
             opacity
         }
@@ -5540,8 +5281,6 @@ impl MuxApp {
             chrome: gpui_terminal::TerminalChrome {
                 surface: color(SURFACE),
                 cursor: self.active_ink().color(),
-                selection: self.ghostty_theme.selection_background,
-                selection_text: self.ghostty_theme.selection_foreground,
                 // A blink's dark half shows nothing, and a dead shell has
                 // no cursor at all.
                 hollow_cursor: !has_keys && !self.pane_has_exited(pane_id),
@@ -5607,17 +5346,15 @@ impl MuxApp {
                         return;
                     }
                     this.focus_handle.focus(window, cx);
-                    this.pointer_down(pane_id, rect, event, cx);
+                    this.pointer_down(pane_id, rect, event);
                     cx.notify();
                 });
                 cx.stop_propagation();
             })
-            .on_mouse_move(move |event, window, cx| {
-                let active = window.is_window_active();
+            .on_mouse_move(move |event, _, cx| {
                 let handled = hover_app
                     .update(cx, |this, cx| {
                         let command = event.modifiers.platform;
-                        this.follow_mouse_focus(pane_id, event, active);
                         this.hover_link(pane_id, rect, event.position, command, cx);
                         this.pointer_hover(pane_id, rect, event)
                     })
@@ -6548,50 +6285,6 @@ fn terminal_key_event(
     }
 }
 
-/// Whether pastes that would run commands wait for a second ⌘V, as the
-/// user's Ghostty has it.
-fn paste_protection() -> bool {
-    static ENABLED: ghostty_config::Reloadable<bool> =
-        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_paste_protection);
-    ENABLED.get()
-}
-
-/// Whether pasting `text`, encoded as `bytes`, would run something: it
-/// breaks a line and the program hasn't asked for bracketed pastes, which
-/// would hold it as one piece of text.
-fn paste_runs_lines(text: &str, bytes: &[u8]) -> bool {
-    text.contains(['\n', '\r']) && !bytes.starts_with(b"\x1b[200~")
-}
-
-/// Whether Option is Meta for the shell, as the user's Ghostty has it.
-fn option_as_alt() -> bool {
-    static ENABLED: ghostty_config::Reloadable<bool> =
-        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_option_as_alt);
-    ENABLED.get()
-}
-
-/// Make an Option key type its plain character with Alt, so `Option+b`
-/// reaches the shell as Meta-b (back a word) instead of as `∫`. A shifted
-/// letter keeps its case; other shifted keys still compose, since the plain
-/// key says nothing of what Shift would make of it.
-fn option_as_meta(event: &mut TerminalKeyEvent, keystroke: &gpui::Keystroke) {
-    let modifiers = keystroke.modifiers;
-    if !modifiers.alt || modifiers.control || modifiers.platform || event.text.is_none() {
-        return;
-    }
-    let mut chars = keystroke.key.chars();
-    let (Some(plain), None) = (chars.next(), chars.next()) else {
-        return;
-    };
-    let plain = match (modifiers.shift, plain.is_ascii_alphabetic()) {
-        (false, _) => plain,
-        (true, true) => plain.to_ascii_uppercase(),
-        (true, false) => return,
-    };
-    event.text = Some(plain.to_string());
-    event.consumed_modifiers.alt = false;
-}
-
 fn terminal_tab_keystroke(shift: bool) -> gpui::Keystroke {
     gpui::Keystroke {
         modifiers: gpui::Modifiers {
@@ -6712,7 +6405,6 @@ fn configure_application_menu(cx: &mut App) {
             items: vec![
                 MenuItem::action("Go to…", OpenMuxPalette),
                 MenuItem::action("Settings…", OpenMuxSettings),
-                MenuItem::action("Reload Ghostty Config", ReloadMuxConfig),
                 MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
@@ -6916,16 +6608,6 @@ fn mux_bezel_palette(appearance: BezelAppearance) -> BezelTheme {
     theme
 }
 
-/// The pointer hides while typing only when the user's Ghostty asks for it
-/// with `mouse-hide-while-typing`; GPUI would hide it otherwise.
-fn configure_pointer_hiding(cx: &mut App) {
-    cx.set_cursor_hide_mode(if mux_terminal_ghostty::user_mouse_hide_while_typing() {
-        gpui::CursorHideMode::OnTyping
-    } else {
-        gpui::CursorHideMode::Never
-    });
-}
-
 fn configure_theme(cx: &mut App) {
     ComponentTheme::change(ThemeMode::Dark, None, cx);
     let bezel = BezelTheme::of(cx).clone();
@@ -7045,9 +6727,7 @@ fn initialize_graphical_application(cx: &mut App) {
         CancelAgentTurn,
         Some("MuxAgentPane"),
     )]);
-    keybind::bind_ghostty_keys(cx);
     configure_theme(cx);
-    configure_pointer_hiding(cx);
     if let Err(error) = cx.text_system().add_fonts(vec![
         Cow::Borrowed(
             include_bytes!("../assets/fonts/JetBrainsMonoNerdFontMono-Regular.ttf").as_slice(),
@@ -7183,9 +6863,9 @@ mod tests {
         AgentTabActivity, GridMetrics, PaneOutputUpdate, PaneReplica, PaneScrollState,
         agent_session_is_visible, agent_tab_activity, agent_tab_activity_label,
         command_needs_agent, format_agent_context_usage, format_session_pane_count,
-        input_position_at, layout, option_as_meta, or_list, pane_needs_live_frame, pane_parser,
-        paste_runs_lines, reconcile_pane_replicas, strip_wording, take_terminal_key_release,
-        terminal_frame_text, terminal_input_pane, terminal_key_down_target, terminal_key_event,
+        input_position_at, layout, or_list, pane_needs_live_frame, pane_parser,
+        reconcile_pane_replicas, strip_wording, take_terminal_key_release, terminal_frame_text,
+        terminal_input_pane, terminal_key_down_target, terminal_key_event,
         terminal_sizes_for_geometry, terminal_tab_keystroke,
     };
     use mux_acp::AgentSessionStatus;
@@ -7398,47 +7078,6 @@ mod tests {
             Some(clicked)
         );
         assert_eq!(terminal_input_pane(None, Some(focused)), Some(focused));
-    }
-
-    #[test]
-    fn a_paste_runs_lines_only_outside_bracketed_paste() {
-        let mut engine = GhosttyEngine::new(TerminalSize::default()).expect("new terminal");
-        let plain = engine.encode_paste("ls\nrm -rf x").expect("encode");
-        assert!(paste_runs_lines("ls\nrm -rf x", &plain));
-        assert!(!paste_runs_lines("just words", &plain));
-        engine
-            .apply_output(1, b"\x1b[?2004h")
-            .expect("bracketed paste on");
-        let bracketed = engine.encode_paste("ls\nrm -rf x").expect("encode");
-        assert!(!paste_runs_lines("ls\nrm -rf x", &bracketed));
-    }
-
-    #[test]
-    fn option_as_meta_sends_escape_and_the_plain_key() {
-        let engine = GhosttyEngine::new(TerminalSize::default()).expect("new terminal");
-        let option = |key: &str, composed: &str, shift: bool| gpui::Keystroke {
-            modifiers: gpui::Modifiers {
-                alt: true,
-                shift,
-                ..gpui::Modifiers::default()
-            },
-            key: key.to_owned(),
-            key_char: Some(composed.to_owned()),
-        };
-        let meta = |keystroke: &gpui::Keystroke| {
-            let mut event = terminal_key_event(keystroke, false, false, false);
-            option_as_meta(&mut event, keystroke);
-            engine.encode_key(&event).expect("encode Option key")
-        };
-
-        assert_eq!(meta(&option("b", "∫", false)), b"\x1bb");
-        assert_eq!(meta(&option("f", "ƒ", false)), b"\x1bf");
-        assert_eq!(meta(&option("b", "ı", true)), b"\x1bB");
-        assert_eq!(meta(&option(".", "≥", false)), b"\x1b.");
-        assert_eq!(meta(&option(".", "˘", true)), "˘".as_bytes());
-        let composed = option("b", "∫", false);
-        let plain = terminal_key_event(&composed, false, false, false);
-        assert_eq!(engine.encode_key(&plain).expect("encode"), "∫".as_bytes());
     }
 
     #[cfg(target_os = "macos")]

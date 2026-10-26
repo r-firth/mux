@@ -99,7 +99,6 @@ enum Command {
     CopyOutput,
     OpenHistory,
     RevealDirectory,
-    ReloadConfig,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -375,10 +374,6 @@ impl MuxApp {
             }
             Command::Reset => {
                 self.reset_pane(cx);
-                return;
-            }
-            Command::ReloadConfig => {
-                self.reload_ghostty_config(cx);
                 return;
             }
             Command::SelectOutput => {
@@ -801,7 +796,7 @@ impl MuxApp {
     /// What mux can do, each with the keys that do it and other words it
     /// answers to. Some say what they will do to the pane or tab on screen.
     #[allow(clippy::too_many_lines)] // One entry per command.
-    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 35] {
+    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 34] {
         let zoomed = self.active_tab_zoomed();
         let agent_here = self
             .active_agent_pane()
@@ -971,12 +966,6 @@ impl MuxApp {
                 "",
                 "start a session here",
                 "new session create workspace",
-            ),
-            (
-                Command::ReloadConfig,
-                "",
-                "reload the Ghostty config",
-                "refresh ghostty config settings theme font keybind",
             ),
             (
                 Command::Settings,

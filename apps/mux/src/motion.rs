@@ -518,8 +518,6 @@ impl MuxApp {
                     gpui_terminal::TerminalChrome {
                         surface: color(SURFACE),
                         cursor: self.active_ink().color(),
-                        selection: self.ghostty_theme.selection_background,
-                        selection_text: self.ghostty_theme.selection_foreground,
                         hollow_cursor: false,
                     },
                     Rc::default(),

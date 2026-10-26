@@ -1,23 +1,14 @@
-//! A blinking cursor, when its program asks for one or the user's Ghostty
-//! has `cursor-style-blink = true`; `false` keeps every cursor steady. Only
-//! the pane with the keys blinks, and typing shows the cursor again at once.
+//! A blinking cursor, when its program asks for one. Only the pane with the
+//! keys blinks, and typing shows the cursor again at once.
 
-use super::*;
+use super::{Context, Duration, Instant, MuxApp, PaneId};
 
 /// How long the cursor is shown, and then hidden, as in Ghostty.
 const BLINK: Duration = Duration::from_millis(600);
 
-/// The user's `cursor-style-blink`.
-pub(super) fn cursor_blink_setting() -> Option<bool> {
-    static BLINK_SETTING: ghostty_config::Reloadable<Option<bool>> =
-        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_cursor_blink);
-    BLINK_SETTING.get()
-}
-
 impl MuxApp {
     fn cursor_blinks(&self, pane_id: PaneId) -> bool {
-        cursor_blink_setting() != Some(false)
-            && self.terminal_input_pane_id() == Some(pane_id)
+        self.terminal_input_pane_id() == Some(pane_id)
             && self
                 .panes
                 .get(&pane_id)

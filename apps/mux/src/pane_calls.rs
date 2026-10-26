@@ -10,26 +10,19 @@
 //! A long program finishing calls the same way: a build or a test run that
 //! ends in a pane out of sight, or while mux is in the background, says it
 //! is done and how long it took, or that it failed when the shell's marks
-//! say it did. Ghostty's `notify-on-command-finish` (`never`, `unfocused`,
-//! `always`) and `notify-on-command-finish-after` (ten seconds here unless
-//! it says otherwise) decide when.
+//! say it did, once it has run for ten seconds or more.
 //!
 //! A bell in the pane you are looking at has nothing to mark, so the pane
 //! flashes instead, washed for a moment in its tab's ink.
 //!
-//! Go to the pane that called, from ⌘P, goes to the pane that called last, in whatever tab, or to an
-//! agent waiting on you, so whatever is asking for you is one key away.
+//! "Go to the pane that called", in ⌘P, goes to the pane that called last,
+//! in whatever tab, or to an agent waiting on you.
 
 use super::*;
 use mux_terminal::Attention;
 
-/// When a program finishing is worth saying, from the user's Ghostty
-/// config.
-fn command_finish_notice() -> mux_terminal_ghostty::CommandFinishNotice {
-    static NOTICE: ghostty_config::Reloadable<mux_terminal_ghostty::CommandFinishNotice> =
-        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_command_finish_notice);
-    NOTICE.get()
-}
+/// How long a program runs before its finishing is worth saying.
+const FINISH_NOTICE_AFTER: Duration = Duration::from_secs(10);
 
 /// How long a pane on screen flashes when its bell rings.
 const BELL_FLASH: Duration = Duration::from_millis(450);
@@ -42,8 +35,7 @@ impl MuxApp {
             .panes
             .get_mut(&pane_id)
             .and_then(|pane| pane.title.take_exit_status());
-        let notice = command_finish_notice();
-        if notice.enabled && seconds >= notice.after.as_secs() {
+        if seconds >= FINISH_NOTICE_AFTER.as_secs() {
             let words = finished_words(program, seconds, exit_status);
             self.finished_commands.push((pane_id, words));
         }
@@ -65,15 +57,9 @@ impl MuxApp {
         let mut rung = None;
         let mut notices = Vec::new();
         let mut called = Vec::new();
-        let finish_notice = command_finish_notice();
-        let watched_too = finish_notice.watched_too;
-        let heed_notifications = desktop_notifications();
         for (pane_id, words) in std::mem::take(&mut self.finished_commands) {
-            if (Some(pane_id) == watched && !watched_too) || !self.panes.contains_key(&pane_id) {
+            if Some(pane_id) == watched || !self.panes.contains_key(&pane_id) {
                 continue;
-            }
-            if finish_notice.desktop && heed_notifications {
-                notices.push((pane_id, words.clone()));
             }
             let call = Attention::Notification(words);
             fresh |= !self.pane_calls.contains_key(&pane_id);
@@ -82,11 +68,7 @@ impl MuxApp {
             self.note_call_order(pane_id);
         }
         for (pane_id, pane) in &mut self.panes {
-            let Some(call) = pane
-                .title
-                .take_attention()
-                .filter(|call| heed_notifications || *call == Attention::Bell)
-            else {
+            let Some(call) = pane.title.take_attention() else {
                 continue;
             };
             if Some(*pane_id) == watched {
@@ -132,7 +114,7 @@ impl MuxApp {
         changed
     }
 
-    /// The pane has just called: it is the one go to the pane that called goes to.
+    /// The pane has just called: it is the one "go to the pane that called" goes to.
     fn note_call_order(&mut self, pane_id: PaneId) {
         self.call_order.retain(|called| *called != pane_id);
         self.call_order.push(pane_id);

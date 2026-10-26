@@ -6,9 +6,7 @@
 //! would; ⌘-click opens it. A file link is shown in Finder rather than
 //! opened, so a link can never start a program. A path written in the
 //! output, such as a compiler's `src/main.rs:12:5`, is a link too: found
-//! from the pane's working directory and shown in Finder. Ghostty's
-//! `link-url = false` leaves written URLs and paths as text, OSC 8 links
-//! still working.
+//! from the pane's working directory and shown in Finder.
 
 use super::*;
 use mux_terminal::RenderCell;
@@ -27,21 +25,9 @@ pub(super) struct Link {
 
 const SCHEMES: [&str; 3] = ["https://", "http://", "file://"];
 
-/// Whether links written out in plain text are found, as the user's
-/// Ghostty `link-url` has it.
-fn written_links() -> bool {
-    static LINKS: ghostty_config::Reloadable<bool> =
-        ghostty_config::Reloadable::new(mux_terminal_ghostty::user_link_url);
-    LINKS.get()
-}
-
 /// The link under a cell, if there is one.
 pub(super) fn link_at(frame: &RenderFrame, point: TerminalPoint) -> Option<Link> {
-    hyperlink_at(frame, point).or_else(|| {
-        written_links()
-            .then(|| written_url_at(frame, point))
-            .flatten()
-    })
+    hyperlink_at(frame, point).or_else(|| written_url_at(frame, point))
 }
 
 fn cell(frame: &RenderFrame, row: u16, column: u16) -> Option<&RenderCell> {
@@ -345,17 +331,6 @@ impl MuxApp {
                 "copied the link"
             };
             self.say_in_strip(what, false, cx);
-        }
-    }
-
-    /// Ghostty's `copy_url_to_clipboard`: the link under the pointer, ⌘
-    /// held or not.
-    pub(super) fn copy_link_under_pointer(&mut self, cx: &mut Context<Self>) {
-        let link = self
-            .link_pointer
-            .and_then(|(pane_id, rect, position)| self.link_under(pane_id, rect, position));
-        if let Some(link) = link {
-            self.copy_link(&link, cx);
         }
     }
 
