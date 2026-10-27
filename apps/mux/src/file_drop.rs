@@ -34,7 +34,20 @@ impl MuxApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let text = dropped_paths_text(paths);
+        // A name with control characters in it can't be typed safely in
+        // any shell: a Ctrl+u and a Return in it would run a command. Such a
+        // file is left out, as Ghostty refuses to open one.
+        let (typed, refused): (Vec<_>, Vec<_>) = paths
+            .iter()
+            .partition(|path| !path.to_string_lossy().chars().any(char::is_control));
+        if !refused.is_empty() {
+            self.say_in_strip(
+                "left out a file whose name holds control characters",
+                true,
+                cx,
+            );
+        }
+        let text = dropped_paths_text(typed);
         if text.is_empty() {
             return;
         }
@@ -54,7 +67,7 @@ impl MuxApp {
 
 /// The paths as they would be typed: each escaped for the shell, with a
 /// space after each.
-fn dropped_paths_text(paths: &[std::path::PathBuf]) -> String {
+fn dropped_paths_text<'a>(paths: impl IntoIterator<Item = &'a std::path::PathBuf>) -> String {
     let mut text = String::new();
     for path in paths {
         text.push_str(&shell_escaped(&path.to_string_lossy()));
@@ -105,6 +118,6 @@ mod tests {
     fn dropped_paths_are_typed_one_after_another() {
         let paths = [PathBuf::from("/tmp/a b"), PathBuf::from("/tmp/c")];
         assert_eq!(dropped_paths_text(&paths), r"/tmp/a\ b /tmp/c ");
-        assert_eq!(dropped_paths_text(&[]), "");
+        assert_eq!(dropped_paths_text(&[] as &[PathBuf]), "");
     }
 }

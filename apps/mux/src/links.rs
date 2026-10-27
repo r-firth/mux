@@ -4,7 +4,8 @@
 //! text, even one the terminal wrapped across rows) underlines it in the
 //! tab's ink and shows where it goes in the strip, as a browser's status line
 //! would; ⌘-click opens it. A file link is shown in Finder rather than
-//! opened, so a link can never start a program. A path written in the
+//! opened, so a link can never start a program, and a link that would open
+//! another app, such as `vscode:`, takes a second ⌘-click. A path written in the
 //! output, such as a compiler's `src/main.rs:12:5`, is a link too: found
 //! from the pane's working directory and shown in Finder.
 
@@ -228,6 +229,16 @@ pub(super) fn spans_of(cells: impl Iterator<Item = (u16, u16)>) -> Vec<(u16, u16
     spans
 }
 
+/// The scheme of a link that would open some other app, as anything but
+/// a web page, a mail or a file does.
+fn app_scheme(url: &str) -> Option<&str> {
+    let (scheme, _) = url.split_once(':')?;
+    let web = ["http", "https", "mailto", "file"]
+        .iter()
+        .any(|known| scheme.eq_ignore_ascii_case(known));
+    (!web).then_some(scheme)
+}
+
 /// Open a link the way the system opens it. Files are shown, not opened.
 pub(super) fn open_link(url: &str) -> std::io::Result<()> {
     let mut command = if cfg!(target_os = "macos") {
@@ -360,9 +371,33 @@ impl MuxApp {
                 pane_id,
                 written: link.url.clone(),
             });
+        } else if let Some(scheme) = app_scheme(&link.url)
+            && !self.app_link_asked(&link.url)
+        {
+            // Any other scheme opens whatever app claims it, so a program
+            // can't have one started by a single click, as Ghostty asks.
+            self.say_in_strip(
+                format!("a {scheme}: link opens another app · ⌘-click again to open it"),
+                true,
+                cx,
+            );
+            self.app_link_asked = Some((link.url.clone(), self.strip_serial));
         } else if let Err(error) = open_link(&link.url) {
             self.say_in_strip(format!("couldn't open {}: {error}", link.url), true, cx);
         }
+    }
+
+    /// Whether the strip still asks about opening `url`, from a ⌘-click on
+    /// it a moment ago.
+    fn app_link_asked(&mut self, url: &str) -> bool {
+        let Some((asked, serial)) = self.app_link_asked.take() else {
+            return false;
+        };
+        asked == url
+            && self
+                .strip_message
+                .as_ref()
+                .is_some_and(|message| message.serial == serial)
     }
 
     /// Open the directory a pane's shell is in now, in Finder.
@@ -495,6 +530,20 @@ mod tests {
 
     fn at(column: u16, row: u16) -> TerminalPoint {
         TerminalPoint { column, row }
+    }
+
+    #[test]
+    fn only_links_to_other_apps_are_asked_about() {
+        assert_eq!(app_scheme("https://example.com"), None);
+        assert_eq!(app_scheme("HTTP://example.com"), None);
+        assert_eq!(app_scheme("mailto:ryan@example.com"), None);
+        assert_eq!(app_scheme("file:///tmp/a"), None);
+        assert_eq!(app_scheme("vscode://file/tmp/a"), Some("vscode"));
+        assert_eq!(
+            app_scheme("x-apple.systempreferences:"),
+            Some("x-apple.systempreferences")
+        );
+        assert_eq!(app_scheme("example.com"), None);
     }
 
     #[test]

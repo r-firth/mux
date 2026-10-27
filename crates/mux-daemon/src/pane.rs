@@ -422,13 +422,16 @@ impl PaneRuntime {
 
     pub fn resize(&self, size: TerminalSize) -> Result<(), PaneError> {
         let size = size.validate()?;
-        self.master.lock().resize(to_pty_size(size))?;
         // A program that asked for in-band size reports (mode 2048), such as
         // Neovim, waits for the report rather than SIGWINCH. The terminal
         // queues it on resize; send it now, not with the pane's next output,
         // which may never come.
         let responses = {
+            // The terminal is held while the pty resizes, as Ghostty does,
+            // so the redraw a SIGWINCH sets off is never read against the
+            // old size.
             let mut terminal = self.terminal.lock();
+            self.master.lock().resize(to_pty_size(size))?;
             terminal.resize(size)?;
             terminal.take_pty_responses()?
         };

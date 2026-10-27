@@ -770,6 +770,9 @@ struct MuxApp {
     /// A program's clipboard read waiting on a ⌘V: the pane, the clipboard
     /// it named, and the strip message that asks.
     clipboard_read_asked: Option<(PaneId, String, u64)>,
+    /// A link to another app waiting on a second ⌘-click, and the strip
+    /// message that asks for it.
+    app_link_asked: Option<(String, u64)>,
     /// The focused pane's size shows in its head while sizes are changing
     /// (and in resize mode), then gets out of the way.
     size_readout: bool,
@@ -979,6 +982,7 @@ impl MuxApp {
             bell_serial: 0,
             close_armed: None,
             clipboard_read_asked: None,
+            app_link_asked: None,
             pane_menu: None,
             size_readout: false,
             size_readout_pending: false,
