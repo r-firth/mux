@@ -2410,6 +2410,10 @@ mod linked {
                 output.extend_from_slice(format!("line {line} of repeated history\r\n").as_bytes());
             }
             engine.apply_output(1, &output).expect("output");
+            // The scrollback limit has already let the oldest lines go, so
+            // what has to survive is whatever history there was.
+            let history = engine.screen_text().expect("history before");
+            assert!(history.contains("line 4999 of repeated history"));
             let before = engine.memory_bytes().expect("memory before");
             let mut steps = 0;
             while engine.compress_history_step().expect("compress") {
@@ -2418,9 +2422,7 @@ mod linked {
             }
             let after = engine.memory_bytes().expect("memory after");
             assert!(after <= before, "{after} bytes after, {before} before");
-            let text = engine.screen_text().expect("history");
-            assert!(text.contains("line 0 of repeated history"));
-            assert!(text.contains("line 4999 of repeated history"));
+            assert_eq!(engine.screen_text().expect("history after"), history);
         }
 
         #[test]
