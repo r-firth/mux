@@ -16,6 +16,23 @@ const PROGRESS_STALE: Duration = Duration::from_secs(15);
 const PROGRESS_SWEEP: Duration = Duration::from_secs(5);
 
 impl MuxApp {
+    /// Take in what panes' programs said they are doing with the program
+    /// status protocol (OSC 7501), which libghostty reads as it parses: as
+    /// their progress, and as calls when they wait on you, finish or fail.
+    /// A pane still parsing is asked again next time.
+    pub(super) fn collect_program_statuses(&mut self) {
+        for pane in self.panes.values_mut() {
+            let Some(mut engine) = pane.engine.try_lock() else {
+                continue;
+            };
+            let status = engine.take_program_status();
+            drop(engine);
+            if let Some(status) = status {
+                pane.title.note_program_status(&status);
+            }
+        }
+    }
+
     /// Take in what panes said about their progress in the output just
     /// applied. Returns whether a bar changed.
     pub(super) fn collect_pane_progress(&mut self, cx: &mut Context<Self>) -> bool {

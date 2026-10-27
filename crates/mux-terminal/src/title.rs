@@ -355,6 +355,58 @@ impl TitleScanner {
 }
 
 impl TitleScanner {
+    /// Take in what a program said it is doing (OSC 7501), as its progress
+    /// and, when it waits on the user, finishes or fails, as a call.
+    pub fn note_program_status(&mut self, status: &crate::ProgramStatus) {
+        use crate::{ProgramNeed, ProgramState};
+        let name = [&status.title, &status.app]
+            .into_iter()
+            .map(|name| name.trim())
+            .find(|name| !name.is_empty())
+            .unwrap_or("The program");
+        let message = status
+            .message
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let said = |otherwise: String| {
+            Attention::Notification(if message.is_empty() {
+                otherwise
+            } else {
+                message.clone()
+            })
+        };
+        match status.state {
+            ProgramState::Working => {
+                self.progress = Some(
+                    status
+                        .progress
+                        .map_or(Progress::Indeterminate, Progress::Normal),
+                );
+            }
+            ProgramState::Blocked => {
+                if let Some(percent) = status.progress {
+                    self.progress = Some(Progress::Paused(percent));
+                }
+                self.attention = Some(said(match status.need {
+                    Some(ProgramNeed::Permission) => format!("{name} wants your permission"),
+                    Some(ProgramNeed::Question) => format!("{name} has a question"),
+                    Some(ProgramNeed::Auth) => format!("{name} needs you to sign in"),
+                    None => format!("{name} needs you"),
+                }));
+            }
+            ProgramState::Done => {
+                self.progress = Some(Progress::Removed);
+                self.attention = Some(said(format!("{name} is done")));
+            }
+            ProgramState::Error => {
+                self.progress = Some(Progress::Error(status.progress.unwrap_or(100)));
+                self.attention = Some(said(format!("{name} failed")));
+            }
+            ProgramState::Idle | ProgramState::Clear => self.progress = Some(Progress::Removed),
+        }
+    }
+
     /// OSC 133: `C` as a command starts, `D ; status` as it ends. A command
     /// starting forgets how the one before ended.
     ///
@@ -483,6 +535,73 @@ mod tests {
         scanner.scan(b"\x1b]9;4;1;50\x07");
         assert_eq!(scanner.take_attention(), None);
         assert_eq!(scanner.title(), None);
+    }
+
+    fn status(state: crate::ProgramState) -> crate::ProgramStatus {
+        crate::ProgramStatus {
+            state,
+            need: None,
+            progress: None,
+            app: "cargo".to_owned(),
+            title: String::new(),
+            message: String::new(),
+        }
+    }
+
+    #[test]
+    fn program_status_reports_become_progress_and_calls() {
+        use crate::{ProgramNeed, ProgramState};
+        let mut scanner = TitleScanner::default();
+        scanner.note_program_status(&crate::ProgramStatus {
+            progress: Some(40),
+            ..status(ProgramState::Working)
+        });
+        assert_eq!(scanner.take_progress(), Some(Progress::Normal(40)));
+        assert_eq!(scanner.take_attention(), None);
+
+        scanner.note_program_status(&status(ProgramState::Working));
+        assert_eq!(scanner.take_progress(), Some(Progress::Indeterminate));
+
+        scanner.note_program_status(&crate::ProgramStatus {
+            need: Some(ProgramNeed::Permission),
+            ..status(ProgramState::Blocked)
+        });
+        assert_eq!(
+            scanner.take_attention(),
+            Some(Attention::Notification(
+                "cargo wants your permission".to_owned()
+            ))
+        );
+
+        scanner.note_program_status(&crate::ProgramStatus {
+            message: "Apply  these\nchanges?".to_owned(),
+            ..status(ProgramState::Blocked)
+        });
+        assert_eq!(
+            scanner.take_attention(),
+            Some(Attention::Notification("Apply these changes?".to_owned()))
+        );
+
+        scanner.note_program_status(&status(ProgramState::Error));
+        assert_eq!(scanner.take_progress(), Some(Progress::Error(100)));
+        assert_eq!(
+            scanner.take_attention(),
+            Some(Attention::Notification("cargo failed".to_owned()))
+        );
+
+        scanner.note_program_status(&crate::ProgramStatus {
+            title: "Deploy".to_owned(),
+            ..status(ProgramState::Done)
+        });
+        assert_eq!(scanner.take_progress(), Some(Progress::Removed));
+        assert_eq!(
+            scanner.take_attention(),
+            Some(Attention::Notification("Deploy is done".to_owned()))
+        );
+
+        scanner.note_program_status(&status(ProgramState::Clear));
+        assert_eq!(scanner.take_progress(), Some(Progress::Removed));
+        assert_eq!(scanner.take_attention(), None);
     }
 
     #[test]

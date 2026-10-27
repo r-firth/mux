@@ -316,13 +316,14 @@ mod linked {
 
     use mux_terminal::{
         CellStyle, CellWidth, CursorStyle, EngineDescriptor, ImageLayer, ImagePixels,
-        KITTY_KEYBOARD_RESET_SEQUENCE, RenderCell, RenderCursor, RenderDirty, RenderFrame,
-        RenderImage, RenderRow, Rgb, SemanticContent, TerminalAttachment, TerminalCheckpoint,
-        TerminalEngine, TerminalError, TerminalInteraction, TerminalKey, TerminalKeyAction,
-        TerminalKeyEvent, TerminalModifiers, TerminalMouseAction, TerminalMouseButton,
-        TerminalMouseEvent, TerminalRenderer, TerminalScrollState, TerminalSelection,
-        TerminalSelectionAutoscroll, TerminalSelectionGestureEvent, TerminalSelectionGestureStatus,
-        TerminalSize, TerminalViewportScroll,
+        KITTY_KEYBOARD_RESET_SEQUENCE, MouseShape, ProgramNeed, ProgramState, ProgramStatus,
+        RenderCell, RenderCursor, RenderDirty, RenderFrame, RenderImage, RenderRow, Rgb,
+        SemanticContent, TerminalAttachment, TerminalCheckpoint, TerminalEngine, TerminalError,
+        TerminalInteraction, TerminalKey, TerminalKeyAction, TerminalKeyEvent, TerminalModifiers,
+        TerminalMouseAction, TerminalMouseButton, TerminalMouseEvent, TerminalRenderer,
+        TerminalScrollState, TerminalSelection, TerminalSelectionAutoscroll,
+        TerminalSelectionGestureEvent, TerminalSelectionGestureStatus, TerminalSize,
+        TerminalViewportScroll,
     };
     use thiserror::Error;
 
@@ -436,6 +437,19 @@ mod linked {
         width: u32,
         height: u32,
         format: u8,
+    }
+
+    #[repr(C)]
+    struct CProgramStatus {
+        state: u8,
+        kind: u8,
+        progress: i8,
+        app_len: u8,
+        title_len: u8,
+        message_len: u16,
+        app: [u8; 32],
+        title: [u8; 192],
+        message: [u8; 512],
     }
 
     impl Default for CImagePixels {
@@ -693,6 +707,11 @@ mod linked {
         ) -> i32;
         fn mux_ghostty_set_png_decoder(decoder: Option<crate::png_decode::DecodeFn>) -> i32;
         fn mux_ghostty_renderer_release_hold(renderer: *mut c_void);
+        fn mux_ghostty_response_collector_take_program_status(
+            collector: *mut c_void,
+            out_status: *mut CProgramStatus,
+        ) -> bool;
+        fn mux_ghostty_terminal_mouse_shape(terminal: *mut c_void, out_shape: *mut u8) -> i32;
         fn mux_ghostty_renderer_images(
             renderer: *mut c_void,
             out_placements: *mut *const CImagePlacement,
@@ -1387,6 +1406,100 @@ mod linked {
                 height: pixels.height,
                 rgba,
             }))
+        }
+
+        /// What the program last said it is doing (OSC 7501), if it has
+        /// said anything since this was last asked.
+        pub fn take_program_status(&mut self) -> Option<ProgramStatus> {
+            // SAFETY: an all-zero report is a valid value for the C struct.
+            let mut status: CProgramStatus = unsafe { std::mem::zeroed() };
+            // SAFETY: the collector is exclusively owned and the out pointer valid.
+            let taken = unsafe {
+                mux_ghostty_response_collector_take_program_status(
+                    self.responses.as_ptr(),
+                    &raw mut status,
+                )
+            };
+            if !taken {
+                return None;
+            }
+            let text = |bytes: &[u8], len: usize| {
+                String::from_utf8_lossy(&bytes[..len.min(bytes.len())]).into_owned()
+            };
+            Some(ProgramStatus {
+                state: match status.state {
+                    0 => ProgramState::Idle,
+                    1 => ProgramState::Working,
+                    2 => ProgramState::Done,
+                    3 => ProgramState::Blocked,
+                    4 => ProgramState::Error,
+                    5 => ProgramState::Clear,
+                    _ => return None,
+                },
+                need: match status.kind {
+                    1 => Some(ProgramNeed::Permission),
+                    2 => Some(ProgramNeed::Question),
+                    3 => Some(ProgramNeed::Auth),
+                    _ => None,
+                },
+                progress: u8::try_from(status.progress)
+                    .ok()
+                    .filter(|percent| *percent <= 100),
+                app: text(&status.app, status.app_len.into()),
+                title: text(&status.title, status.title_len.into()),
+                message: text(&status.message, status.message_len.into()),
+            })
+        }
+
+        /// The pointer shape the program asked for over its pane (OSC 22).
+        #[must_use]
+        pub fn mouse_shape(&self) -> MouseShape {
+            let mut shape = 8_u8;
+            // SAFETY: the terminal is borrowed for this read-only query.
+            let result =
+                unsafe { mux_ghostty_terminal_mouse_shape(self.terminal.as_ptr(), &raw mut shape) };
+            if result != SUCCESS {
+                return MouseShape::Text;
+            }
+            [
+                MouseShape::Default,
+                MouseShape::ContextMenu,
+                MouseShape::Help,
+                MouseShape::Pointer,
+                MouseShape::Progress,
+                MouseShape::Wait,
+                MouseShape::Cell,
+                MouseShape::Crosshair,
+                MouseShape::Text,
+                MouseShape::VerticalText,
+                MouseShape::Alias,
+                MouseShape::Copy,
+                MouseShape::Move,
+                MouseShape::NoDrop,
+                MouseShape::NotAllowed,
+                MouseShape::Grab,
+                MouseShape::Grabbing,
+                MouseShape::AllScroll,
+                MouseShape::ColResize,
+                MouseShape::RowResize,
+                MouseShape::NResize,
+                MouseShape::EResize,
+                MouseShape::SResize,
+                MouseShape::WResize,
+                MouseShape::NeResize,
+                MouseShape::NwResize,
+                MouseShape::SeResize,
+                MouseShape::SwResize,
+                MouseShape::EwResize,
+                MouseShape::NsResize,
+                MouseShape::NeswResize,
+                MouseShape::NwseResize,
+                MouseShape::ZoomIn,
+                MouseShape::ZoomOut,
+            ]
+            .get(usize::from(shape))
+            .copied()
+            .unwrap_or_default()
         }
 
         /// Draw what the terminal holds now, even if a program has asked for
@@ -2226,6 +2339,47 @@ mod linked {
             let frame = engine.render_frame().expect("frame");
             assert!(!frame.held);
             assert_eq!(first_row_text(&frame), "held");
+        }
+
+        #[test]
+        fn a_program_says_what_it_is_doing_and_can_ask_if_that_is_heard() {
+            let mut engine = sized_engine(20, 2);
+            engine.apply_output(1, b"\x1b]7501;?\x1b\\").expect("query");
+            let reply = engine.take_pty_responses().expect("responses");
+            assert!(String::from_utf8_lossy(&reply).starts_with("\x1b]7501;?"));
+
+            // "Apply?" in base64.
+            engine
+                .apply_output(
+                    2,
+                    b"\x1b]7501;state=blocked:kind=permission:app=terraform:msg=QXBwbHk/\x1b\\",
+                )
+                .expect("report");
+            let status = engine.take_program_status().expect("status");
+            assert_eq!(status.state, ProgramState::Blocked);
+            assert_eq!(status.need, Some(ProgramNeed::Permission));
+            assert_eq!(status.app, "terraform");
+            assert_eq!(status.message, "Apply?");
+            assert_eq!(status.progress, None);
+            assert!(engine.take_program_status().is_none());
+
+            // A report about one of its records, not itself, is left out.
+            engine
+                .apply_output(3, b"\x1b]7501;state=working:id=build:progress=5\x07")
+                .expect("record");
+            assert!(engine.take_program_status().is_none());
+        }
+
+        #[test]
+        fn a_program_picks_the_pointer_shape() {
+            let mut engine = sized_engine(20, 2);
+            assert_eq!(engine.mouse_shape(), MouseShape::Text);
+            engine
+                .apply_output(1, b"\x1b]22;pointer\x07")
+                .expect("shape");
+            assert_eq!(engine.mouse_shape(), MouseShape::Pointer);
+            engine.apply_output(2, b"\x1b]22;\x07").expect("reset");
+            assert_eq!(engine.mouse_shape(), MouseShape::Text);
         }
 
         #[test]

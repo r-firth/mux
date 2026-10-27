@@ -126,6 +126,87 @@ pub struct RenderFrame {
     pub redraw_in: Option<std::time::Duration>,
 }
 
+/// The pointer shape a program asks for over its pane, with OSC 22, by the
+/// CSS cursor names it uses.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MouseShape {
+    Default,
+    ContextMenu,
+    Help,
+    Pointer,
+    Progress,
+    Wait,
+    Cell,
+    Crosshair,
+    #[default]
+    Text,
+    VerticalText,
+    Alias,
+    Copy,
+    Move,
+    NoDrop,
+    NotAllowed,
+    Grab,
+    Grabbing,
+    AllScroll,
+    ColResize,
+    RowResize,
+    NResize,
+    EResize,
+    SResize,
+    WResize,
+    NeResize,
+    NwResize,
+    SeResize,
+    SwResize,
+    EwResize,
+    NsResize,
+    NeswResize,
+    NwseResize,
+    ZoomIn,
+    ZoomOut,
+}
+
+/// What a program says it is doing, with the program status protocol
+/// (OSC 7501).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProgramState {
+    Idle,
+    Working,
+    Done,
+    /// Waiting on the user.
+    Blocked,
+    Error,
+    /// Taking back what it said.
+    Clear,
+}
+
+/// What a blocked program needs from the user.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProgramNeed {
+    /// Approval to do something.
+    Permission,
+    /// An answer to type.
+    Question,
+    /// A login, password or token.
+    Auth,
+}
+
+/// A program's report of what it is doing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProgramStatus {
+    pub state: ProgramState,
+    pub need: Option<ProgramNeed>,
+    /// How far along, in percent, when the program says.
+    pub progress: Option<u8>,
+    /// A name machines match on, such as `cargo`.
+    pub app: String,
+    /// A label for people.
+    pub title: String,
+    /// One line for people on what it is doing or waiting for.
+    pub message: String,
+}
+
 /// Where an image is drawn among a pane's cells.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ImageLayer {

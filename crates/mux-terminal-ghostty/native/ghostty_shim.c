@@ -45,6 +45,20 @@ typedef struct {
   uint8_t autoscroll;
 } mux_ghostty_selection_gesture_status_t;
 
+/* What a program says it is doing, with OSC 7501. Text is cut to fit. */
+typedef struct {
+  uint8_t state;
+  uint8_t kind;
+  /* 0 through 100, or -1 when the program gave no percentage. */
+  int8_t progress;
+  uint8_t app_len;
+  uint8_t title_len;
+  uint16_t message_len;
+  uint8_t app[32];
+  uint8_t title[192];
+  uint8_t message[512];
+} mux_ghostty_program_status_t;
+
 typedef struct {
   uint8_t *bytes;
   size_t len;
@@ -57,6 +71,10 @@ typedef struct {
   /* The renderer drawing this terminal, told when a program holds the
    * screen. */
   struct mux_ghostty_renderer_impl *renderer;
+  /* The program's last report of what it is doing (OSC 7501), about
+   * itself rather than one of its records, until it is taken. */
+  mux_ghostty_program_status_t program_status;
+  bool has_program_status;
 } mux_ghostty_response_collector_impl_t;
 
 typedef struct {
@@ -435,6 +453,74 @@ static void on_render_hold(
   renderer->held = held;
 }
 
+/* Copies at most `capacity` bytes of `text`, ending on a whole UTF-8
+ * character. */
+static size_t copy_text(uint8_t *out, size_t capacity, GhosttyString text) {
+  size_t len = text.len < capacity ? text.len : capacity;
+  if (len < text.len) {
+    while (len > 0 && (text.ptr[len] & 0xC0) == 0x80) {
+      len--;
+    }
+  }
+  if (len > 0) {
+    memcpy(out, text.ptr, len);
+  }
+  return len;
+}
+
+/* A program reports what it is doing. Only its report about itself is
+ * kept, the root record, as that is what a pane can show. Answering a
+ * program asking whether the protocol is known needs this set at all. */
+static void on_program_status(
+    GhosttyTerminal terminal,
+    void *userdata,
+    const GhosttyTerminalProgramStatus *report) {
+  (void)terminal;
+  mux_ghostty_response_collector_impl_t *collector = userdata;
+  if (collector == NULL || report == NULL || report->id.len != 0) {
+    return;
+  }
+  mux_ghostty_program_status_t *status = &collector->program_status;
+  memset(status, 0, sizeof(*status));
+  status->state = (uint8_t)report->state;
+  status->kind = (uint8_t)report->kind;
+  status->progress = report->progress;
+  status->app_len =
+      (uint8_t)copy_text(status->app, sizeof(status->app), report->app);
+  status->title_len =
+      (uint8_t)copy_text(status->title, sizeof(status->title), report->title);
+  status->message_len = (uint16_t)copy_text(
+      status->message, sizeof(status->message), report->message);
+  collector->has_program_status = true;
+}
+
+/* The program's last report since this was last asked, if any. */
+bool mux_ghostty_response_collector_take_program_status(
+    mux_ghostty_response_collector_t raw_collector,
+    mux_ghostty_program_status_t *out_status) {
+  mux_ghostty_response_collector_impl_t *collector = raw_collector;
+  if (collector == NULL || out_status == NULL ||
+      !collector->has_program_status) {
+    return false;
+  }
+  *out_status = collector->program_status;
+  collector->has_program_status = false;
+  return true;
+}
+
+/* The pointer shape the program asked for with OSC 22. */
+int32_t mux_ghostty_terminal_mouse_shape(
+    mux_ghostty_terminal_t terminal,
+    uint8_t *out_shape) {
+  if (out_shape == NULL) return (int32_t)GHOSTTY_INVALID_VALUE;
+  GhosttyMouseShape shape = GHOSTTY_MOUSE_SHAPE_TEXT;
+  GhosttyResult result = ghostty_terminal_get(
+      (GhosttyTerminal)terminal, GHOSTTY_TERMINAL_DATA_MOUSE_SHAPE, &shape);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+  *out_shape = (uint8_t)shape;
+  return (int32_t)GHOSTTY_SUCCESS;
+}
+
 int32_t mux_ghostty_terminal_enable_responses(
     mux_ghostty_terminal_t raw_terminal,
     mux_ghostty_response_collector_t raw_collector,
@@ -470,6 +556,11 @@ int32_t mux_ghostty_terminal_enable_responses(
   if (result != GHOSTTY_SUCCESS) return (int32_t)result;
   result = ghostty_terminal_set(
       terminal, GHOSTTY_TERMINAL_OPT_RENDER_HOLD, (const void *)on_render_hold);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+  result = ghostty_terminal_set(
+      terminal,
+      GHOSTTY_TERMINAL_OPT_PROGRAM_STATUS,
+      (const void *)on_program_status);
   if (result != GHOSTTY_SUCCESS) return (int32_t)result;
   return (int32_t)ghostty_terminal_set(
       terminal, GHOSTTY_TERMINAL_OPT_SIZE, (const void *)on_size);

@@ -87,7 +87,7 @@ use mux_acp::{
 };
 use mux_protocol::{PaneAttachment, ProcessExit, ServerEvent, SessionAttachment, SessionSummary};
 use mux_terminal::{
-    CellWidth, RenderFrame, Rgb, TerminalEngine, TerminalInteraction, TerminalKey,
+    CellWidth, MouseShape, RenderFrame, Rgb, TerminalEngine, TerminalInteraction, TerminalKey,
     TerminalKeyAction, TerminalKeyEvent, TerminalModifiers, TerminalMouseAction,
     TerminalMouseButton, TerminalMouseEvent, TerminalMouseGeometry, TerminalPoint,
     TerminalRenderer, TerminalSelectionGeometry, TerminalSelectionGestureEvent, TerminalSize,
@@ -299,6 +299,8 @@ struct PaneReplica {
     /// When the pane is next drawn though no output arrives, for an
     /// animated image or a held screen given up on.
     redraw_at: Option<Instant>,
+    /// The pointer the pane's program asked for, as of its last frame.
+    mouse_shape: MouseShape,
 }
 
 fn next_frame_serial() -> u64 {
@@ -339,6 +341,7 @@ impl PaneReplica {
             program_since: None,
             secret_input: false,
             redraw_at: None,
+            mouse_shape: MouseShape::default(),
         }
     }
 
@@ -440,7 +443,45 @@ impl PaneReplica {
         let mut engine = self.engine.lock();
         self.frame_serial = next_frame_serial();
         engine.render_frame_into(Rc::make_mut(&mut self.frame))?;
+        self.mouse_shape = engine.mouse_shape();
         Ok(())
+    }
+}
+
+/// The Mac pointer nearest the one a program asked for by its CSS name.
+fn pointer_for(shape: MouseShape) -> gpui::CursorStyle {
+    use gpui::CursorStyle;
+    match shape {
+        MouseShape::Text => CursorStyle::IBeam,
+        MouseShape::VerticalText => CursorStyle::IBeamCursorForVerticalLayout,
+        MouseShape::Pointer => CursorStyle::PointingHand,
+        MouseShape::Crosshair | MouseShape::Cell => CursorStyle::Crosshair,
+        MouseShape::Grab | MouseShape::Move | MouseShape::AllScroll => CursorStyle::OpenHand,
+        MouseShape::Grabbing => CursorStyle::ClosedHand,
+        MouseShape::NotAllowed | MouseShape::NoDrop => CursorStyle::OperationNotAllowed,
+        MouseShape::Alias => CursorStyle::DragLink,
+        MouseShape::Copy => CursorStyle::DragCopy,
+        MouseShape::ColResize => CursorStyle::ResizeColumn,
+        MouseShape::RowResize => CursorStyle::ResizeRow,
+        MouseShape::EwResize => CursorStyle::ResizeLeftRight,
+        MouseShape::NsResize => CursorStyle::ResizeUpDown,
+        MouseShape::WResize => CursorStyle::ResizeLeft,
+        MouseShape::EResize => CursorStyle::ResizeRight,
+        MouseShape::NResize => CursorStyle::ResizeUp,
+        MouseShape::SResize => CursorStyle::ResizeDown,
+        MouseShape::NwseResize | MouseShape::NwResize | MouseShape::SeResize => {
+            CursorStyle::ResizeUpLeftDownRight
+        }
+        MouseShape::NeswResize | MouseShape::NeResize | MouseShape::SwResize => {
+            CursorStyle::ResizeUpRightDownLeft
+        }
+        MouseShape::Default
+        | MouseShape::ContextMenu
+        | MouseShape::Help
+        | MouseShape::Progress
+        | MouseShape::Wait
+        | MouseShape::ZoomIn
+        | MouseShape::ZoomOut => CursorStyle::Arrow,
     }
 }
 
@@ -489,6 +530,7 @@ fn restore_pane_replica(
     title.seed_command_endings(pane.command_endings.clone());
     // A bell in the replayed history rang long ago, what it copied has
     // likely been copied over since, and its progress is long out of date.
+    let _ = engine.take_program_status();
     let _ = title.take_attention();
     let _ = title.take_copied();
     let _ = title.take_progress();
@@ -1308,6 +1350,7 @@ impl MuxApp {
         self.publish_terminal_frames(&mut dirty_panes, cx);
         self.refresh_link_hover(cx);
         self.collect_pane_copies(cx);
+        self.collect_program_statuses();
         let progressed = self.collect_pane_progress(cx);
         self.collect_pane_calls(window, cx) || progressed || needs_render
     }
@@ -5389,13 +5432,18 @@ impl MuxApp {
             .overflow_hidden()
             .bg(rgb(SURFACE))
             .when(opacity < 1.0, |surface| surface.opacity(opacity))
-            // Text takes the I-beam, as in any Mac terminal; a link under
-            // ⌘ the pointing hand.
+            // Text takes the I-beam, as in any Mac terminal, unless the
+            // program asked for another pointer (OSC 22); a link under ⌘
+            // the pointing hand.
             .map(|surface| {
                 if self.pane_link_hovered(pane_id) {
                     surface.cursor_pointer()
                 } else {
-                    surface.cursor(gpui::CursorStyle::IBeam)
+                    let shape = self
+                        .panes
+                        .get(&pane_id)
+                        .map_or(MouseShape::Text, |pane| pane.mouse_shape);
+                    surface.cursor(pointer_for(shape))
                 }
             })
             .on_any_mouse_down(move |event, window, cx| {
