@@ -19,13 +19,16 @@ impl MuxApp {
     /// Take in what panes' programs said they are doing with the program
     /// status protocol (OSC 7501), which libghostty reads as it parses: as
     /// their progress, and as calls when they wait on you, finish or fail.
-    /// A pane still parsing is asked again next time.
+    /// Whether a full-screen program has each pane is noted too, so a tab
+    /// with an editor parked in it doesn't breathe. A pane still parsing is
+    /// asked again next time.
     pub(super) fn collect_program_statuses(&mut self) {
         for pane in self.panes.values_mut() {
             let Some(mut engine) = pane.engine.try_lock() else {
                 continue;
             };
             let status = engine.take_program_status();
+            pane.alternate_screen = engine.on_alternate_screen();
             drop(engine);
             if let Some(status) = status {
                 pane.title.note_program_status(&status);

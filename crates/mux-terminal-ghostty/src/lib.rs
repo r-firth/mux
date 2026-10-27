@@ -712,6 +712,10 @@ mod linked {
             out_status: *mut CProgramStatus,
         ) -> bool;
         fn mux_ghostty_terminal_mouse_shape(terminal: *mut c_void, out_shape: *mut u8) -> i32;
+        fn mux_ghostty_terminal_on_alternate_screen(
+            terminal: *mut c_void,
+            out_alternate: *mut bool,
+        ) -> i32;
         fn mux_ghostty_terminal_compress_step(terminal: *mut c_void, out_pending: *mut bool)
         -> i32;
         fn mux_ghostty_terminal_memory_bytes(terminal: *mut c_void, out_bytes: *mut u64) -> i32;
@@ -1481,6 +1485,18 @@ mod linked {
             };
             check(result)?;
             Ok(bytes)
+        }
+
+        /// Whether a full-screen program, such as an editor or a pager, has
+        /// the terminal on its alternate screen.
+        #[must_use]
+        pub fn on_alternate_screen(&self) -> bool {
+            let mut alternate = false;
+            // SAFETY: the terminal is borrowed for this read-only query.
+            let result = unsafe {
+                mux_ghostty_terminal_on_alternate_screen(self.terminal.as_ptr(), &raw mut alternate)
+            };
+            result == SUCCESS && alternate
         }
 
         /// The pointer shape the program asked for over its pane (OSC 22).
@@ -2423,6 +2439,16 @@ mod linked {
             let after = engine.memory_bytes().expect("memory after");
             assert!(after <= before, "{after} bytes after, {before} before");
             assert_eq!(engine.screen_text().expect("history after"), history);
+        }
+
+        #[test]
+        fn a_full_screen_program_is_seen_on_the_alternate_screen() {
+            let mut engine = sized_engine(20, 2);
+            assert!(!engine.on_alternate_screen());
+            engine.apply_output(1, b"\x1b[?1049h").expect("enter");
+            assert!(engine.on_alternate_screen());
+            engine.apply_output(2, b"\x1b[?1049l").expect("leave");
+            assert!(!engine.on_alternate_screen());
         }
 
         #[test]

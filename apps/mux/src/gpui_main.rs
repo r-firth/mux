@@ -302,6 +302,9 @@ struct PaneReplica {
     redraw_at: Option<Instant>,
     /// The pointer the pane's program asked for, as of its last frame.
     mouse_shape: MouseShape,
+    /// Whether a full-screen program has the pane on its alternate screen,
+    /// as of the output last taken in.
+    alternate_screen: bool,
     /// When output last arrived, and whether the history has had any since
     /// it was last compressed.
     output_at: Instant,
@@ -334,6 +337,7 @@ enum AgentTabActivity {
 
 impl PaneReplica {
     fn new(engine: GhosttyEngine, frame: RenderFrame) -> Self {
+        let alternate_screen = engine.on_alternate_screen();
         Self {
             next_sequence: engine.next_output_sequence(),
             engine: Arc::new(parking_lot::Mutex::new(engine)),
@@ -347,6 +351,7 @@ impl PaneReplica {
             secret_input: false,
             redraw_at: None,
             mouse_shape: MouseShape::default(),
+            alternate_screen,
             output_at: Instant::now(),
             compression_owed: false,
         }
@@ -1215,14 +1220,14 @@ impl MuxApp {
     fn agent_pulse_wanted(&self) -> bool {
         self.agent_pane_is_live()
             || (self.motion == MotionPreference::Full
-                && self.agents.iter().any(|agent| {
+                && (self.agents.iter().any(|agent| {
                     matches!(
                         agent.status,
                         AgentSessionStatus::Starting
                             | AgentSessionStatus::Authenticating
                             | AgentSessionStatus::Working
                     )
-                }))
+                }) || self.a_tab_out_of_sight_is_running()))
     }
 
     /// The pulse as an opacity, or a steady 1 when motion is reduced.
@@ -4355,11 +4360,22 @@ impl MuxApp {
         // The tab on screen shows its panes' calls in their own heads.
         let call = self.tab_call(tab).filter(|_| !active);
         let named = self.tab_tooltip_name(tab, &label);
-        let tooltip: SharedString = match (activity, call) {
-            (_, Some(call)) => format!("{named} · {}", pane_calls::call_words(call)),
-            (Some(AgentTabActivity::Idle), None) if unseen => format!("{named} · agent finished"),
-            (Some(activity), None) => format!("{named} · {}", agent_tab_activity_label(activity)),
-            (None, None) => named,
+        // You are looking at the tab on screen, so only one out of sight
+        // breathes for its program.
+        let running = self
+            .tab_running_program(tab)
+            .filter(|_| !active)
+            .map(str::to_owned);
+        let tooltip: SharedString = match (activity, call, &running) {
+            (_, Some(call), _) => format!("{named} · {}", pane_calls::call_words(call)),
+            (Some(AgentTabActivity::Idle), None, _) if unseen => {
+                format!("{named} · agent finished")
+            }
+            (Some(activity), None, _) => {
+                format!("{named} · {}", agent_tab_activity_label(activity))
+            }
+            (None, None, Some(program)) => format!("{named} · running {program}"),
+            (None, None, None) => named,
         }
         .into();
         let chip = h_flex()
@@ -4396,12 +4412,14 @@ impl MuxApp {
             ));
         }
         // The tab's ink dot carries its agent's state: it breathes while an
-        // agent works, turns peach when one needs you (or a pane rang), and
-        // sage when one has finished out of sight.
+        // agent works, or a program runs in the tab out of sight, turns peach
+        // when one needs you (or a pane rang), and sage when one has finished
+        // out of sight.
         let dot = match activity {
             Some(AgentTabActivity::Attention) => color(SIGNAL),
             _ if call.is_some() => color(SIGNAL),
             Some(AgentTabActivity::Working) => ink.color().opacity(self.agent_pulse_level()),
+            _ if running.is_some() => ink.color().opacity(self.agent_pulse_level()),
             _ if unseen => color(SAGE),
             _ if active => ink.color(),
             _ => ink.color().opacity(0.72),

@@ -521,6 +521,19 @@ int32_t mux_ghostty_terminal_mouse_shape(
   return (int32_t)GHOSTTY_SUCCESS;
 }
 
+/* Whether a full-screen program has the terminal on its alternate screen. */
+int32_t mux_ghostty_terminal_on_alternate_screen(
+    mux_ghostty_terminal_t terminal,
+    bool *out_alternate) {
+  if (out_alternate == NULL) return (int32_t)GHOSTTY_INVALID_VALUE;
+  GhosttyTerminalScreen screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
+  GhosttyResult result = ghostty_terminal_get(
+      (GhosttyTerminal)terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+  *out_alternate = screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE;
+  return (int32_t)GHOSTTY_SUCCESS;
+}
+
 /* One bounded step of compressing the terminal's scrollback, for when its
  * pane has gone quiet. `out_pending` says whether another step has work. */
 int32_t mux_ghostty_terminal_compress_step(
