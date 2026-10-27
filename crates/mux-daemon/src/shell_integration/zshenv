@@ -33,8 +33,10 @@ if [[ -o interactive ]]; then
     # still marked.
     [[ $PS1 == *$'\e]133;A'* ]] || PS1=$'%{\e]133;A\a%}'$PS1
     if [[ -n "$_mux_prompt_cursor" ]]; then builtin print -n "\e[${_mux_prompt_cursor} q"; fi
+    # Control characters are left out of the title, so a directory named
+    # with escape sequences cannot send them to the terminal.
     if [[ -n "$_mux_shell_title" ]]; then
-      builtin print -rn -- $'\e]2;'"${(%):-%(4~|…/%3~|%~)}"$'\a'
+      builtin print -rn -- $'\e]2;'"${${(%):-%(4~|…/%3~|%~)}//[[:cntrl:]]}"$'\a'
     fi
   }
   _mux_preexec() {

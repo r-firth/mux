@@ -33,8 +33,12 @@ const BASH_PROMPT_CURSOR: &str = r"builtin printf '\033[5 q'; ";
 const BASH_COMMAND_CURSOR: &str = r"\e[0 q";
 
 /// The pane's title as bash's prompt comes back: where the shell is, as
-/// Ghostty's shell integration sets it.
-const BASH_TITLE: &str = r#"builtin printf '\033]2;%s\007' "${PWD/#$HOME/\~}"; "#;
+/// Ghostty's shell integration sets it. Control characters are left out, so
+/// a directory named with escape sequences cannot send them to the terminal.
+const BASH_TITLE: &str = concat!(
+    r#"__mux_title=${PWD/#$HOME/\~}; "#,
+    r#"builtin printf '\033]2;%s\007' "${__mux_title//[[:cntrl:]]/}"; "#,
+);
 
 static ROOT: OnceLock<PathBuf> = OnceLock::new();
 
@@ -107,5 +111,27 @@ pub fn environment(program: &Path) -> Vec<(OsString, OsString)> {
             ]
         }
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bash_title_leaves_out_control_characters_in_the_directory() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        // Canonical, as bash finds its directory, so HOME matches it.
+        let home = root.path().canonicalize().expect("canonical directory");
+        let directory = home.join("a\x1b]0;forged\x07b");
+        std::fs::create_dir(&directory).expect("directory");
+        let output = std::process::Command::new("bash")
+            .args(["--norc", "--noprofile", "-c", BASH_TITLE])
+            .current_dir(&directory)
+            .env("HOME", &home)
+            .env_remove("PWD")
+            .output()
+            .expect("run bash");
+        assert_eq!(output.stdout, b"\x1b]2;~/a]0;forgedb\x07");
     }
 }
