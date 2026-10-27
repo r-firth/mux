@@ -241,6 +241,7 @@ fn shader() -> String {
         ("focus_rim", number(FOCUS_RIM)),
         ("chip_glow", number(CHIP_GLOW)),
         ("busy_reach", number(BUSY_REACH)),
+        ("running_reach", number(RUNNING_REACH)),
         ("ring_width", number(RING_WIDTH)),
         ("shimmer_share", SHIMMER_SHARE.to_string()),
         ("shimmer", number(SHIMMER)),

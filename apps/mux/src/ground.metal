@@ -112,8 +112,8 @@ static float cast(
     // A tab out of sight with a program running breathes around its chip,
     // in its own ink, in the calls' dots so it shows over a dark patch.
     for (int index = 0; index < int(frame.counts.w); index++) {
-        float light = frame.running_light[index / 4][index % 4] * 0.45
-            * fall(outside(point, frame.running[index]), $busy_reach$);
+        float light = frame.running_light[index / 4][index % 4]
+            * fall(outside(point, frame.running[index]), $running_reach$);
         signal += light;
         signal_ink += light * frame.running_inks[index].rgb;
     }

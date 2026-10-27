@@ -90,10 +90,17 @@ const CHIP_GLOW: f32 = 22.0;
 /// breath takes, in seconds.
 const BUSY_REACH: f32 = 22.0;
 const BREATH: f32 = 2.8;
-/// How strongly the chip of a tab out of sight breathes while a program runs
-/// in it, against a busy pane's: quieter than a call or the active chip's
-/// glow, but lit in the call's dots, so it shows over a dark patch too.
-const RUNNING_LIGHT: f32 = 0.6;
+/// How the chip of a tab out of sight breathes while a program runs in it:
+/// how far its light reaches into the strip around it, how bright it is at
+/// the chip at the top of a breath, a little under a call's rings, and how
+/// much of that it keeps at the bottom, so it never fades away. It is lit in
+/// the calls' dots, so it shows over a dark patch too. With reduced motion it
+/// holds steady at `RUNNING_STILL` of its brightest.
+const RUNNING_REACH: f32 = 46.0;
+const RUNNING_PEAK: f32 = 0.58;
+const RUNNING_FLOOR: f32 = 0.35;
+const RUNNING_BREATH: f32 = 2.4;
+const RUNNING_STILL: f32 = 0.7;
 /// How long a pane must keep printing to count as busy, and how long after
 /// it stops it still breathes, in seconds.
 const BUSY_AFTER: f32 = 0.8;
@@ -698,8 +705,8 @@ impl Field {
             });
         }
         for &(chip, strength) in &self.running {
-            self.around(chip, y, (0.0, BUSY_REACH), from, signal, |distance| {
-                strength * 0.45 * fall(distance, BUSY_REACH)
+            self.around(chip, y, (0.0, RUNNING_REACH), from, signal, |distance| {
+                strength * fall(distance, RUNNING_REACH)
             });
         }
         for call in &self.calls {
@@ -1284,7 +1291,14 @@ impl Ground {
     /// The chips of tabs out of sight with a program running, and how
     /// strongly each breathes out at `laid`'s step.
     fn running(laid: &Laid) -> Vec<(layout::Rect, f32)> {
-        let breath = RUNNING_LIGHT * Self::breath(laid);
+        let breath = RUNNING_PEAK
+            * if laid.scene.still {
+                RUNNING_STILL
+            } else {
+                let time = Self::seconds(laid.step);
+                let swell = 0.5 - 0.5 * (time * std::f32::consts::TAU / RUNNING_BREATH).cos();
+                RUNNING_FLOOR + (1.0 - RUNNING_FLOOR) * swell
+            };
         laid.scene
             .running
             .iter()
@@ -1993,6 +2007,25 @@ mod tests {
         let mut still = running;
         still.still = true;
         assert!(lit_teal(&Ground::new(epoch).lay(still, full)) > 0);
+    }
+
+    #[test]
+    fn a_running_chip_breathes_from_its_floor_to_its_peak() {
+        let epoch = Instant::now();
+        let mut running = scene();
+        running.running = vec![(rect(300.0, 6.0, 60.0, 24.0), Ink::Teal)];
+        let strength = |scene: &Scene, millis| {
+            let mut ground = Ground::new(epoch);
+            let laid = ground.frame(scene.clone(), epoch + Duration::from_millis(millis));
+            Ground::running(&laid)[0].1
+        };
+        let close = |a: f32, b: f32| (a - b).abs() < 0.01;
+        assert!(close(strength(&running, 0), RUNNING_PEAK * RUNNING_FLOOR));
+        assert!(close(strength(&running, 1_200), RUNNING_PEAK));
+        assert!(strength(&running, 600) > RUNNING_PEAK * RUNNING_FLOOR);
+        let mut still = running;
+        still.still = true;
+        assert!(close(strength(&still, 600), RUNNING_PEAK * RUNNING_STILL));
     }
 
     #[test]
