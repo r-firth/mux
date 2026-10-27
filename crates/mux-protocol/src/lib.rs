@@ -28,7 +28,10 @@ use tokio::task::JoinHandle;
 /// break a pane out into a tab of its own, a request for what is running in
 /// a pane besides its shell, an event when such a program finishes, and a
 /// request to clear a pane.
-pub const PROTOCOL_VERSION: u16 = 10;
+/// Version 10 adds a request to reset a pane's terminal.
+/// Version 11 moves both sides to libghostty 1.4, whose pane checkpoints an
+/// older daemon cannot make, so a new window replaces the old daemon.
+pub const PROTOCOL_VERSION: u16 = 11;
 /// Request id zero is reserved for latency-sensitive messages whose successful
 /// completion does not require a response.
 pub const UNACKNOWLEDGED_REQUEST_ID: u64 = 0;
