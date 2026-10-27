@@ -745,6 +745,9 @@ struct MuxApp {
     /// When the timer that compresses quiet panes' history started, while
     /// it runs.
     history_compression_since: Option<Instant>,
+    /// Images of panes gone or out of sight, for the window to let go of
+    /// when it next draws.
+    retired_images: Vec<Arc<gpui::RenderImage>>,
     /// Whether each profile's launcher was found on this machine.
     agent_availability: HashMap<String, bool>,
     /// The launcher's chosen agent while no agent runs in the tab.
@@ -977,6 +980,7 @@ impl MuxApp {
             agent_pulse: 0,
             agent_pulse_running: false,
             history_compression_since: None,
+            retired_images: Vec::new(),
             agent_availability: HashMap::new(),
             launcher_choice: None,
             launcher_copied: None,
@@ -1637,7 +1641,10 @@ impl MuxApp {
         // checkpoint's previous dimensions indefinitely.
         self.sent_sizes.clear();
         self.pane_scrolls.clear();
-        self.panes = panes;
+        for pane in std::mem::replace(&mut self.panes, panes).into_values() {
+            self.retired_images
+                .extend(pane.render_cache.borrow_mut().take_images());
+        }
         self.selected_pane = None;
         self.pending_focused_pane = None;
         self.selection_drag = None;
@@ -1653,6 +1660,11 @@ impl MuxApp {
         output_continues: bool,
     ) -> Result<()> {
         self.remember_departing_panes(&attachment.panes);
+        let caches = self
+            .panes
+            .iter()
+            .map(|(pane_id, pane)| (*pane_id, Rc::clone(&pane.render_cache)))
+            .collect::<Vec<_>>();
         let panes = reconcile_pane_replicas(
             std::mem::take(&mut self.panes),
             &attachment.panes,
@@ -1661,6 +1673,15 @@ impl MuxApp {
         )?;
         self.session = Some(attachment.session);
         self.panes = panes;
+        for (pane_id, cache) in caches {
+            let kept = self
+                .panes
+                .get(&pane_id)
+                .is_some_and(|pane| Rc::ptr_eq(&pane.render_cache, &cache));
+            if !kept {
+                self.retired_images.extend(cache.borrow_mut().take_images());
+            }
+        }
         let pane_ids = self.panes.keys().copied().collect::<HashSet<_>>();
         self.sent_sizes
             .retain(|pane_id, _| pane_ids.contains(pane_id));
@@ -1890,6 +1911,20 @@ impl MuxApp {
             {
                 let _ = pane.publish_frame();
             }
+        }
+    }
+
+    /// Let go of the images of panes gone or out of sight, as Ghostty
+    /// frees what hidden surfaces hold on the GPU.
+    fn release_hidden_images(&mut self, window: &mut Window) {
+        for (pane_id, pane) in &self.panes {
+            if !self.terminal_pane_is_visible(*pane_id) {
+                self.retired_images
+                    .extend(pane.render_cache.borrow_mut().take_images());
+            }
+        }
+        for image in self.retired_images.drain(..) {
+            let _ = window.drop_image(image);
         }
     }
 
@@ -4235,11 +4270,12 @@ impl MuxApp {
 
     /// State that follows from what this frame shows: a size that changed
     /// is read out, and a call from the pane in front has been seen.
-    fn settle_frame_state(&mut self, window: &Window, cx: &mut Context<Self>) {
+    fn settle_frame_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if std::mem::take(&mut self.size_readout_pending) {
             self.show_size_readout(cx);
         }
         self.clear_seen_pane_call(window);
+        self.release_hidden_images(window);
     }
 
     /// Show the focused pane's size for a moment, as a window or split

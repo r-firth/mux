@@ -190,6 +190,12 @@ struct ImageKey {
 }
 
 impl TerminalRenderCache {
+    /// Give up the images held ready to draw, as for a pane out of sight,
+    /// so they don't keep GPU memory; drawing the pane again makes them.
+    pub fn take_images(&mut self) -> Vec<Arc<RenderImage>> {
+        self.images.drain().map(|(_, image)| image).collect()
+    }
+
     fn begin_frame(&mut self, font_family: &str, font_size: f32) {
         let font_size = font_size.to_bits();
         if !self

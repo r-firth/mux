@@ -20,6 +20,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .@"emit-xcframework" = false,
+        // Mux finds in its own panes and draws no glyphs a program
+        // registers, so the library is built without either.
+        .@"vt-features" = @as([]const u8, "-search,-glyph-protocol"),
     });
     const ghostty_static = ghostty.artifact("ghostty-vt-static");
     module.linkLibrary(ghostty_static);
