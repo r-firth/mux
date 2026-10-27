@@ -296,6 +296,9 @@ struct PaneReplica {
     program_since: Option<Instant>,
     /// Whether the pane is reading a password, which it does not show.
     secret_input: bool,
+    /// When the pane is next drawn though no output arrives, for an
+    /// animated image or a held screen given up on.
+    redraw_at: Option<Instant>,
 }
 
 fn next_frame_serial() -> u64 {
@@ -335,6 +338,7 @@ impl PaneReplica {
             program: None,
             program_since: None,
             secret_input: false,
+            redraw_at: None,
         }
     }
 
@@ -1314,12 +1318,47 @@ impl MuxApp {
         cx: &mut Context<Self>,
     ) {
         for pane_id in dirty_panes.drain() {
-            if let Some(pane) = self.panes.get_mut(&pane_id)
-                && let Err(error) = pane.publish_frame()
-            {
-                self.report_ui_error(&error, cx);
+            if let Some(pane) = self.panes.get_mut(&pane_id) {
+                if let Err(error) = pane.publish_frame() {
+                    self.report_ui_error(&error, cx);
+                    continue;
+                }
+                if let Some(wait) = pane.frame.redraw_in {
+                    self.redraw_pane_after(pane_id, wait, cx);
+                }
             }
         }
+    }
+
+    /// Draw a pane again after `wait`, though no output arrives by then: an
+    /// animated image's next frame, or a program that held the screen too
+    /// long. An earlier redraw already due covers a later one.
+    fn redraw_pane_after(&mut self, pane_id: PaneId, wait: Duration, cx: &mut Context<Self>) {
+        let Some(pane) = self.panes.get_mut(&pane_id) else {
+            return;
+        };
+        let due = Instant::now() + wait;
+        if pane.redraw_at.is_some_and(|at| at <= due) {
+            return;
+        }
+        pane.redraw_at = Some(due);
+        cx.spawn(async move |entity, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = entity.update(cx, |this, cx| {
+                let Some(pane) = this.panes.get_mut(&pane_id) else {
+                    return;
+                };
+                if pane.redraw_at != Some(due) {
+                    return;
+                }
+                pane.redraw_at = None;
+                if this.terminal_pane_is_visible(pane_id) {
+                    this.publish_terminal_frames(&mut HashSet::from([pane_id]), cx);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn report_ui_error(&mut self, error: &anyhow::Error, cx: &mut Context<Self>) {

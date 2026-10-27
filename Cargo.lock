@@ -4404,6 +4404,7 @@ dependencies = [
  "gpui-component-assets",
  "gpui_platform",
  "ignore",
+ "image",
  "metal",
  "mux-acp",
  "mux-client",
@@ -4511,6 +4512,7 @@ dependencies = [
  "cc",
  "directories",
  "mux-terminal",
+ "png 0.18.1",
  "tempfile",
  "thiserror 2.0.20",
 ]

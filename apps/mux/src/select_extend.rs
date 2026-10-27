@@ -289,6 +289,9 @@ mod tests {
             scroll: TerminalScrollState::default(),
             row_metadata: Vec::new(),
             cells,
+            images: Vec::new(),
+            held: false,
+            redraw_in: None,
         }
     }
 

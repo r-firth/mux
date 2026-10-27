@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use directories::BaseDirs;
 use mux_terminal::Rgb;
 
-pub const GHOSTTY_REVISION: &str = "b2fa2931b6599f7e32a7c547b3f5520ac3333881";
+pub const GHOSTTY_REVISION: &str = "ce787fc18a7782e81585beb63f0d905ccaf69284";
 
 /// The colour subset of Ghostty configuration that affects VT rendering.
 /// Unset values leave libghostty's current colour state untouched.
@@ -304,18 +304,25 @@ fn parse_rgb(value: &str) -> Option<Rgb> {
 }
 
 #[cfg(feature = "link")]
+mod png_decode;
+
+#[cfg(feature = "link")]
 mod linked {
+    use std::collections::HashMap;
     use std::ffi::c_void;
     use std::ptr::{self, NonNull};
+    use std::sync::{Arc, Once};
+    use std::time::Duration;
 
     use mux_terminal::{
-        CellStyle, CellWidth, CursorStyle, EngineDescriptor, KITTY_KEYBOARD_RESET_SEQUENCE,
-        RenderCell, RenderCursor, RenderDirty, RenderFrame, RenderRow, Rgb, SemanticContent,
-        TerminalAttachment, TerminalCheckpoint, TerminalEngine, TerminalError, TerminalInteraction,
-        TerminalKey, TerminalKeyAction, TerminalKeyEvent, TerminalModifiers, TerminalMouseAction,
-        TerminalMouseButton, TerminalMouseEvent, TerminalRenderer, TerminalScrollState,
-        TerminalSelection, TerminalSelectionAutoscroll, TerminalSelectionGestureEvent,
-        TerminalSelectionGestureStatus, TerminalSize, TerminalViewportScroll,
+        CellStyle, CellWidth, CursorStyle, EngineDescriptor, ImageLayer, ImagePixels,
+        KITTY_KEYBOARD_RESET_SEQUENCE, RenderCell, RenderCursor, RenderDirty, RenderFrame,
+        RenderImage, RenderRow, Rgb, SemanticContent, TerminalAttachment, TerminalCheckpoint,
+        TerminalEngine, TerminalError, TerminalInteraction, TerminalKey, TerminalKeyAction,
+        TerminalKeyEvent, TerminalModifiers, TerminalMouseAction, TerminalMouseButton,
+        TerminalMouseEvent, TerminalRenderer, TerminalScrollState, TerminalSelection,
+        TerminalSelectionAutoscroll, TerminalSelectionGestureEvent, TerminalSelectionGestureStatus,
+        TerminalSize, TerminalViewportScroll,
     };
     use thiserror::Error;
 
@@ -397,6 +404,51 @@ mod linked {
         cells: *mut CRenderCell,
         text: *mut u8,
         text_len: usize,
+        redraw_in_ms: u32,
+        held: u8,
+        images_changed: u8,
+    }
+
+    #[derive(Clone, Copy)]
+    #[repr(C)]
+    struct CImagePlacement {
+        image_generation: u64,
+        image_id: u32,
+        z: i32,
+        col: i32,
+        row: i32,
+        offset_x: u32,
+        offset_y: u32,
+        width: u32,
+        height: u32,
+        source_x: u32,
+        source_y: u32,
+        source_width: u32,
+        source_height: u32,
+        layer: u8,
+    }
+
+    #[repr(C)]
+    struct CImagePixels {
+        generation: u64,
+        data: *const u8,
+        len: usize,
+        width: u32,
+        height: u32,
+        format: u8,
+    }
+
+    impl Default for CImagePixels {
+        fn default() -> Self {
+            Self {
+                generation: 0,
+                data: ptr::null(),
+                len: 0,
+                width: 0,
+                height: 0,
+                format: 0,
+            }
+        }
     }
 
     impl Default for CRenderFrame {
@@ -421,9 +473,21 @@ mod linked {
                 cells: ptr::null_mut(),
                 text: ptr::null_mut(),
                 text_len: 0,
+                redraw_in_ms: 0,
+                held: 0,
+                images_changed: 0,
             }
         }
     }
+
+    /// Kitty image pixel formats, as libghostty stores them.
+    const IMAGE_FORMAT_RGB: u8 = 0;
+    const IMAGE_FORMAT_RGBA: u8 = 1;
+    const IMAGE_FORMAT_GRAY_ALPHA: u8 = 3;
+    const IMAGE_FORMAT_GRAY: u8 = 4;
+
+    /// libghostty's answer when there is no such value.
+    const NO_VALUE: i32 = -4;
 
     unsafe extern "C" {
         fn mux_ghostty_terminal_new(cols: u16, rows: u16, out_terminal: *mut *mut c_void) -> i32;
@@ -625,6 +689,19 @@ mod linked {
         fn mux_ghostty_terminal_enable_responses(
             terminal: *mut c_void,
             collector: *mut c_void,
+            renderer: *mut c_void,
+        ) -> i32;
+        fn mux_ghostty_set_png_decoder(decoder: Option<crate::png_decode::DecodeFn>) -> i32;
+        fn mux_ghostty_renderer_release_hold(renderer: *mut c_void);
+        fn mux_ghostty_renderer_images(
+            renderer: *mut c_void,
+            out_placements: *mut *const CImagePlacement,
+            out_len: *mut usize,
+        ) -> i32;
+        fn mux_ghostty_terminal_image_pixels(
+            terminal: *mut c_void,
+            image_id: u32,
+            out_pixels: *mut CImagePixels,
         ) -> i32;
     }
 
@@ -640,6 +717,10 @@ mod linked {
         /// The frame the renderer last filled, so the next fill of that same
         /// frame only has to rewrite the rows that changed.
         filled: Option<FilledFrame>,
+        /// The images on screen as of the last frame, kept until they move.
+        images: Vec<RenderImage>,
+        /// The pixels of those images, by image ID, read once per change.
+        image_pixels: HashMap<u32, Arc<ImagePixels>>,
     }
 
     /// Where a filled frame's cells live and its shape. A frame is only
@@ -712,7 +793,7 @@ mod linked {
                     return Err(error);
                 }
             };
-            let responses = match create_responses(terminal, size) {
+            let responses = match create_responses(terminal, renderer, size) {
                 Ok(responses) => responses,
                 Err(error) => {
                     // SAFETY: both handles are solely owned here.
@@ -772,6 +853,8 @@ mod linked {
                 descriptor: descriptor(),
                 next_sequence: 1,
                 filled: None,
+                images: Vec::new(),
+                image_pixels: HashMap::new(),
             })
         }
 
@@ -839,7 +922,7 @@ mod linked {
                     return Err(error);
                 }
             };
-            let responses = match create_responses(terminal, TerminalSize::default()) {
+            let responses = match create_responses(terminal, renderer, TerminalSize::default()) {
                 Ok(responses) => responses,
                 Err(error) => {
                     // SAFETY: both handles are solely owned here.
@@ -899,6 +982,8 @@ mod linked {
                 descriptor: descriptor(),
                 next_sequence: checkpoint.next_sequence,
                 filled: None,
+                images: Vec::new(),
+                image_pixels: HashMap::new(),
             })
         }
 
@@ -1069,6 +1154,8 @@ mod linked {
                 )
             };
             check(result).map_err(|error| TerminalError::Engine(error.to_string()))?;
+            // A held frame has the old size; the new one is drawn at once.
+            self.release_hold();
             // SAFETY: the response collector is owned and dimensions are validated.
             unsafe {
                 mux_ghostty_response_collector_set_size(
@@ -1153,6 +1240,9 @@ mod linked {
                 scroll: TerminalScrollState::default(),
                 row_metadata: Vec::new(),
                 cells: Vec::new(),
+                images: Vec::new(),
+                held: false,
+                redraw_in: None,
             };
             self.render_frame_into(&mut rendered)?;
             Ok(rendered)
@@ -1176,8 +1266,143 @@ mod linked {
             check(result).map_err(|error| TerminalError::Engine(error.to_string()))?;
             let guard = RenderFrameGuard(frame);
             convert_frame_into(&guard.0, rendered)?;
+            if guard.0.images_changed != 0 {
+                self.read_images()?;
+            }
+            rendered.images.clone_from(&self.images);
             self.filled = Some(FilledFrame::of(rendered));
             Ok(())
+        }
+    }
+
+    impl GhosttyEngine {
+        /// Read again where images are on screen, and the pixels of any that
+        /// changed. Pixels are kept only for the images still on screen.
+        fn read_images(&mut self) -> Result<(), TerminalError> {
+            let mut placements = ptr::null();
+            let mut len = 0_usize;
+            // SAFETY: the renderer is exclusively owned and both out pointers
+            // are valid; the list it returns lives until its next call.
+            let result = unsafe {
+                mux_ghostty_renderer_images(
+                    self.renderer.as_ptr(),
+                    &raw mut placements,
+                    &raw mut len,
+                )
+            };
+            check(result).map_err(|error| TerminalError::Engine(error.to_string()))?;
+            let placements = borrowed_slice(placements, len, "image placements")?;
+            let mut pixels = HashMap::with_capacity(self.image_pixels.len());
+            self.images.clear();
+            for placement in placements {
+                let id = placement.image_id;
+                let known = pixels
+                    .get(&id)
+                    .or_else(|| self.image_pixels.get(&id))
+                    .filter(|known: &&Arc<ImagePixels>| {
+                        known.generation == placement.image_generation
+                    })
+                    .cloned();
+                let image = match known {
+                    Some(image) => image,
+                    None => match self.image_pixels(id)? {
+                        Some(image) => Arc::new(image),
+                        // Its pixels are still arriving.
+                        None => continue,
+                    },
+                };
+                pixels.insert(id, Arc::clone(&image));
+                let Some(layer) = image_layer(placement.layer) else {
+                    continue;
+                };
+                self.images.push(RenderImage {
+                    pixels: image,
+                    layer,
+                    z: placement.z,
+                    column: placement.col,
+                    row: placement.row,
+                    offset_x: placement.offset_x,
+                    offset_y: placement.offset_y,
+                    width: placement.width,
+                    height: placement.height,
+                    source_x: placement.source_x,
+                    source_y: placement.source_y,
+                    source_width: placement.source_width,
+                    source_height: placement.source_height,
+                });
+            }
+            self.image_pixels = pixels;
+            Ok(())
+        }
+
+        /// An image's pixels as RGBA, or `None` while they are still arriving.
+        fn image_pixels(&self, id: u32) -> Result<Option<ImagePixels>, TerminalError> {
+            let mut pixels = CImagePixels::default();
+            // SAFETY: the terminal is borrowed and not written to while the
+            // pixels it lends are copied out below.
+            let result = unsafe {
+                mux_ghostty_terminal_image_pixels(self.terminal.as_ptr(), id, &raw mut pixels)
+            };
+            if result == NO_VALUE {
+                return Ok(None);
+            }
+            check(result).map_err(|error| TerminalError::Engine(error.to_string()))?;
+            let data = borrowed_slice(pixels.data, pixels.len, "image pixels")?;
+            let count = usize::try_from(u64::from(pixels.width) * u64::from(pixels.height))
+                .map_err(|_| TerminalError::Engine("image too large".to_owned()))?;
+            let channels = match pixels.format {
+                IMAGE_FORMAT_RGB => 3,
+                IMAGE_FORMAT_RGBA => 4,
+                IMAGE_FORMAT_GRAY_ALPHA => 2,
+                IMAGE_FORMAT_GRAY => 1,
+                other => return Err(invalid_render_value("image format", other)),
+            };
+            if data.len() != count * channels {
+                return Err(TerminalError::Engine(format!(
+                    "libghostty lent {} bytes for a {}x{} image",
+                    data.len(),
+                    pixels.width,
+                    pixels.height
+                )));
+            }
+            let rgba = match pixels.format {
+                IMAGE_FORMAT_RGBA => data.to_vec(),
+                IMAGE_FORMAT_RGB => data
+                    .chunks_exact(3)
+                    .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], u8::MAX])
+                    .collect(),
+                IMAGE_FORMAT_GRAY_ALPHA => data
+                    .chunks_exact(2)
+                    .flat_map(|pixel| [pixel[0], pixel[0], pixel[0], pixel[1]])
+                    .collect(),
+                _ => data
+                    .iter()
+                    .flat_map(|&gray| [gray, gray, gray, u8::MAX])
+                    .collect(),
+            };
+            Ok(Some(ImagePixels {
+                id,
+                generation: pixels.generation,
+                width: pixels.width,
+                height: pixels.height,
+                rgba,
+            }))
+        }
+
+        /// Draw what the terminal holds now, even if a program has asked for
+        /// the screen to keep still while it draws.
+        fn release_hold(&mut self) {
+            // SAFETY: the renderer is exclusively owned.
+            unsafe { mux_ghostty_renderer_release_hold(self.renderer.as_ptr()) };
+        }
+    }
+
+    fn image_layer(layer: u8) -> Option<ImageLayer> {
+        match layer {
+            0 => Some(ImageLayer::BelowBackground),
+            1 => Some(ImageLayer::BelowText),
+            2 => Some(ImageLayer::AboveText),
+            _ => None,
         }
     }
 
@@ -1417,6 +1642,8 @@ mod linked {
             unsafe {
                 mux_ghostty_terminal_scroll_viewport(self.terminal.as_ptr(), tag, value);
             }
+            // Scrolling shows history as it is, not as a program held it.
+            self.release_hold();
             Ok(())
         }
 
@@ -1519,6 +1746,14 @@ mod linked {
     }
 
     fn create_renderer() -> Result<NonNull<c_void>, GhosttyError> {
+        static PNG_DECODER: Once = Once::new();
+        // Programs mostly send Kitty images as PNGs, which libghostty leaves
+        // to its embedder to decode.
+        // SAFETY: the decoder is a plain function that lives as long as the
+        // process.
+        PNG_DECODER.call_once(|| unsafe {
+            let _ = mux_ghostty_set_png_decoder(Some(crate::png_decode::decode_png));
+        });
         let mut renderer = ptr::null_mut();
         // SAFETY: `renderer` is a valid out pointer.
         let result = unsafe { mux_ghostty_renderer_new(&raw mut renderer) };
@@ -1528,6 +1763,7 @@ mod linked {
 
     fn create_responses(
         terminal: NonNull<c_void>,
+        renderer: NonNull<c_void>,
         size: TerminalSize,
     ) -> Result<NonNull<c_void>, GhosttyError> {
         let mut responses = ptr::null_mut();
@@ -1536,9 +1772,15 @@ mod linked {
             unsafe { mux_ghostty_response_collector_new(size.cols, size.rows, &raw mut responses) };
         check(result)?;
         let responses = NonNull::new(responses).ok_or(GhosttyError::NullResponseCollector)?;
-        // SAFETY: both handles are valid and solely owned by the engine being created.
-        let result =
-            unsafe { mux_ghostty_terminal_enable_responses(terminal.as_ptr(), responses.as_ptr()) };
+        // SAFETY: all three handles are valid and solely owned by the engine
+        // being created, which frees the terminal before the other two.
+        let result = unsafe {
+            mux_ghostty_terminal_enable_responses(
+                terminal.as_ptr(),
+                responses.as_ptr(),
+                renderer.as_ptr(),
+            )
+        };
         if let Err(error) = check(result) {
             // SAFETY: the collector has not escaped this helper.
             unsafe { mux_ghostty_response_collector_free(responses.as_ptr()) };
@@ -1720,6 +1962,9 @@ mod linked {
             offset: frame.scroll_offset,
             len: frame.scroll_len,
         };
+        rendered.held = frame.held != 0;
+        rendered.redraw_in =
+            (frame.redraw_in_ms != 0).then(|| Duration::from_millis(frame.redraw_in_ms.into()));
         Ok(())
     }
 
@@ -1873,6 +2118,203 @@ mod linked {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// A terminal with a cell size, which images need to be placed.
+        fn sized_engine(cols: u16, rows: u16) -> GhosttyEngine {
+            let size = TerminalSize {
+                cols,
+                rows,
+                cell_width_px: 10,
+                cell_height_px: 20,
+            };
+            let mut engine = GhosttyEngine::new(size).expect("new terminal");
+            engine.resize(size).expect("resize");
+            engine
+        }
+
+        fn first_row_text(frame: &RenderFrame) -> String {
+            frame.cells[..usize::from(frame.cols)]
+                .iter()
+                .map(|cell| cell.grapheme.as_str())
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        }
+
+        fn base64(bytes: &[u8]) -> String {
+            const DIGITS: &[u8] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut encoded = String::new();
+            for chunk in bytes.chunks(3) {
+                let value = chunk
+                    .iter()
+                    .enumerate()
+                    .fold(0_u32, |value, (index, &byte)| {
+                        value | u32::from(byte) << (16 - 8 * index)
+                    });
+                for index in 0..4 {
+                    if index <= chunk.len() {
+                        let digit = (value >> (18 - 6 * index)) & 0x3f;
+                        encoded.push(char::from(DIGITS[digit as usize]));
+                    } else {
+                        encoded.push('=');
+                    }
+                }
+            }
+            encoded
+        }
+
+        /// A Kitty graphics command transmitting and showing image `id`.
+        fn kitty_image(id: u32, keys: &str, payload: &[u8]) -> Vec<u8> {
+            format!("\x1b_Ga=T,i={id},{keys};{}\x1b\\", base64(payload)).into_bytes()
+        }
+
+        #[test]
+        fn synchronized_output_keeps_the_finished_frame_until_the_next_is_done() {
+            let mut engine = sized_engine(20, 2);
+            engine.apply_output(1, b"old").expect("output");
+            let frame = engine.render_frame().expect("frame");
+            assert_eq!(first_row_text(&frame), "old");
+            assert!(!frame.held);
+
+            engine
+                .apply_output(2, b"\x1b[?2026h\rnew")
+                .expect("held output");
+            let held = engine.render_frame().expect("held frame");
+            assert!(held.held);
+            assert_eq!(first_row_text(&held), "old");
+            assert!(
+                held.redraw_in
+                    .is_some_and(|wait| wait <= Duration::from_secs(1))
+            );
+
+            engine.apply_output(3, b"\x1b[?2026l").expect("release");
+            let done = engine.render_frame().expect("released frame");
+            assert!(!done.held);
+            assert_eq!(first_row_text(&done), "new");
+        }
+
+        #[test]
+        fn a_resize_shows_a_held_screen_as_it_is() {
+            let mut engine = sized_engine(20, 2);
+            engine.apply_output(1, b"old").expect("output");
+            engine.render_frame().expect("frame");
+            engine
+                .apply_output(2, b"\x1b[?2026h\rnew")
+                .expect("held output");
+            engine
+                .resize(TerminalSize {
+                    cols: 30,
+                    rows: 3,
+                    cell_width_px: 10,
+                    cell_height_px: 20,
+                })
+                .expect("resize");
+            let frame = engine.render_frame().expect("frame");
+            assert!(!frame.held);
+            assert_eq!(frame.cols, 30);
+            assert_eq!(first_row_text(&frame), "new");
+        }
+
+        #[test]
+        fn a_terminal_nobody_draws_does_not_hold() {
+            let mut engine = sized_engine(20, 2);
+            engine
+                .apply_output(1, b"\x1b[?2026hheld")
+                .expect("held output");
+            // The daemon never draws, so nothing was captured to show.
+            let frame = engine.render_frame().expect("frame");
+            assert!(!frame.held);
+            assert_eq!(first_row_text(&frame), "held");
+        }
+
+        #[test]
+        fn kitty_images_are_placed_with_their_pixels() {
+            let mut engine = sized_engine(20, 4);
+            engine
+                .apply_output(1, &kitty_image(7, "f=24,s=2,v=1", &[255, 0, 0, 0, 255, 0]))
+                .expect("image");
+            let frame = engine.render_frame().expect("frame");
+            assert_eq!(frame.images.len(), 1);
+            let image = &frame.images[0];
+            assert_eq!(image.pixels.id, 7);
+            assert_eq!((image.pixels.width, image.pixels.height), (2, 1));
+            assert_eq!(image.pixels.rgba, [255, 0, 0, 255, 0, 255, 0, 255]);
+            assert_eq!((image.column, image.row), (0, 0));
+            assert_eq!((image.source_width, image.source_height), (2, 1));
+            assert!(image.width > 0 && image.height > 0);
+
+            // Text alone leaves the images, and their pixels, as they were.
+            engine.apply_output(2, b"text").expect("text");
+            let next = engine.render_frame().expect("next frame");
+            assert!(Arc::ptr_eq(&next.images[0].pixels, &image.pixels));
+
+            engine
+                .apply_output(3, b"\x1b_Ga=d,d=A\x1b\\")
+                .expect("delete");
+            assert!(engine.render_frame().expect("frame").images.is_empty());
+        }
+
+        #[test]
+        fn kitty_images_sent_as_pngs_are_decoded() {
+            let mut png_bytes = Vec::new();
+            {
+                let mut encoder = png::Encoder::new(&mut png_bytes, 1, 1);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_depth(png::BitDepth::Eight);
+                let mut writer = encoder.write_header().expect("header");
+                writer.write_image_data(&[1, 2, 3, 4]).expect("pixels");
+            }
+            let mut engine = sized_engine(20, 4);
+            engine
+                .apply_output(1, &kitty_image(3, "f=100", &png_bytes))
+                .expect("image");
+            let frame = engine.render_frame().expect("frame");
+            assert_eq!(frame.images.len(), 1);
+            assert_eq!(frame.images[0].pixels.rgba, [1, 2, 3, 4]);
+        }
+
+        #[test]
+        fn kitty_images_come_back_with_a_checkpoint() {
+            let mut engine = sized_engine(20, 4);
+            engine
+                .apply_output(1, &kitty_image(5, "f=32,s=1,v=1", &[9, 8, 7, 6]))
+                .expect("image");
+            let checkpoint = engine.checkpoint().expect("checkpoint");
+            let mut restored = GhosttyEngine::restore(&checkpoint).expect("restore");
+            restored
+                .resize(TerminalSize {
+                    cols: 20,
+                    rows: 4,
+                    cell_width_px: 10,
+                    cell_height_px: 20,
+                })
+                .expect("resize");
+            let frame = restored.render_frame().expect("frame");
+            assert_eq!(frame.images.len(), 1);
+            assert_eq!(frame.images[0].pixels.rgba, [9, 8, 7, 6]);
+        }
+
+        #[test]
+        fn kitty_images_are_not_read_from_files() {
+            let mut engine = sized_engine(20, 4);
+            let path = std::env::temp_dir().join("mux-kitty-image-medium-test.rgba");
+            fs_write(&path, &[1, 2, 3, 4]);
+            let command = format!(
+                "\x1b_Ga=T,i=9,f=32,s=1,v=1,t=f;{}\x1b\\",
+                base64(path.to_string_lossy().as_bytes())
+            );
+            engine.apply_output(1, command.as_bytes()).expect("image");
+            let responses = engine.take_pty_responses().expect("responses");
+            let _ = std::fs::remove_file(&path);
+            assert!(engine.render_frame().expect("frame").images.is_empty());
+            // The program hears it failed, and can send the pixels inline.
+            assert!(!String::from_utf8_lossy(&responses).contains(";OK"));
+        }
+
+        fn fs_write(path: &std::path::Path, bytes: &[u8]) {
+            std::fs::write(path, bytes).expect("write image file");
+        }
 
         #[test]
         fn checkpoint_round_trip_preserves_sequence_and_accepts_more_output() {

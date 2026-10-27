@@ -116,6 +116,70 @@ pub struct RenderFrame {
     pub row_metadata: Vec<RenderRow>,
     /// Row-major cells. There are exactly `cols * rows` entries.
     pub cells: Vec<RenderCell>,
+    /// Images programs placed on screen, in no particular order.
+    pub images: Vec<RenderImage>,
+    /// Whether this is the frame a program asked to keep on screen while it
+    /// draws the next (synchronized output), rather than what it holds now.
+    pub held: bool,
+    /// How soon to draw again though no output arrives: when an animated
+    /// image's next frame is due, or a held frame is given up on.
+    pub redraw_in: Option<std::time::Duration>,
+}
+
+/// Where an image is drawn among a pane's cells.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ImageLayer {
+    /// Under the cells' own backgrounds, showing where they have none.
+    BelowBackground,
+    /// Over the backgrounds, under the text.
+    BelowText,
+    /// Over the text.
+    AboveText,
+}
+
+/// An image's pixels: 8-bit RGBA, row by row from the top left.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ImagePixels {
+    pub id: u32,
+    /// Changes whenever the image's pixels do, as an animation plays.
+    pub generation: u64,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+impl std::fmt::Debug for ImagePixels {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImagePixels")
+            .field("id", &self.id)
+            .field("generation", &self.generation)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One image, or a piece of one, placed on screen. Its position is a cell,
+/// counted from the top left of the screen and possibly off it, plus an
+/// offset within that cell; offsets and sizes are in pixels of the cell
+/// size the terminal was last resized with.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenderImage {
+    pub pixels: std::sync::Arc<ImagePixels>,
+    pub layer: ImageLayer,
+    /// Orders images within a layer, lowest first.
+    pub z: i32,
+    pub column: i32,
+    pub row: i32,
+    pub offset_x: u32,
+    pub offset_y: u32,
+    pub width: u32,
+    pub height: u32,
+    /// The part of the image drawn, in the image's own pixels.
+    pub source_x: u32,
+    pub source_y: u32,
+    pub source_width: u32,
+    pub source_height: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

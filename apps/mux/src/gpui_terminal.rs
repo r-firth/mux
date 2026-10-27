@@ -2,14 +2,18 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     rc::{Rc, Weak},
+    sync::Arc,
 };
 
 use gpui::{
-    App, Bounds, Context, Font, Hsla, IntoElement, ParentElement as _, Pixels, Render, ShapedLine,
-    SharedString, StrikethroughStyle, Styled, TextRun, TextSystem, UnderlineStyle, Window, canvas,
-    div, fill, font, point, px, size,
+    App, Bounds, Context, Corners, Font, Hsla, IntoElement, ParentElement as _, Pixels, Render,
+    RenderImage, ShapedLine, SharedString, StrikethroughStyle, Styled, TextRun, TextSystem,
+    UnderlineStyle, Window, canvas, div, fill, font, point, px, size,
 };
-use mux_terminal::{CellStyle, CellWidth, CursorStyle, RenderCell, RenderFrame, Rgb};
+use mux_terminal::{
+    CellStyle, CellWidth, CursorStyle, ImageLayer, ImagePixels, RenderCell, RenderFrame,
+    RenderImage as TerminalImage, Rgb,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GridMetrics {
@@ -173,6 +177,16 @@ pub struct TerminalRenderCache {
     font_key: Option<(String, u32)>,
     generation: u64,
     shaped_runs: HashMap<ShapedRunKey, CachedShapedRun>,
+    /// Images ready to draw, kept while they are on screen.
+    images: HashMap<ImageKey, Arc<RenderImage>>,
+}
+
+/// One image's pixels, or the part of them a placement shows.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ImageKey {
+    id: u32,
+    generation: u64,
+    source: (u32, u32, u32, u32),
 }
 
 impl TerminalRenderCache {
@@ -260,6 +274,75 @@ impl TerminalRenderCache {
         self.shaped_runs
             .retain(|_, cached| cached.last_used >= oldest);
     }
+
+    /// The images to draw for `frame`, each ready for the GPU; those no
+    /// longer on screen are let go, from the GPU too.
+    fn prepare_images(&mut self, frame: &RenderFrame, window: &mut Window) -> Vec<PreparedImage> {
+        let mut kept = HashMap::with_capacity(frame.images.len());
+        let mut prepared = Vec::with_capacity(frame.images.len());
+        for image in &frame.images {
+            let key = ImageKey {
+                id: image.pixels.id,
+                generation: image.pixels.generation,
+                source: (
+                    image.source_x,
+                    image.source_y,
+                    image.source_width,
+                    image.source_height,
+                ),
+            };
+            let ready = match kept.get(&key).or_else(|| self.images.get(&key)) {
+                Some(ready) => Arc::clone(ready),
+                None => match gpu_image(&image.pixels, key.source) {
+                    Some(ready) => Arc::new(ready),
+                    None => continue,
+                },
+            };
+            kept.insert(key, Arc::clone(&ready));
+            prepared.push(PreparedImage {
+                placement: image.clone(),
+                image: ready,
+            });
+        }
+        for (key, image) in self.images.drain() {
+            if !kept.contains_key(&key) {
+                let _ = window.drop_image(image);
+            }
+        }
+        self.images = kept;
+        // Drawn by layer, then by z within it.
+        prepared.sort_by_key(|prepared| (prepared.placement.layer, prepared.placement.z));
+        prepared
+    }
+}
+
+/// The part of `pixels` that `source` names, as GPUI draws images: BGRA.
+fn gpu_image(pixels: &ImagePixels, source: (u32, u32, u32, u32)) -> Option<RenderImage> {
+    let (x, y, width, height) = source;
+    if width == 0
+        || height == 0
+        || x.checked_add(width)? > pixels.width
+        || y.checked_add(height)? > pixels.height
+    {
+        return None;
+    }
+    let stride = usize::try_from(pixels.width).ok()? * 4;
+    let mut bgra =
+        Vec::with_capacity(usize::try_from(width).ok()? * 4 * usize::try_from(height).ok()?);
+    for row in y..y + height {
+        let start = usize::try_from(row).ok()? * stride + usize::try_from(x).ok()? * 4;
+        let end = start + usize::try_from(width).ok()? * 4;
+        for pixel in pixels.rgba.get(start..end)?.chunks_exact(4) {
+            bgra.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+        }
+    }
+    let buffer = image::RgbaImage::from_raw(width, height, bgra)?;
+    Some(RenderImage::new([image::Frame::new(buffer)]))
+}
+
+struct PreparedImage {
+    placement: TerminalImage,
+    image: Arc<RenderImage>,
 }
 
 struct PreparedRun {
@@ -270,6 +353,7 @@ struct PreparedRun {
 
 struct PreparedTerminal {
     runs: Vec<PreparedRun>,
+    images: Vec<PreparedImage>,
 }
 
 /// Everything a pane's terminal is drawn from, but the frame itself, which
@@ -446,8 +530,9 @@ fn prepare_runs(
         }
     }
     cache.finish_frame();
+    let images = cache.prepare_images(frame, window);
 
-    PreparedTerminal { runs }
+    PreparedTerminal { runs, images }
 }
 
 #[allow(clippy::too_many_arguments)] // One flat paint pass is clearer than a bundle struct.
@@ -475,6 +560,15 @@ fn paint_terminal(
     let origin = point(
         bounds.origin.x + px(padding.left),
         bounds.origin.y + px(padding.top),
+    );
+
+    paint_images(
+        origin,
+        metrics,
+        frame,
+        &prepared.images,
+        ImageLayer::BelowBackground,
+        window,
     );
 
     // A full-screen program usually paints every cell, so each run of one
@@ -519,6 +613,14 @@ fn paint_terminal(
         }
     }
 
+    paint_images(
+        origin,
+        metrics,
+        frame,
+        &prepared.images,
+        ImageLayer::BelowText,
+        window,
+    );
     paint_marks(origin, metrics, marks, window);
 
     // A block cursor goes under the text, whose letter there is drawn in
@@ -540,7 +642,66 @@ fn paint_terminal(
         );
     }
 
+    paint_images(
+        origin,
+        metrics,
+        frame,
+        &prepared.images,
+        ImageLayer::AboveText,
+        window,
+    );
     paint_cursor(origin, metrics, frame, focused, chrome, false, window);
+}
+
+/// Paint the images in one layer, clipped to the grid. libghostty sizes
+/// them in the whole pixels of the cell size Mux gave it, the cell rounded,
+/// so they are scaled to the cells as drawn.
+fn paint_images(
+    origin: gpui::Point<Pixels>,
+    metrics: GridMetrics,
+    frame: &RenderFrame,
+    images: &[PreparedImage],
+    layer: ImageLayer,
+    window: &mut Window,
+) {
+    let scale_x = metrics.cell_width / metrics.cell_width.round().max(1.0);
+    let scale_y = metrics.cell_height / metrics.cell_height.round().max(1.0);
+    let grid = Bounds::new(
+        origin,
+        size(
+            px(metrics.cell_width) * f32::from(frame.cols),
+            px(metrics.cell_height) * f32::from(frame.rows),
+        ),
+    );
+    #[allow(clippy::cast_precision_loss)] // Cell positions and image sizes are small.
+    for prepared in images
+        .iter()
+        .filter(|prepared| prepared.placement.layer == layer)
+    {
+        let placement = &prepared.placement;
+        let bounds = Bounds::new(
+            point(
+                origin.x
+                    + px(metrics.cell_width * placement.column as f32
+                        + placement.offset_x as f32 * scale_x),
+                origin.y
+                    + px(metrics.cell_height * placement.row as f32
+                        + placement.offset_y as f32 * scale_y),
+            ),
+            size(
+                px(placement.width as f32 * scale_x),
+                px(placement.height as f32 * scale_y),
+            ),
+        );
+        let _ = window.paint_image(
+            grid,
+            bounds,
+            Corners::default(),
+            Arc::clone(&prepared.image),
+            0,
+            false,
+        );
+    }
 }
 
 /// Paint a pane's cursor: in the pane with the keys, a solid block

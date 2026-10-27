@@ -1,7 +1,11 @@
+/* clock_gettime and CLOCK_MONOTONIC, for timing holds and animations. */
+#define _POSIX_C_SOURCE 200809L
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <ghostty/vt.h>
 
@@ -50,6 +54,9 @@ typedef struct {
   uint32_t cell_width_px;
   uint32_t cell_height_px;
   bool failed;
+  /* The renderer drawing this terminal, told when a program holds the
+   * screen. */
+  struct mux_ghostty_renderer_impl *renderer;
 } mux_ghostty_response_collector_impl_t;
 
 typedef struct {
@@ -101,9 +108,39 @@ typedef struct {
   mux_ghostty_render_cell_t *cells;
   uint8_t *text;
   size_t text_len;
+  /* How soon to draw again though nothing new arrives, in milliseconds:
+   * when an animated image's next frame is due, or a program's hold on the
+   * screen runs out. Zero when nothing is waiting. */
+  uint32_t redraw_in_ms;
+  /* Whether this frame is the one a program asked to keep on screen while
+   * it draws the next (synchronized output, mode 2026). */
+  uint8_t held;
+  /* Whether the images placed on screen may have changed since the last
+   * frame, so they are worth reading again. */
+  uint8_t images_changed;
 } mux_ghostty_render_frame_t;
 
+/* One image, or one piece of it, placed on screen. Positions are in cells
+ * from the top left of the screen, plus pixels within that cell; sizes are
+ * in the pixels of the cell size the terminal was last resized with. */
 typedef struct {
+  uint64_t image_generation;
+  uint32_t image_id;
+  int32_t z;
+  int32_t col;
+  int32_t row;
+  uint32_t offset_x;
+  uint32_t offset_y;
+  uint32_t width;
+  uint32_t height;
+  uint32_t source_x;
+  uint32_t source_y;
+  uint32_t source_width;
+  uint32_t source_height;
+  uint8_t layer;
+} mux_ghostty_image_placement_t;
+
+typedef struct mux_ghostty_renderer_impl {
   GhosttyRenderState state;
   GhosttyRenderStateRowIterator rows;
   GhosttyRenderStateRowCells cells;
@@ -117,7 +154,32 @@ typedef struct {
   bool has_last_colors;
   GhosttyColorRgb last_background;
   GhosttyColorRgb last_foreground;
+  /* Whether a frame has been drawn: a terminal nobody draws, as the
+   * daemon's, need not capture what it shows when a program holds it. */
+  bool drawn;
+  /* A program's hold on the screen: while it lasts the render state keeps
+   * what was on screen when it began. */
+  bool held;
+  uint64_t held_since_ms;
+  GhosttyRenderStateImageIterator images;
+  mux_ghostty_image_placement_t *placements;
+  size_t placement_capacity;
+  bool has_placements_generation;
+  uint64_t placements_generation;
 } mux_ghostty_renderer_impl_t;
+
+/* How long a program may keep the screen still before it is drawn anyway,
+ * as Ghostty gives up on one that never lets go. */
+#define MUX_GHOSTTY_HOLD_LIMIT_MS 1000
+
+/* How much image data a terminal keeps, as Ghostty's own default. */
+#define MUX_GHOSTTY_IMAGE_STORAGE_BYTES (320ull * 1024 * 1024)
+
+static uint64_t now_ms(void) {
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+}
 
 enum {
   MUX_GHOSTTY_CELL_BOLD = 1u << 0,
@@ -348,14 +410,41 @@ void mux_ghostty_response_collector_clear(
   }
 }
 
+/* A program begins or ends a hold on the screen while it draws a frame.
+ * What is on screen as it begins is captured, so the frame left there is
+ * the last one the program finished rather than whatever was drawn last. */
+static void on_render_hold(
+    GhosttyTerminal terminal,
+    void *userdata,
+    bool held) {
+  mux_ghostty_response_collector_impl_t *collector = userdata;
+  if (collector == NULL || collector->renderer == NULL) {
+    return;
+  }
+  mux_ghostty_renderer_impl_t *renderer = collector->renderer;
+  if (held && !renderer->drawn) {
+    return;
+  }
+  if (held && !renderer->held) {
+    if (ghostty_render_state_update(renderer->state, terminal) !=
+        GHOSTTY_SUCCESS) {
+      return;
+    }
+    renderer->held_since_ms = now_ms();
+  }
+  renderer->held = held;
+}
+
 int32_t mux_ghostty_terminal_enable_responses(
     mux_ghostty_terminal_t raw_terminal,
-    mux_ghostty_response_collector_t raw_collector) {
+    mux_ghostty_response_collector_t raw_collector,
+    mux_ghostty_renderer_t raw_renderer) {
   GhosttyTerminal terminal = (GhosttyTerminal)raw_terminal;
   mux_ghostty_response_collector_impl_t *collector = raw_collector;
   if (terminal == NULL || collector == NULL) {
     return (int32_t)GHOSTTY_INVALID_VALUE;
   }
+  collector->renderer = raw_renderer;
   GhosttyResult result = ghostty_terminal_get(
       terminal, GHOSTTY_TERMINAL_DATA_COLS, &collector->cols);
   if (result != GHOSTTY_SUCCESS) return (int32_t)result;
@@ -379,16 +468,92 @@ int32_t mux_ghostty_terminal_enable_responses(
       GHOSTTY_TERMINAL_OPT_DEVICE_ATTRIBUTES,
       (const void *)on_device_attributes);
   if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+  result = ghostty_terminal_set(
+      terminal, GHOSTTY_TERMINAL_OPT_RENDER_HOLD, (const void *)on_render_hold);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
   return (int32_t)ghostty_terminal_set(
       terminal, GHOSTTY_TERMINAL_OPT_SIZE, (const void *)on_size);
 }
 
-static int32_t enable_continuation_tracking(GhosttyTerminal terminal) {
+/* Decodes a PNG a program sent as a Kitty image: the pixels, as 8-bit RGBA
+ * rows with no padding, go in a buffer the decoder asks `alloc` for. */
+typedef uint8_t *(*mux_ghostty_png_alloc_fn)(void *context, size_t len);
+typedef bool (*mux_ghostty_png_decode_fn)(
+    const uint8_t *data,
+    size_t len,
+    mux_ghostty_png_alloc_fn alloc,
+    void *alloc_context,
+    uint32_t *out_width,
+    uint32_t *out_height,
+    uint8_t **out_pixels,
+    size_t *out_len);
+
+static mux_ghostty_png_decode_fn png_decoder = NULL;
+
+static uint8_t *png_alloc(void *context, size_t len) {
+  return ghostty_alloc((const GhosttyAllocator *)context, len);
+}
+
+static bool on_decode_png(
+    void *userdata,
+    const GhosttyAllocator *allocator,
+    const uint8_t *data,
+    size_t data_len,
+    GhosttySysImage *out) {
+  (void)userdata;
+  mux_ghostty_png_decode_fn decoder = png_decoder;
+  if (decoder == NULL || out == NULL) {
+    return false;
+  }
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint8_t *pixels = NULL;
+  size_t len = 0;
+  if (!decoder(data, data_len, png_alloc, (void *)allocator, &width, &height,
+               &pixels, &len)) {
+    ghostty_free(allocator, pixels, len);
+    return false;
+  }
+  out->width = width;
+  out->height = height;
+  out->data = pixels;
+  out->data_len = len;
+  return true;
+}
+
+/* Kitty images sent as PNGs are decoded with `decoder`, for every terminal
+ * in the process. */
+int32_t mux_ghostty_set_png_decoder(mux_ghostty_png_decode_fn decoder) {
+  png_decoder = decoder;
+  return (int32_t)ghostty_sys_set(
+      GHOSTTY_SYS_OPT_DECODE_PNG,
+      decoder == NULL ? NULL : (const void *)on_decode_png);
+}
+
+static int32_t configure_terminal(GhosttyTerminal terminal) {
   size_t continuation_limit = 16 * 1024 * 1024;
-  return (int32_t)ghostty_terminal_set(
+  GhosttyResult result = ghostty_terminal_set(
       terminal,
       GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES,
       &continuation_limit);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+  /* Kitty images come only in the escape sequences themselves. The daemon
+   * and each window keep a copy of every pane, and both read what a
+   * program sends; a file or shared memory is gone once the first has read
+   * it, so programs are told those don't work and send the pixels inline. */
+  bool medium = false;
+  result = ghostty_terminal_set(
+      terminal, GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_FILE, &medium);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+  result = ghostty_terminal_set(
+      terminal, GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_SHARED_MEM, &medium);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+  result = ghostty_terminal_set(
+      terminal, GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_TEMP_FILE, NULL);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+  uint64_t image_limit = MUX_GHOSTTY_IMAGE_STORAGE_BYTES;
+  return (int32_t)ghostty_terminal_set(
+      terminal, GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, &image_limit);
 }
 
 int32_t mux_ghostty_terminal_new(
@@ -400,7 +565,7 @@ int32_t mux_ghostty_terminal_new(
   if (result != GHOSTTY_SUCCESS) {
     return (int32_t)result;
   }
-  result = (GhosttyResult)enable_continuation_tracking(terminal);
+  result = (GhosttyResult)configure_terminal(terminal);
   if (result != GHOSTTY_SUCCESS) {
     ghostty_terminal_free(terminal);
     return (int32_t)result;
@@ -492,7 +657,7 @@ int32_t mux_ghostty_terminal_restore(
     return (int32_t)result;
   }
 
-  result = (GhosttyResult)enable_continuation_tracking(terminal);
+  result = (GhosttyResult)configure_terminal(terminal);
   if (result != GHOSTTY_SUCCESS) {
     ghostty_terminal_free(terminal);
     return (int32_t)result;
@@ -1526,6 +1691,14 @@ int32_t mux_ghostty_renderer_new(mux_ghostty_renderer_t *out_renderer) {
     free(renderer);
     return (int32_t)result;
   }
+  result = ghostty_render_state_image_iterator_new(NULL, &renderer->images);
+  if (result != GHOSTTY_SUCCESS) {
+    ghostty_render_state_row_cells_free(renderer->cells);
+    ghostty_render_state_row_iterator_free(renderer->rows);
+    ghostty_render_state_free(renderer->state);
+    free(renderer);
+    return (int32_t)result;
+  }
 
   *out_renderer = renderer;
   return (int32_t)GHOSTTY_SUCCESS;
@@ -1536,9 +1709,11 @@ void mux_ghostty_renderer_free(mux_ghostty_renderer_t raw_renderer) {
   if (renderer == NULL) {
     return;
   }
+  ghostty_render_state_image_iterator_free(renderer->images);
   ghostty_render_state_row_cells_free(renderer->cells);
   ghostty_render_state_row_iterator_free(renderer->rows);
   ghostty_render_state_free(renderer->state);
+  free(renderer->placements);
   free(renderer->row_metadata);
   free(renderer->cell_storage);
   free(renderer->text);
@@ -1574,11 +1749,64 @@ int32_t mux_ghostty_renderer_frame(
 
   mux_ghostty_render_frame_t frame;
   memset(&frame, 0, sizeof(frame));
+  renderer->drawn = true;
+  const uint64_t now = now_ms();
+  uint64_t redraw_at = 0;
 
-  GhosttyResult result = ghostty_render_state_update(renderer->state, terminal);
+  /* A program that holds the screen too long is drawn anyway. */
+  if (renderer->held &&
+      now - renderer->held_since_ms >= MUX_GHOSTTY_HOLD_LIMIT_MS) {
+    GhosttyTerminalModeConfig mode = {
+        .mode = GHOSTTY_MODE_SYNC_OUTPUT,
+        .value = false,
+    };
+    (void)ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_MODE, &mode);
+    renderer->held = false;
+  }
+
+  GhosttyResult result = GHOSTTY_SUCCESS;
+  if (renderer->held) {
+    /* The render state still holds what was on screen as the hold began. */
+    frame.held = 1;
+    redraw_at = renderer->held_since_ms + MUX_GHOSTTY_HOLD_LIMIT_MS;
+  } else {
+    /* Animated images move on to the frame now due before the screen is
+     * read, so the update sees their new pixels. */
+    GhosttyKittyGraphics graphics = NULL;
+    uint64_t next_frame_at = 0;
+    if (ghostty_terminal_get(
+            terminal, GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS, &graphics) ==
+            GHOSTTY_SUCCESS &&
+        graphics != NULL &&
+        ghostty_kitty_graphics_animation_tick(graphics, now, &next_frame_at) ==
+            GHOSTTY_SUCCESS) {
+      redraw_at = next_frame_at > now ? next_frame_at : now + 1;
+    }
+    result = ghostty_render_state_update(renderer->state, terminal);
+    if (result != GHOSTTY_SUCCESS) {
+      return (int32_t)result;
+    }
+  }
+  if (redraw_at != 0) {
+    const uint64_t wait = redraw_at > now ? redraw_at - now : 1;
+    frame.redraw_in_ms = wait > UINT32_MAX ? UINT32_MAX : (uint32_t)wait;
+  }
+
+  uint64_t placements_generation = 0;
+  result = ghostty_render_state_get(
+      renderer->state,
+      GHOSTTY_RENDER_STATE_DATA_IMAGE_PLACEMENTS_GENERATION,
+      &placements_generation);
   if (result != GHOSTTY_SUCCESS) {
     return (int32_t)result;
   }
+  frame.images_changed =
+      (!renderer->has_placements_generation ||
+       placements_generation != renderer->placements_generation)
+          ? 1
+          : 0;
+  renderer->has_placements_generation = true;
+  renderer->placements_generation = placements_generation;
 
   GhosttyRenderStateDirty dirty = GHOSTTY_RENDER_STATE_DIRTY_FALSE;
   result = ghostty_render_state_get(
@@ -1602,7 +1830,8 @@ int32_t mux_ghostty_renderer_frame(
   frame.scroll_len = scrollbar.len;
 
   GhosttyRenderStateColors colors = GHOSTTY_INIT_SIZED(GhosttyRenderStateColors);
-  result = ghostty_render_state_colors_get(renderer->state, &colors);
+  result = ghostty_render_state_get(
+      renderer->state, GHOSTTY_RENDER_STATE_DATA_COLORS, &colors);
   if (result != GHOSTTY_SUCCESS) goto error;
   frame.background = to_mux_rgb(colors.background);
   frame.foreground = to_mux_rgb(colors.foreground);
@@ -1887,4 +2116,153 @@ int32_t mux_ghostty_renderer_frame(
 
 error:
   return (int32_t)result;
+}
+
+/* Show what is on screen now even though a program is holding it, as when
+ * the pane is resized or scrolled: the hold ends for this renderer, though
+ * the program's mode is left alone. */
+void mux_ghostty_renderer_release_hold(mux_ghostty_renderer_t raw_renderer) {
+  mux_ghostty_renderer_impl_t *renderer = raw_renderer;
+  if (renderer != NULL) {
+    renderer->held = false;
+  }
+}
+
+/* The images on screen as of the renderer's last frame, drawing order left
+ * to the caller. The list is the renderer's and lasts until its next call. */
+int32_t mux_ghostty_renderer_images(
+    mux_ghostty_renderer_t raw_renderer,
+    const mux_ghostty_image_placement_t **out_placements,
+    size_t *out_len) {
+  mux_ghostty_renderer_impl_t *renderer = raw_renderer;
+  if (renderer == NULL || out_placements == NULL || out_len == NULL) {
+    return (int32_t)GHOSTTY_INVALID_VALUE;
+  }
+  *out_placements = NULL;
+  *out_len = 0;
+  GhosttyResult result = ghostty_render_state_get(
+      renderer->state, GHOSTTY_RENDER_STATE_DATA_IMAGE_ITERATOR,
+      &renderer->images);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+
+  size_t len = 0;
+  while (ghostty_render_state_image_iterator_next(renderer->images)) {
+    GhosttyImageProtocol protocol = GHOSTTY_IMAGE_PROTOCOL_KITTY;
+    result = ghostty_render_state_image_get(
+        renderer->images, GHOSTTY_RENDER_STATE_IMAGE_DATA_PROTOCOL, &protocol);
+    /* Protocols added later are left out until Mux knows their pixels. */
+    if (result != GHOSTTY_SUCCESS || protocol != GHOSTTY_IMAGE_PROTOCOL_KITTY) {
+      continue;
+    }
+    if (!ensure_array_capacity(
+            (void **)&renderer->placements,
+            &renderer->placement_capacity,
+            len + 1,
+            sizeof(*renderer->placements))) {
+      return (int32_t)GHOSTTY_OUT_OF_MEMORY;
+    }
+    mux_ghostty_image_placement_t *placement = &renderer->placements[len];
+    memset(placement, 0, sizeof(*placement));
+    GhosttyRenderStateImageLayer layer =
+        GHOSTTY_RENDER_STATE_IMAGE_LAYER_ABOVE_TEXT;
+    const GhosttyRenderStateImageData keys[] = {
+        GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_ID,
+        GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_GENERATION,
+        GHOSTTY_RENDER_STATE_IMAGE_DATA_LAYER,
+        GHOSTTY_RENDER_STATE_IMAGE_DATA_Z,
+        GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_COL,
+        GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_ROW,
+        GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_X,
+        GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_Y,
+        GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_WIDTH,
+        GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_HEIGHT,
+        GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_X,
+        GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_Y,
+        GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_WIDTH,
+        GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_HEIGHT,
+    };
+    void *values[] = {
+        &placement->image_id,
+        &placement->image_generation,
+        &layer,
+        &placement->z,
+        &placement->col,
+        &placement->row,
+        &placement->offset_x,
+        &placement->offset_y,
+        &placement->width,
+        &placement->height,
+        &placement->source_x,
+        &placement->source_y,
+        &placement->source_width,
+        &placement->source_height,
+    };
+    result = ghostty_render_state_image_get_multi(
+        renderer->images, sizeof(keys) / sizeof(keys[0]), keys, values, NULL);
+    if (result != GHOSTTY_SUCCESS) {
+      continue;
+    }
+    placement->layer = (uint8_t)layer;
+    len++;
+  }
+  *out_placements = renderer->placements;
+  *out_len = len;
+  return (int32_t)GHOSTTY_SUCCESS;
+}
+
+typedef struct {
+  uint64_t generation;
+  const uint8_t *data;
+  size_t len;
+  uint32_t width;
+  uint32_t height;
+  uint8_t format;
+} mux_ghostty_image_pixels_t;
+
+/* An image's current pixels, borrowed from the terminal until it next
+ * changes. GHOSTTY_NO_VALUE when there is no such image, or its pixels are
+ * still arriving. */
+int32_t mux_ghostty_terminal_image_pixels(
+    mux_ghostty_terminal_t raw_terminal,
+    uint32_t image_id,
+    mux_ghostty_image_pixels_t *out_pixels) {
+  GhosttyTerminal terminal = (GhosttyTerminal)raw_terminal;
+  if (terminal == NULL || out_pixels == NULL) {
+    return (int32_t)GHOSTTY_INVALID_VALUE;
+  }
+  memset(out_pixels, 0, sizeof(*out_pixels));
+  GhosttyKittyGraphics graphics = NULL;
+  GhosttyResult result = ghostty_terminal_get(
+      terminal, GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS, &graphics);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+  GhosttyKittyGraphicsImage image =
+      graphics == NULL ? NULL : ghostty_kitty_graphics_image(graphics, image_id);
+  if (image == NULL) {
+    return (int32_t)GHOSTTY_NO_VALUE;
+  }
+  GhosttyKittyImageFormat format = GHOSTTY_KITTY_IMAGE_FORMAT_RGBA;
+  const GhosttyKittyGraphicsImageData keys[] = {
+      GHOSTTY_KITTY_IMAGE_DATA_GENERATION,
+      GHOSTTY_KITTY_IMAGE_DATA_WIDTH,
+      GHOSTTY_KITTY_IMAGE_DATA_HEIGHT,
+      GHOSTTY_KITTY_IMAGE_DATA_FORMAT,
+      GHOSTTY_KITTY_IMAGE_DATA_DATA_LEN,
+      GHOSTTY_KITTY_IMAGE_DATA_DATA_PTR,
+  };
+  void *values[] = {
+      &out_pixels->generation,
+      &out_pixels->width,
+      &out_pixels->height,
+      &format,
+      &out_pixels->len,
+      (void *)&out_pixels->data,
+  };
+  result = ghostty_kitty_graphics_image_get_multi(
+      image, sizeof(keys) / sizeof(keys[0]), keys, values, NULL);
+  if (result != GHOSTTY_SUCCESS) {
+    memset(out_pixels, 0, sizeof(*out_pixels));
+    return (int32_t)result;
+  }
+  out_pixels->format = (uint8_t)format;
+  return (int32_t)GHOSTTY_SUCCESS;
 }

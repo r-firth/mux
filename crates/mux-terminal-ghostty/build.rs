@@ -2,7 +2,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const REQUIRED_ZIG_VERSION: &str = "0.16.0";
+const REQUIRED_ZIG_VERSION: &str = "0.17.0";
 
 fn main() {
     println!("cargo:rerun-if-changed=native/ghostty_shim.c");

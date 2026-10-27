@@ -12,12 +12,13 @@ ignored = ["cc"]
 
 [features]
 default = []
-link = []
+link = ["dep:png"]
 vendored = ["link"]
 
 [dependencies]
 directories.workspace = true
 mux-terminal = { path = "../mux-terminal" }
+png = { workspace = true, optional = true }
 thiserror.workspace = true
 
 [build-dependencies]

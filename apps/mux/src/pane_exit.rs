@@ -288,6 +288,9 @@ mod tests {
             },
             row_metadata: Vec::new(),
             cells: Vec::new(),
+            images: Vec::new(),
+            held: false,
+            redraw_in: None,
         }
     }
 

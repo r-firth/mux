@@ -685,6 +685,9 @@ mod tests {
                 })
                 .collect(),
             cells,
+            images: Vec::new(),
+            held: false,
+            redraw_in: None,
         }
     }
 
