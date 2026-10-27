@@ -14,44 +14,22 @@ pub fn build(b: *std.Build) void {
     });
     module.addCMacro("GHOSTTY_STATIC", "");
 
+    // Ghostty's install step also builds an Apple xcframework, including iOS
+    // slices, whenever xcodebuild is present. Mux needs only the macOS library.
     const ghostty = b.dependency("ghostty", .{
         .target = target,
         .optimize = optimize,
+        .@"emit-xcframework" = false,
     });
     const ghostty_static = ghostty.artifact("ghostty-vt-static");
     module.linkLibrary(ghostty_static);
 
     // Ghostty intentionally exposes only the static VT artifact to dependent
     // Zig packages. Its install step still produces the supported shared
-    // library, including all transitive SIMD dependencies. Copy that complete
-    // installation into our prefix for the Rust FFI adapter.
-    const ghostty_install = ghostty.builder.getInstallStep();
-    const install_libraries = b.addInstallDirectory(.{
-        .source_dir = .{ .cwd_relative = ghostty.builder.getInstallPath(.lib, "") },
-        .install_dir = .lib,
-        .install_subdir = "",
-    });
-    install_libraries.step.dependOn(ghostty_install);
-    b.getInstallStep().dependOn(&install_libraries.step);
-
-    // addInstallDirectory intentionally omits symlinks. Install the stable
-    // linker name as a regular file so Cargo and packaged applications never
-    // need to know Ghostty's internal versioned filename.
-    const install_linker_library = b.addInstallFileWithDir(
-        .{ .cwd_relative = ghostty.builder.getInstallPath(.lib, "libghostty-vt.dylib") },
-        .lib,
-        "libghostty-vt.dylib",
-    );
-    install_linker_library.step.dependOn(ghostty_install);
-    b.getInstallStep().dependOn(&install_linker_library.step);
-
-    const install_headers = b.addInstallDirectory(.{
-        .source_dir = .{ .cwd_relative = ghostty.builder.getInstallPath(.header, "") },
-        .install_dir = .header,
-        .install_subdir = "",
-    });
-    install_headers.step.dependOn(ghostty_install);
-    b.getInstallStep().dependOn(&install_headers.step);
+    // library, including all transitive SIMD dependencies, and its headers.
+    // Every package installs into the one prefix, so running that step puts
+    // them where the Rust FFI adapter looks.
+    b.getInstallStep().dependOn(ghostty.builder.getInstallStep());
 
     const smoke = b.addExecutable(.{
         .name = "mux-ghostty-smoke",

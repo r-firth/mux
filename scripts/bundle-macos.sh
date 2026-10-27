@@ -69,7 +69,9 @@ version=${version##*@}
 /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $bundle_name" \
   "$contents_dir/Info.plist"
 
-ghostty_library=$(find "$target_profile_dir/build" \
+# Ghostty installs the linker name as a symlink to its versioned library. -L
+# makes -type test the file it points to, and cp copies that file.
+ghostty_library=$(find -L "$target_profile_dir/build" \
   -path '*/out/ghostty/lib/libghostty-vt.dylib' -type f -print | head -n 1)
 if [ -z "$ghostty_library" ]; then
   echo "vendored libghostty-vt was not produced" >&2
