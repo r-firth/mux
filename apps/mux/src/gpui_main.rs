@@ -1489,6 +1489,7 @@ impl MuxApp {
             .session
             .as_ref()
             .map(|session| (session.id, session.active_tab));
+        let was_in_view = self.panes_in_view();
         let exits = attachment
             .panes
             .iter()
@@ -1503,6 +1504,7 @@ impl MuxApp {
             }
         }
         self.keep_seam_drag();
+        self.publish_panes_come_into_view(&was_in_view);
         self.note_pane_exits(exits);
         self.forget_closed_pane_calls();
         self.remember_previous_tab(before);
@@ -1768,6 +1770,27 @@ impl MuxApp {
             .get(&tab.id)
             .copied()
             .filter(|pane_id| tab.layout.contains(*pane_id))
+    }
+
+    fn panes_in_view(&self) -> HashSet<PaneId> {
+        self.panes
+            .keys()
+            .copied()
+            .filter(|pane_id| self.terminal_pane_is_visible(*pane_id))
+            .collect()
+    }
+
+    /// A pane out of view takes in its output without drawing it, so one
+    /// that comes back into view, with its tab or from behind a zoom, is
+    /// drawn afresh rather than as it was when it went.
+    fn publish_panes_come_into_view(&mut self, was_in_view: &HashSet<PaneId>) {
+        for pane_id in self.panes_in_view() {
+            if !was_in_view.contains(&pane_id)
+                && let Some(pane) = self.panes.get_mut(&pane_id)
+            {
+                let _ = pane.publish_frame();
+            }
+        }
     }
 
     fn terminal_pane_is_visible(&self, pane_id: PaneId) -> bool {
