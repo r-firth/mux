@@ -829,6 +829,9 @@ struct MuxApp {
     pane_restart: Option<pane_exit::PaneRestart>,
     /// Panes out of sight that rang or sent a notification, until seen.
     pane_calls: HashMap<PaneId, mux_terminal::Attention>,
+    /// The panes whose call is only news, a program that finished cleanly,
+    /// which calls in its tab's ink rather than peach.
+    news_calls: HashSet<PaneId>,
     /// The panes that have called, the latest last.
     call_order: Vec<PaneId>,
     /// The prompt row gone to last, washed for a moment.
@@ -839,8 +842,8 @@ struct MuxApp {
     /// When stale progress reports will next be looked for, if they will.
     progress_sweep: Option<Instant>,
     /// Long programs that have finished since the calls were last gathered,
-    /// with what to say about each.
-    finished_commands: Vec<(PaneId, String)>,
+    /// with what to say about each and whether they ended cleanly.
+    finished_commands: Vec<(PaneId, String, bool)>,
     /// The link under the pointer while ⌘ is held, and where the pointer is.
     link_hover: Option<(PaneId, links::Link)>,
     link_pointer: Option<(PaneId, layout::Rect, gpui::Point<gpui::Pixels>)>,
@@ -1030,6 +1033,7 @@ impl MuxApp {
             pane_exits: HashMap::new(),
             pane_restart: None,
             pane_calls: HashMap::new(),
+            news_calls: HashSet::new(),
             call_order: Vec::new(),
             prompt_flash: None,
             keyed_selection: None,
@@ -4414,9 +4418,10 @@ impl MuxApp {
         // agent works, or a program runs in the tab out of sight, turns peach
         // when one needs you (or a pane rang), and sage when one has finished
         // out of sight.
+        let news = self.tab_call_is_news(tab);
         let dot = match activity {
             Some(AgentTabActivity::Attention) => color(SIGNAL),
-            _ if call.is_some() => color(SIGNAL),
+            _ if call.is_some() => Self::call_color(news, ink),
             Some(AgentTabActivity::Working) => ink.color().opacity(self.agent_pulse_level()),
             _ if running.is_some() => ink.color().opacity(self.agent_pulse_level()),
             _ if unseen => color(SAGE),
@@ -4428,12 +4433,17 @@ impl MuxApp {
         // Said in words as well, since a peach-inked tab's dot is peach
         // anyway: what its agent or a pane of it wants.
         let wants = if activity == Some(AgentTabActivity::Attention) {
-            Some("needs you".to_owned())
+            Some(("needs you".to_owned(), color(SIGNAL)))
         } else {
-            call.map(|call| chrome::truncate_chars(pane_calls::call_words(call), 18))
+            call.map(|call| {
+                (
+                    chrome::truncate_chars(pane_calls::call_words(call), 18),
+                    Self::call_color(news, ink),
+                )
+            })
         };
-        if let Some(wants) = wants {
-            chip = chip.child(div().flex_none().text_color(color(SIGNAL)).child(wants));
+        if let Some((wants, tone)) = wants {
+            chip = chip.child(div().flex_none().text_color(tone).child(wants));
         }
         chip = chip
             .relative()
@@ -5239,6 +5249,7 @@ impl MuxApp {
         let call = self
             .pane_call(geometry.pane_id)
             .filter(|_| !focused && !agent_pane);
+        let call_tone = Self::call_color(self.call_is_news(geometry.pane_id), ink);
         // A pane with nothing sitting in its head wears a legend instead: the
         // same words, small, set into the slab's top edge.
         let legend = geometry.legended();
@@ -5294,7 +5305,7 @@ impl MuxApp {
                         if focused {
                             dot.bg(ink.color())
                         } else if call.is_some() {
-                            dot.bg(color(SIGNAL))
+                            dot.bg(call_tone)
                         } else {
                             dot.border_1().border_color(color(FAINT_TEXT))
                         }
@@ -5341,7 +5352,7 @@ impl MuxApp {
                     .min_w(px(0.0))
                     .max_w(px(frame.width * 0.6))
                     .truncate()
-                    .text_color(color(SIGNAL))
+                    .text_color(call_tone)
                     .child(said.clone()),
             );
         }

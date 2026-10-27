@@ -10,7 +10,8 @@
 //! with focus. It breathes along the edge of a pane busy printing. A pane
 //! that rang or sent a notification, or an agent waiting on you, sends rings
 //! out through the grain until it is looked at; a tab out of sight rings from
-//! its chip. A pane showing its history cools the ground, and a new tab's ink
+//! its chip. What wants you rings in peach, and a program that only finished
+//! cleanly in its tab's own ink. A pane showing its history cools the ground, and a new tab's ink
 //! dissolves in from its chip. With reduced motion the ground holds still,
 //! and its clock stops while the window is in the background.
 
@@ -224,12 +225,32 @@ pub(super) enum Caller {
     Tab(TabId),
 }
 
-/// Something calling: who, where its rings start, and how far they go.
+/// Something calling: who, where its rings start, how far they go, and the
+/// ink they are in: the calling tab's when the call is only news, or none for
+/// peach, when it wants you.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Call {
     pub(super) caller: Caller,
     pub(super) from: layout::Rect,
     pub(super) reach: f32,
+    pub(super) ink: Option<Ink>,
+}
+
+impl Call {
+    /// The colour its rings are in.
+    pub(super) fn rgb(&self) -> u32 {
+        self.ink.map_or(SIGNAL, Ink::rgb)
+    }
+}
+
+/// The one colour the calls in `calls` share, or peach when they differ:
+/// the grain worked out here has room for only one ink of calls at a time,
+/// and what wants you comes first.
+fn calls_rgb(calls: &[Call]) -> u32 {
+    match calls.split_first() {
+        Some((first, rest)) if rest.iter().all(|call| call.ink == first.ink) => first.rgb(),
+        _ => SIGNAL,
+    }
 }
 
 /// What the ground is to show this frame.
@@ -369,19 +390,23 @@ fn pack(rgb: [f32; 3]) -> u32 {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Palette([[[f32; 3]; 4]; 4]);
 
+/// What a dot of `value` at `strength` adds to the ground, at a saturation.
+fn tone(value: u32, strength: f32, saturation: f32) -> [f32; 3] {
+    let rgb = rgb_of(value);
+    let grey = 0.3 * rgb[0] + 0.59 * rgb[1] + 0.11 * rgb[2];
+    [0, 1, 2].map(|c| (grey + (rgb[c] - grey) * saturation) * strength)
+}
+
 impl Palette {
-    fn new(ink: Ink, saturation: f32) -> Self {
+    /// The palette for a tab's `ink` with calls in `calls`.
+    fn new(ink: Ink, calls: u32, saturation: f32) -> Self {
         let [first, second] = accents(ink);
-        let inks = [ink.rgb(), first.rgb(), second.rgb(), SIGNAL];
+        let inks = [ink.rgb(), first.rgb(), second.rgb(), calls];
         let mut tones = [[[0.0; 3]; 4]; 4];
         for (channel, value) in inks.into_iter().enumerate() {
-            let rgb = rgb_of(value);
-            let grey = 0.3 * rgb[0] + 0.59 * rgb[1] + 0.11 * rgb[2];
             let levels = if channel == 3 { CALL_LEVELS } else { LEVELS };
             for (step, strength) in levels.into_iter().enumerate() {
-                for c in 0..3 {
-                    tones[channel][step][c] = (grey + (rgb[c] - grey) * saturation) * strength;
-                }
+                tones[channel][step] = tone(value, strength, saturation);
             }
         }
         Self(tones)
@@ -486,6 +511,8 @@ impl Ambient {
 struct Ringing {
     from: layout::Rect,
     rings: Option<[(f32, f32); 2]>,
+    /// The colour its rings are in.
+    rgb: u32,
 }
 
 /// An ink dissolving away: where the new one spreads from and how far it
@@ -1188,6 +1215,7 @@ impl Ground {
             .iter()
             .map(|call| Ringing {
                 from: call.from,
+                rgb: call.rgb(),
                 rings: (!scene.still).then(|| {
                     let began = self
                         .calls
@@ -1247,10 +1275,11 @@ impl Ground {
             }
         };
         let saturation = 1.0 - 0.4 * laid.past;
+        let calls = calls_rgb(&scene.calls);
         let mut shades = Vec::with_capacity(512);
-        Palette::new(scene.ink, saturation).shades(&mut shades);
+        Palette::new(scene.ink, calls, saturation).shades(&mut shades);
         if let Some((from, _, _)) = laid.dissolve {
-            Palette::new(from, saturation).shades(&mut shades);
+            Palette::new(from, calls, saturation).shades(&mut shades);
         }
         let field = Rc::new(Field {
             cell,
@@ -1486,6 +1515,7 @@ impl MuxApp {
                         caller,
                         from: frame,
                         reach: PANE_REACH,
+                        ink: None,
                     }),
                     Some(AgentSessionStatus::Working | AgentSessionStatus::Starting) => {
                         busy.push((frame, 1.0));
@@ -1499,6 +1529,7 @@ impl MuxApp {
                     caller,
                     from: frame,
                     reach: PANE_REACH,
+                    ink: self.call_is_news(pane_id).then(|| self.active_ink()),
                 });
             }
             if let Some(activity) = self.pane_activity.get(&pane_id) {
@@ -1562,6 +1593,7 @@ impl MuxApp {
                     caller: Caller::Tab(tab.id),
                     from: rect,
                     reach: CHIP_REACH,
+                    ink: (!agent_calls && self.tab_call_is_news(tab)).then(|| self.tab_ink(tab.id)),
                 });
             }
         }
@@ -1782,6 +1814,7 @@ mod tests {
             caller: Caller::Pane(PaneId::new()),
             from: rect(405.0, 40.0, 385.0, 450.0),
             reach: PANE_REACH,
+            ink: None,
         }];
         let mut still_ground = Ground::new(epoch);
         let mut ground = Ground::new(epoch);
@@ -1806,6 +1839,66 @@ mod tests {
     }
 
     #[test]
+    fn news_rings_in_its_tabs_ink_and_what_wants_you_in_peach() {
+        let epoch = Instant::now();
+        let mut quiet = scene();
+        quiet.ink = Ink::Rose;
+        quiet.focus = None;
+        let calling = |ink| {
+            let mut calling = quiet.clone();
+            calling.calls = vec![Call {
+                caller: Caller::Tab(TabId::new()),
+                from: rect(405.0, 40.0, 385.0, 450.0),
+                reach: PANE_REACH,
+                ink,
+            }];
+            calling
+        };
+        // The colours a cell lit by a call can show, for calls in `calls`.
+        let lit_by_calls = |calls| {
+            let mut shades = Vec::new();
+            Palette::new(Ink::Rose, calls, 1.0).shades(&mut shades);
+            (0..256)
+                .filter(|mix| (mix >> 6) & 3 != 0)
+                .map(|mix| shades[mix])
+                .collect::<Vec<_>>()
+        };
+        let teal = lit_by_calls(Ink::Teal.rgb());
+        let peach = lit_by_calls(SIGNAL);
+        let near = rect(280.0, 0.0, 125.0, 40.0);
+        let colours = |ink| {
+            let mut ground = Ground::new(epoch);
+            let _ = ground.lay(calling(ink), epoch);
+            let grain = ground.lay(calling(ink), epoch + Duration::from_millis(800));
+            grain
+                .lit()
+                .filter(|&(x, y, _)| {
+                    x >= near.x
+                        && x < near.x + near.width
+                        && y >= near.y
+                        && y < near.y + near.height
+                })
+                .map(|(_, _, color)| color)
+                .collect::<Vec<_>>()
+        };
+        let news = colours(Some(Ink::Teal));
+        assert!(news.iter().any(|color| teal.contains(color)));
+        assert!(!news.iter().any(|color| peach.contains(color)));
+        let wants = colours(None);
+        assert!(wants.iter().any(|color| peach.contains(color)));
+        assert!(!wants.iter().any(|color| teal.contains(color)));
+        // Calls in different inks show in peach here, which comes first.
+        let mixed = [Some(Ink::Teal), None].map(|ink| Call {
+            caller: Caller::Tab(TabId::new()),
+            from: rect(0.0, 0.0, 1.0, 1.0),
+            reach: CHIP_REACH,
+            ink,
+        });
+        assert_eq!(calls_rgb(&mixed), SIGNAL);
+        assert_eq!(calls_rgb(&mixed[..1]), Ink::Teal.rgb());
+    }
+
+    #[test]
     fn a_new_ink_dissolves_in_from_the_chip() {
         let epoch = Instant::now();
         let mut ground = Ground::new(epoch);
@@ -1817,7 +1910,7 @@ mod tests {
         let _ = ground.lay(next.clone(), epoch + Duration::from_millis(1));
         let grain = ground.lay(next.clone(), epoch + Duration::from_millis(150));
         let teal: Hsla = gpui::rgb(pack({
-            let tone = Palette::new(Ink::Teal, 1.0).0[0][1];
+            let tone = Palette::new(Ink::Teal, SIGNAL, 1.0).0[0][1];
             [
                 GROUND_RGB[0] + tone[0],
                 GROUND_RGB[1] + tone[1],
@@ -1929,6 +2022,7 @@ mod tests {
             caller: Caller::Pane(PaneId::new()),
             from: rect(405.0, 40.0, 385.0, 450.0),
             reach: PANE_REACH,
+            ink: None,
         }];
         let first = ground.lay(still.clone(), epoch);
         let later = ground.lay(still, epoch + Duration::from_secs(30));
@@ -1993,6 +2087,7 @@ mod tests {
                 caller: Caller::Pane(PaneId::new()),
                 from: top,
                 reach: PANE_REACH,
+                ink: None,
             }],
             past: false,
             active: true,

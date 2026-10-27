@@ -306,7 +306,9 @@ name, and in the tab on screen the pane's head says it. A program that ran for
 ten seconds or more and finishes out of sight, such as a build or a test run,
 calls the same way, with how long it took: `cargo done in 3m`, or
 `cargo failed (101) after 3m` when the shell says it failed (zsh and bash do,
-as Mux starts them). While Mux is in the background, the first call also
+as Mux starts them). One that ended cleanly is only news, so its dot, words and
+rings are in its tab's own ink; peach is kept for what wants you, a failure
+among it. While Mux is in the background, the first call also
 bounces its Dock icon, and a program's notification shows in Notification
 Center as Ghostty's do, titled for its pane. A bell in the pane you are
 looking at flashes it for a moment in the tab's ink instead.

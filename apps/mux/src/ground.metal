@@ -25,6 +25,7 @@ struct Frame {
     float4 calls[$most$];
     float4 rings[$most$];
     float4 ringing[2];
+    float4 call_inks[$most$];
     float4 tones[16];
     float4 old_tones[16];
     float4 ground;
@@ -62,8 +63,15 @@ static float lit(float value, float threshold) {
 
 // The light a focused slab, the active chip, busy panes and a wake cast at a
 // point, apart from the slow fields and the tide: what glows under the dots
-// as well as lighting them.
-static float cast(float2 point, constant Frame &frame, thread float &signal) {
+// as well as lighting them. Calls add to `signal`, and their inks to
+// `signal_ink` by how much each adds, so a dot takes the colour of the call
+// that lights it most.
+static float cast(
+    float2 point,
+    constant Frame &frame,
+    thread float &signal,
+    thread float3 &signal_ink
+) {
     float own = 0.0;
     if (frame.wake.w > 0.0) {
         float behind = frame.wake.z - distance(point, frame.wake.xy);
@@ -86,15 +94,17 @@ static float cast(float2 point, constant Frame &frame, thread float &signal) {
     }
     for (int index = 0; index < int(frame.counts.y); index++) {
         float away = outside(point, frame.calls[index]);
-        signal += 0.3 * fall(away, 20.0);
+        float light = 0.3 * fall(away, 20.0);
         if (frame.ringing[index / 4][index % 4] > 0.5) {
             float4 rings = frame.rings[index];
             float near = max(1.0 - abs(away - rings.x) / $ring_width$, 0.0);
             float far = max(1.0 - abs(away - rings.z) / $ring_width$, 0.0);
-            signal += rings.y * near * near + rings.w * far * far;
+            light += rings.y * near * near + rings.w * far * far;
         } else {
-            signal += 0.3 * fall(away, 48.0);
+            light += 0.3 * fall(away, 48.0);
         }
+        signal += light;
+        signal_ink += light * frame.call_inks[index].rgb;
     }
     return own;
 }
@@ -137,6 +147,7 @@ fragment float4 ground_fragment(
     float first = fields[1] * frame.gain.y;
     float second = fields[2] * frame.gain.z;
     float signal = 0.0;
+    float3 signal_ink = float3(0.0);
 
     // The tide carries the ground's light.
     bool moving = frame.clock.y > 0.5;
@@ -150,7 +161,7 @@ fragment float4 ground_fragment(
         float carried = $trough$ + (1.6 - $trough$) * swell;
         own = own * (1.0 + (carried - 1.0) * reach) + $crest$ * swell * reach;
     }
-    own += cast(point, frame, signal);
+    own += cast(point, frame, signal, signal_ink);
 
     // No two dots are alike: each has its own turn to come up, its own size
     // and its own brightness, read from a tile of noise, so the panel is
@@ -195,7 +206,7 @@ fragment float4 ground_fragment(
     glow += up[0] * (0.45 + 0.5 * quirk + 0.45 * burn) * own_ink;
     glow += up[1] * (old ? frame.old_tones[7].rgb : frame.tones[7].rgb);
     glow += up[2] * (old ? frame.old_tones[11].rgb : frame.tones[11].rgb);
-    glow += up[3] * frame.tones[15].rgb;
+    glow += up[3] * (signal > 0.0 ? signal_ink / signal : frame.tones[15].rgb);
 
     // Round, with a soft edge a pixel wide, and as big as it is bright: a
     // dim dot is a speck and a burning one nearly touches its neighbours.
@@ -208,7 +219,8 @@ fragment float4 ground_fragment(
     // Under the dots, the light a focused slab casts glows on the ground
     // itself, smoothly: worked out at the pixel, not the dot.
     float spare = 0.0;
-    float wash = cast(here, frame, spare);
+    float3 spare_ink = float3(0.0);
+    float wash = cast(here, frame, spare, spare_ink);
     float3 colour = frame.ground.rgb + $wash$ * min(wash, 1.2) * own_ink;
 
     colour = mix(colour, min(colour + glow, float3(1.0)), cover);

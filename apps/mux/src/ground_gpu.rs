@@ -86,6 +86,9 @@ pub(super) struct GpuFrame {
     rings: [[f32; 4]; MOST],
     /// Whether each caller's rings are moving.
     ringing: [[f32; 4]; 2],
+    /// What each caller's brightest dot adds to the ground, from 0 to 1:
+    /// peach for what wants you, its tab's ink for news.
+    call_inks: [[f32; 4]; MOST],
     /// What each level of each ink adds to the ground, from 0 to 1.
     tones: [[f32; 4]; 16],
     /// The same for an ink dissolving away.
@@ -139,7 +142,7 @@ impl Ground {
             ],
             gain: [gain[0], gain[1], gain[2], FLOOR],
             counts: [0.0; 4],
-            tones: tones(&Palette::new(scene.ink, saturation)),
+            tones: tones(&Palette::new(scene.ink, SIGNAL, saturation)),
             ground: [
                 GROUND_RGB[0] / 255.0,
                 GROUND_RGB[1] / 255.0,
@@ -161,7 +164,7 @@ impl Ground {
         }
         if let Some((from, origin, reached)) = laid.dissolve {
             frame.leaving = [origin.0, origin.1, reached, 1.0];
-            frame.old_tones = tones(&Palette::new(from, saturation));
+            frame.old_tones = tones(&Palette::new(from, SIGNAL, saturation));
         }
         for (index, blob) in BLOBS.iter().enumerate() {
             let x = (blob.x + blob.drift.0 * (drift * blob.pace + blob.phase).sin()) * width;
@@ -179,6 +182,8 @@ impl Ground {
         let calls = self.ringing(&laid);
         for (index, call) in calls.iter().take(MOST).enumerate() {
             frame.calls[index] = rect(call.from);
+            let [r, g, b] = tone(call.rgb, CALL_LEVELS[3], saturation);
+            frame.call_inks[index] = [r / 255.0, g / 255.0, b / 255.0, 0.0];
             if let Some([(first, first_bright), (second, second_bright)]) = call.rings {
                 frame.rings[index] = [first, first_bright, second, second_bright];
                 frame.ringing[index / 4][index % 4] = 1.0;
@@ -432,6 +437,7 @@ mod tests {
         let source = shader();
         assert!(!source.contains('$'), "a name was left unfilled");
         assert!(source.contains("float4 busy[8];"));
+        assert!(source.contains("float4 call_inks[8];"));
     }
 
     #[test]
@@ -474,5 +480,54 @@ mod tests {
         );
         // The tab's own ink at its brightest is not black.
         assert!(frame.tones[3][0] > 0.2);
+    }
+
+    #[test]
+    fn each_call_rings_in_its_own_colour() {
+        let pane = layout::Rect {
+            x: 10.0,
+            y: 40.0,
+            width: 380.0,
+            height: 440.0,
+        };
+        let chip = layout::Rect {
+            x: 120.0,
+            y: 6.0,
+            width: 60.0,
+            height: 24.0,
+        };
+        let scene = Scene {
+            viewport: (800.0, 500.0),
+            ink: Ink::Peach,
+            slabs: vec![pane],
+            focus: Some(pane),
+            bloom: 0.0,
+            tab: None,
+            chip: None,
+            busy: Vec::new(),
+            calls: vec![
+                Call {
+                    caller: Caller::Tab(TabId::new()),
+                    from: chip,
+                    reach: CHIP_REACH,
+                    ink: Some(Ink::Teal),
+                },
+                Call {
+                    caller: Caller::Pane(PaneId::new()),
+                    from: pane,
+                    reach: PANE_REACH,
+                    ink: None,
+                },
+            ],
+            past: false,
+            active: true,
+            still: false,
+        };
+        let mut ground = Ground::new(Instant::now());
+        let (frame, _) = ground.gpu_frame(scene, Instant::now(), 2.0, false);
+        let colour = |value| tone(value, CALL_LEVELS[3], 1.0).map(|c| c / 255.0);
+        assert!((frame.counts[1] - 2.0).abs() < f32::EPSILON);
+        assert_eq!(frame.call_inks[0][..3], colour(Ink::Teal.rgb()));
+        assert_eq!(frame.call_inks[1][..3], colour(SIGNAL));
     }
 }

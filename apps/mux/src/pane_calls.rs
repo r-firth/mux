@@ -10,7 +10,9 @@
 //! A long program finishing calls the same way: a build or a test run that
 //! ends in a pane out of sight, or while mux is in the background, says it
 //! is done and how long it took, or that it failed when the shell's marks
-//! say it did, once it has run for ten seconds or more.
+//! say it did, once it has run for ten seconds or more. One that ended as it
+//! should is only news, so it calls in its tab's own ink rather than peach,
+//! its dot, words and rings alike; peach is kept for what wants you.
 //!
 //! A bell in the pane you are looking at has nothing to mark, so the pane
 //! flashes instead, washed for a moment in its tab's ink.
@@ -37,7 +39,8 @@ impl MuxApp {
             .and_then(|pane| pane.title.take_exit_status());
         if seconds >= FINISH_NOTICE_AFTER.as_secs() {
             let words = finished_words(program, seconds, exit_status);
-            self.finished_commands.push((pane_id, words));
+            self.finished_commands
+                .push((pane_id, words, finished_cleanly(exit_status)));
         }
     }
 
@@ -57,14 +60,20 @@ impl MuxApp {
         let mut rung = None;
         let mut notices = Vec::new();
         let mut called = Vec::new();
-        for (pane_id, words) in std::mem::take(&mut self.finished_commands) {
+        for (pane_id, words, clean) in std::mem::take(&mut self.finished_commands) {
             if Some(pane_id) == watched || !self.panes.contains_key(&pane_id) {
                 continue;
             }
             let call = Attention::Notification(words);
             fresh |= !self.pane_calls.contains_key(&pane_id);
             changed |= self.pane_calls.get(&pane_id) != Some(&call);
+            changed |= self.news_calls.contains(&pane_id) != clean;
             self.pane_calls.insert(pane_id, call);
+            if clean {
+                self.news_calls.insert(pane_id);
+            } else {
+                self.news_calls.remove(&pane_id);
+            }
             self.note_call_order(pane_id);
         }
         for (pane_id, pane) in &mut self.panes {
@@ -87,6 +96,7 @@ impl MuxApp {
                         notices.push((*pane_id, said.clone()));
                     }
                     self.pane_calls.insert(*pane_id, call);
+                    self.news_calls.remove(pane_id);
                     called.push(*pane_id);
                 }
             }
@@ -223,6 +233,7 @@ impl MuxApp {
             && let Some(pane_id) = self.terminal_input_pane_id()
         {
             self.pane_calls.remove(&pane_id);
+            self.news_calls.remove(&pane_id);
         }
     }
 
@@ -230,6 +241,9 @@ impl MuxApp {
         let panes = &self.panes;
         self.pane_calls
             .retain(|pane_id, _| panes.contains_key(pane_id));
+        let calls = &self.pane_calls;
+        self.news_calls
+            .retain(|pane_id| calls.contains_key(pane_id));
     }
 
     pub(super) fn pane_call(&self, pane_id: PaneId) -> Option<&Attention> {
@@ -251,6 +265,34 @@ impl MuxApp {
             .or_else(|| calls.first())
             .copied()
     }
+
+    /// Whether a pane's call is only news, a program that finished cleanly.
+    pub(super) fn call_is_news(&self, pane_id: PaneId) -> bool {
+        self.news_calls.contains(&pane_id)
+    }
+
+    /// Whether every call from a tab's panes is only news, so the tab calls
+    /// in its own ink.
+    pub(super) fn tab_call_is_news(&self, tab: &mux_workspace::Tab) -> bool {
+        let mut panes = Vec::new();
+        tab.layout.pane_ids(&mut panes);
+        panes
+            .iter()
+            .filter(|pane_id| self.pane_calls.contains_key(pane_id))
+            .all(|pane_id| self.call_is_news(*pane_id))
+    }
+
+    /// The colour a call is shown in: the tab's ink for news, peach for
+    /// anything that wants you.
+    pub(super) fn call_color(news: bool, ink: Ink) -> Hsla {
+        if news { ink.color() } else { color(SIGNAL) }
+    }
+}
+
+/// Whether a program ended as it should, so its finishing is only news: with
+/// no failure, or stopped on purpose by Ctrl+C or a terminate signal.
+fn finished_cleanly(exit_status: Option<i32>) -> bool {
+    matches!(exit_status, None | Some(0 | 130 | 143))
 }
 
 /// What a long program finishing says: done, or failed with the status the
@@ -285,7 +327,17 @@ pub(super) fn call_words(call: &Attention) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{duration_words, finished_words};
+    use super::{duration_words, finished_cleanly, finished_words};
+
+    #[test]
+    fn a_program_that_ended_as_it_should_is_only_news() {
+        assert!(finished_cleanly(None));
+        assert!(finished_cleanly(Some(0)));
+        assert!(finished_cleanly(Some(130)));
+        assert!(finished_cleanly(Some(143)));
+        assert!(!finished_cleanly(Some(1)));
+        assert!(!finished_cleanly(Some(2)));
+    }
 
     #[test]
     fn a_finished_program_says_how_it_ended() {
