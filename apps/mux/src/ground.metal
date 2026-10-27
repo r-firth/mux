@@ -26,6 +26,9 @@ struct Frame {
     float4 rings[$most$];
     float4 ringing[2];
     float4 call_inks[$most$];
+    float4 running[$most$];
+    float4 running_light[2];
+    float4 running_inks[$most$];
     float4 tones[16];
     float4 old_tones[16];
     float4 ground;
@@ -105,6 +108,14 @@ static float cast(
         }
         signal += light;
         signal_ink += light * frame.call_inks[index].rgb;
+    }
+    // A tab out of sight with a program running breathes around its chip,
+    // in its own ink, in the calls' dots so it shows over a dark patch.
+    for (int index = 0; index < int(frame.counts.w); index++) {
+        float light = frame.running_light[index / 4][index % 4] * 0.45
+            * fall(outside(point, frame.running[index]), $busy_reach$);
+        signal += light;
+        signal_ink += light * frame.running_inks[index].rgb;
     }
     return own;
 }

@@ -3,10 +3,10 @@
 //! and counts up, by the second for its first minute and by the minute
 //! after, so a glance says whether it is still worth waiting for.
 //!
-//! A tab out of sight with a program running in one of its panes breathes
-//! its ink dot, as a tab whose agent is at work does, until the program
-//! ends. A full-screen program, such as an editor or a pager, is left out,
-//! so a tab with one parked in it stays still.
+//! A tab out of sight with a program running in one of its panes has the
+//! ground breathe around its chip, in its ink, until the program ends. A
+//! full-screen program, such as an editor or a pager, is left out, so a tab
+//! with one parked in it stays still.
 
 use super::*;
 
@@ -78,18 +78,6 @@ impl MuxApp {
                 .filter_map(|pane_id| self.panes.get(pane_id))
                 .map(|pane| (pane.program.as_deref(), pane.alternate_screen)),
         )
-    }
-
-    /// Whether a tab out of sight has a program running, so its dot needs
-    /// the pulse.
-    pub(super) fn a_tab_out_of_sight_is_running(&self) -> bool {
-        self.session.as_ref().is_some_and(|session| {
-            session
-                .tabs
-                .iter()
-                .filter(|tab| tab.id != session.active_tab)
-                .any(|tab| self.tab_running_program(tab).is_some())
-        })
     }
 
     /// Keep the clocks in the heads on screen going while any has a program

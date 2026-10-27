@@ -1230,7 +1230,7 @@ impl MuxApp {
                             | AgentSessionStatus::Authenticating
                             | AgentSessionStatus::Working
                     )
-                }) || self.a_tab_out_of_sight_is_running()))
+                })))
     }
 
     /// The pulse as an opacity, or a steady 1 when motion is reduced.
@@ -4364,7 +4364,7 @@ impl MuxApp {
         let call = self.tab_call(tab).filter(|_| !active);
         let named = self.tab_tooltip_name(tab, &label);
         // You are looking at the tab on screen, so only one out of sight
-        // breathes for its program.
+        // says what it runs.
         let running = self
             .tab_running_program(tab)
             .filter(|_| !active)
@@ -4415,15 +4415,14 @@ impl MuxApp {
             ));
         }
         // The tab's ink dot carries its agent's state: it breathes while an
-        // agent works, or a program runs in the tab out of sight, turns peach
-        // when one needs you (or a pane rang), and sage when one has finished
-        // out of sight.
+        // agent works, turns peach when one needs you (or a pane rang), and
+        // sage when one has finished out of sight. A program running in a tab
+        // out of sight is told by the ground around its chip instead.
         let news = self.tab_call_is_news(tab);
         let dot = match activity {
             Some(AgentTabActivity::Attention) => color(SIGNAL),
             _ if call.is_some() => Self::call_color(news, ink),
             Some(AgentTabActivity::Working) => ink.color().opacity(self.agent_pulse_level()),
-            _ if running.is_some() => ink.color().opacity(self.agent_pulse_level()),
             _ if unseen => color(SAGE),
             _ if active => ink.color(),
             _ => ink.color().opacity(0.72),

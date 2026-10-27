@@ -73,7 +73,7 @@ pub(super) struct GpuFrame {
     wake: [f32; 4],
     /// Where a new ink spreads from, how far it has got, whether one is.
     leaving: [f32; 4],
-    /// How many busy panes, callers and slabs follow.
+    /// How many busy panes, callers, slabs and running chips follow.
     counts: [f32; 4],
     /// Each slow field: where it is and how wide in points, how strong.
     blobs: [[f32; 4]; 8],
@@ -89,6 +89,11 @@ pub(super) struct GpuFrame {
     /// What each caller's brightest dot adds to the ground, from 0 to 1:
     /// peach for what wants you, its tab's ink for news.
     call_inks: [[f32; 4]; MOST],
+    /// The chips of tabs out of sight with a program running, how strongly
+    /// each breathes out, and what its tab's ink adds to the ground.
+    running: [[f32; 4]; MOST],
+    running_light: [[f32; 4]; 2],
+    running_inks: [[f32; 4]; MOST],
     /// What each level of each ink adds to the ground, from 0 to 1.
     tones: [[f32; 4]; 16],
     /// The same for an ink dissolving away.
@@ -190,6 +195,16 @@ impl Ground {
             }
         }
         frame.counts[1] = calls.len().min(MOST) as f32;
+        let running = Self::running(&laid);
+        for (index, (&(chip, strength), &(_, ink))) in
+            running.iter().zip(&scene.running).take(MOST).enumerate()
+        {
+            frame.running[index] = rect(chip);
+            frame.running_light[index / 4][index % 4] = strength;
+            let [r, g, b] = tone(ink.rgb(), CALL_LEVELS[3], saturation);
+            frame.running_inks[index] = [r / 255.0, g / 255.0, b / 255.0, 0.0];
+        }
+        frame.counts[3] = running.len().min(MOST) as f32;
         for (index, &slab) in scene.slabs.iter().take(SLABS).enumerate() {
             frame.slabs[index] = rect(slab);
         }
@@ -464,6 +479,7 @@ mod tests {
             chip: None,
             busy: vec![(pane, 1.0)],
             calls: Vec::new(),
+            running: Vec::new(),
             past: false,
             active: true,
             still: false,
@@ -519,6 +535,7 @@ mod tests {
                     ink: None,
                 },
             ],
+            running: Vec::new(),
             past: false,
             active: true,
             still: false,

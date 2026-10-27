@@ -11,7 +11,9 @@
 //! that rang or sent a notification, or an agent waiting on you, sends rings
 //! out through the grain until it is looked at; a tab out of sight rings from
 //! its chip. What wants you rings in peach, and a program that only finished
-//! cleanly in its tab's own ink. A pane showing its history cools the ground, and a new tab's ink
+//! cleanly in its tab's own ink. While a program runs in a tab out of sight,
+//! the grain around its chip breathes in that tab's ink, as a busy pane's
+//! edge does, more quietly. A pane showing its history cools the ground, and a new tab's ink
 //! dissolves in from its chip. With reduced motion the ground holds still,
 //! and its clock stops while the window is in the background.
 
@@ -87,6 +89,10 @@ const CHIP_GLOW: f32 = 22.0;
 /// breath takes, in seconds.
 const BUSY_REACH: f32 = 22.0;
 const BREATH: f32 = 2.8;
+/// How strongly the chip of a tab out of sight breathes while a program runs
+/// in it, against a busy pane's: quieter than a call or the active chip's
+/// glow, but lit in the call's dots, so it shows over a dark patch too.
+const RUNNING_LIGHT: f32 = 0.6;
 /// How long a pane must keep printing to count as busy, and how long after
 /// it stops it still breathes, in seconds.
 const BUSY_AFTER: f32 = 0.8;
@@ -243,12 +249,17 @@ impl Call {
     }
 }
 
-/// The one colour the calls in `calls` share, or peach when they differ:
-/// the grain worked out here has room for only one ink of calls at a time,
-/// and what wants you comes first.
-fn calls_rgb(calls: &[Call]) -> u32 {
-    match calls.split_first() {
-        Some((first, rest)) if rest.iter().all(|call| call.ink == first.ink) => first.rgb(),
+/// The one colour the calls and running chips in `scene` share, or peach
+/// when they differ: the grain worked out here has room for only one ink of
+/// calls at a time, and what wants you comes first.
+fn calls_rgb(scene: &Scene) -> u32 {
+    let mut inks = scene
+        .calls
+        .iter()
+        .map(|call| call.ink)
+        .chain(scene.running.iter().map(|&(_, ink)| Some(ink)));
+    match inks.next() {
+        Some(first) if inks.all(|ink| ink == first) => first.map_or(SIGNAL, Ink::rgb),
         _ => SIGNAL,
     }
 }
@@ -271,6 +282,8 @@ pub(super) struct Scene {
     /// Panes busy printing, and how busy, from 0 to 1.
     pub(super) busy: Vec<(layout::Rect, f32)>,
     pub(super) calls: Vec<Call>,
+    /// The chips of tabs out of sight with a program running, and their inks.
+    pub(super) running: Vec<(layout::Rect, Ink)>,
     /// Whether the focused pane is showing its history.
     pub(super) past: bool,
     /// Whether the window is in front.
@@ -565,6 +578,9 @@ pub(super) struct Field {
     /// Busy panes, and how strongly each breathes out this step.
     busy: Vec<(layout::Rect, f32)>,
     calls: Vec<Ringing>,
+    /// Chips of tabs out of sight with a program running, and how strongly
+    /// each breathes out this step.
+    running: Vec<(layout::Rect, f32)>,
     leaving: Option<Leaving>,
     /// The tide's clock, in seconds and in steps; `None` holds it still.
     tide: Option<(f32, u64)>,
@@ -677,6 +693,11 @@ impl Field {
         }
         for &(rect, strength) in &self.busy {
             self.around(rect, y, (0.0, BUSY_REACH), from, own, |distance| {
+                strength * 0.45 * fall(distance, BUSY_REACH)
+            });
+        }
+        for &(chip, strength) in &self.running {
+            self.around(chip, y, (0.0, BUSY_REACH), from, signal, |distance| {
                 strength * 0.45 * fall(distance, BUSY_REACH)
             });
         }
@@ -1259,6 +1280,17 @@ impl Ground {
             .collect()
     }
 
+    /// The chips of tabs out of sight with a program running, and how
+    /// strongly each breathes out at `laid`'s step.
+    fn running(laid: &Laid) -> Vec<(layout::Rect, f32)> {
+        let breath = RUNNING_LIGHT * Self::breath(laid);
+        laid.scene
+            .running
+            .iter()
+            .map(|&(chip, _)| (chip, breath))
+            .collect()
+    }
+
     /// The grain for `laid`: its field, and with `runs` the lit cells of the
     /// whole window too, for drawing here rather than on the GPU.
     fn grain(&mut self, laid: &Laid, runs: bool) -> Grain {
@@ -1275,7 +1307,7 @@ impl Ground {
             }
         };
         let saturation = 1.0 - 0.4 * laid.past;
-        let calls = calls_rgb(&scene.calls);
+        let calls = calls_rgb(scene);
         let mut shades = Vec::with_capacity(512);
         Palette::new(scene.ink, calls, saturation).shades(&mut shades);
         if let Some((from, _, _)) = laid.dissolve {
@@ -1289,6 +1321,7 @@ impl Ground {
             chip: scene.chip,
             busy: Self::busy(laid),
             calls: self.ringing(laid),
+            running: Self::running(laid),
             leaving: laid
                 .dissolve
                 .map(|(_, origin, reached)| Leaving::new(origin, reached)),
@@ -1547,7 +1580,8 @@ impl MuxApp {
                 past = true;
             }
         }
-        let chip = self.ground_chips(&mut calls);
+        let mut running = Vec::new();
+        let chip = self.ground_chips(&mut calls, &mut running);
         Scene {
             viewport: (f32::from(viewport.width), f32::from(viewport.height)),
             ink: self.active_ink(),
@@ -1558,6 +1592,7 @@ impl MuxApp {
             chip,
             busy,
             calls,
+            running,
             past,
             active: window.is_window_active(),
             still: self.motion == MotionPreference::Reduced,
@@ -1565,8 +1600,12 @@ impl MuxApp {
     }
 
     /// Where the active tab's chip is, adding a call from each tab out of
-    /// sight that is calling.
-    fn ground_chips(&self, calls: &mut Vec<Call>) -> Option<layout::Rect> {
+    /// sight that is calling, and the chip of each with a program running.
+    fn ground_chips(
+        &self,
+        calls: &mut Vec<Call>,
+        running: &mut Vec<(layout::Rect, Ink)>,
+    ) -> Option<layout::Rect> {
         let session = self.session.as_ref()?;
         let scrolled = self.tab_strip_scroll.offset();
         let mut chip = None;
@@ -1588,6 +1627,9 @@ impl MuxApp {
                             | AgentSessionStatus::WaitingForAuthentication
                     )
             });
+            if self.tab_running_program(tab).is_some() {
+                running.push((rect, self.tab_ink(tab.id)));
+            }
             if agent_calls || self.tab_call(tab).is_some() {
                 calls.push(Call {
                     caller: Caller::Tab(tab.id),
@@ -1706,6 +1748,7 @@ mod tests {
             chip: None,
             busy: Vec::new(),
             calls: Vec::new(),
+            running: Vec::new(),
             past: false,
             active: true,
             still: false,
@@ -1894,8 +1937,61 @@ mod tests {
             reach: CHIP_REACH,
             ink,
         });
-        assert_eq!(calls_rgb(&mixed), SIGNAL);
-        assert_eq!(calls_rgb(&mixed[..1]), Ink::Teal.rgb());
+        let mut both = quiet.clone();
+        both.calls = mixed.to_vec();
+        assert_eq!(calls_rgb(&both), SIGNAL);
+        both.calls.truncate(1);
+        assert_eq!(calls_rgb(&both), Ink::Teal.rgb());
+        // A running chip in the same ink as the call shares it.
+        both.running = vec![(rect(0.0, 0.0, 1.0, 1.0), Ink::Teal)];
+        assert_eq!(calls_rgb(&both), Ink::Teal.rgb());
+    }
+
+    #[test]
+    fn a_tab_out_of_sight_running_a_program_breathes_around_its_chip() {
+        let epoch = Instant::now();
+        let mut quiet = scene();
+        quiet.ink = Ink::Rose;
+        quiet.focus = None;
+        let chip = rect(300.0, 6.0, 60.0, 24.0);
+        let mut running = quiet.clone();
+        running.running = vec![(chip, Ink::Teal)];
+        // The colours a cell lit in the calls' dots can show, in teal.
+        let mut shades = Vec::new();
+        Palette::new(Ink::Rose, Ink::Teal.rgb(), 1.0).shades(&mut shades);
+        let teal = (0..256)
+            .filter(|mix| (mix >> 6) & 3 != 0)
+            .map(|mix| shades[mix])
+            .collect::<Vec<_>>();
+        let around = rect(280.0, 0.0, 100.0, 40.0);
+        let lit_teal = |grain: &Grain| {
+            grain
+                .lit()
+                .filter(|&(x, y, color)| {
+                    x >= around.x
+                        && x < around.x + around.width
+                        && y >= around.y
+                        && y < around.y + around.height
+                        && teal.contains(&color)
+                })
+                .count()
+        };
+        let mut ground = Ground::new(epoch);
+        // Midway through a breath, at its fullest.
+        let full = epoch + Duration::from_millis(1_400);
+        let breathing = ground.lay(running.clone(), full);
+        assert!(lit_teal(&breathing) > 0);
+        // Nowhere near the chip, nothing changes.
+        let far = rect(0.0, 300.0, 10.0, 150.0);
+        let base = Ground::new(epoch).lay(quiet.clone(), full);
+        assert!((density(&breathing, far) - density(&base, far)).abs() < 0.01);
+        // Once the program ends, the chip is quiet.
+        let stopped = ground.lay(quiet, full + Duration::from_millis(4));
+        assert_eq!(lit_teal(&stopped), 0);
+        // Held still, it still shows.
+        let mut still = running;
+        still.still = true;
+        assert!(lit_teal(&Ground::new(epoch).lay(still, full)) > 0);
     }
 
     #[test]
@@ -2089,6 +2185,7 @@ mod tests {
                 reach: PANE_REACH,
                 ink: None,
             }],
+            running: Vec::new(),
             past: false,
             active: true,
             still: false,
