@@ -9,7 +9,7 @@ cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Native product checks also require Zig 0.16.0:
+Native product checks also require Zig 0.17.0:
 
 ```sh
 MUX_ZIG=/path/to/zig cargo test -p mux --features product --all-targets

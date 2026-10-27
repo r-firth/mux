@@ -1,18 +1,18 @@
 #!/bin/sh
 set -eu
 
-version=0.16.0
+version=0.17.0
 architecture=${1:-$(uname -m)}
 destination=${2:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/mux-zig-$version}
 
 case "$architecture" in
   arm64 | aarch64)
     archive_arch=aarch64
-    checksum=b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489
+    checksum=b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a
     ;;
   x86_64 | amd64)
     archive_arch=x86_64
-    checksum=0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7
+    checksum=4f9a1c5269aa17ebda5e6d3c2b89d6cbf36f7d2b22a0306e9ab98f25f95529c6
     ;;
   *)
     echo "unsupported macOS architecture: $architecture" >&2

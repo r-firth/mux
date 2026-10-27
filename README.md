@@ -53,7 +53,7 @@ Mux currently targets macOS. Download the Apple Silicon or Intel build from
 and move `Mux.app` to Applications.
 
 To build the current source, install the Xcode command-line tools and clone the
-repository. The build script fetches the pinned Zig 0.16.0 toolchain when
+repository. The build script fetches the pinned Zig 0.17.0 toolchain when
 needed:
 
 ```sh

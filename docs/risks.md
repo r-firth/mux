@@ -12,10 +12,10 @@ versioned independently and the C API is a work in progress:
 - <https://ghostty.org/docs/install/release-notes/1-3-0#libghostty>
 
 The released `v1.3.1` C surface does not yet expose the complete terminal,
-render-state, and snapshot APIs required by this architecture. Ghostty commit
-`b2fa2931b6599f7e32a7c547b3f5520ac3333881` does expose them. We built that
-commit successfully on Apple Silicon with Zig 0.16.0 and verified these exported
-symbols:
+render-state, and snapshot APIs required by this architecture. Ghostty `v1.4.0`
+(commit `ce787fc18a7782e81585beb63f0d905ccaf69284`) does expose them. We built
+that commit successfully on Apple Silicon with Zig 0.17.0 and verified these
+exported symbols:
 
 ```text
 ghostty_terminal_new
