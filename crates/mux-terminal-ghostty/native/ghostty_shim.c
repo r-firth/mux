@@ -521,6 +521,42 @@ int32_t mux_ghostty_terminal_mouse_shape(
   return (int32_t)GHOSTTY_SUCCESS;
 }
 
+/* One bounded step of compressing the terminal's scrollback, for when its
+ * pane has gone quiet. `out_pending` says whether another step has work. */
+int32_t mux_ghostty_terminal_compress_step(
+    mux_ghostty_terminal_t terminal,
+    bool *out_pending) {
+  if (terminal == NULL || out_pending == NULL) {
+    return (int32_t)GHOSTTY_INVALID_VALUE;
+  }
+  GhosttyTerminalCompressionResult compression =
+      GHOSTTY_TERMINAL_COMPRESSION_RESULT_COMPLETE;
+  GhosttyResult result = ghostty_terminal_compress(
+      (GhosttyTerminal)terminal, GHOSTTY_TERMINAL_COMPRESSION_MODE_INCREMENTAL,
+      &compression);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+  *out_pending = compression == GHOSTTY_TERMINAL_COMPRESSION_RESULT_PENDING;
+  return (int32_t)GHOSTTY_SUCCESS;
+}
+
+/* The bytes of memory the terminal holds: both screens and their images,
+ * with compressed history counted at its compressed size. */
+int32_t mux_ghostty_terminal_memory_bytes(
+    mux_ghostty_terminal_t terminal,
+    uint64_t *out_bytes) {
+  if (terminal == NULL || out_bytes == NULL) {
+    return (int32_t)GHOSTTY_INVALID_VALUE;
+  }
+  GhosttyTerminalMemoryUsage usage =
+      GHOSTTY_INIT_SIZED(GhosttyTerminalMemoryUsage);
+  GhosttyResult result = ghostty_terminal_get(
+      (GhosttyTerminal)terminal, GHOSTTY_TERMINAL_DATA_MEMORY_USAGE, &usage);
+  if (result != GHOSTTY_SUCCESS) return (int32_t)result;
+  *out_bytes = usage.primary_resident_bytes + usage.primary_image_bytes +
+               usage.alternate_resident_bytes + usage.alternate_image_bytes;
+  return (int32_t)GHOSTTY_SUCCESS;
+}
+
 int32_t mux_ghostty_terminal_enable_responses(
     mux_ghostty_terminal_t raw_terminal,
     mux_ghostty_response_collector_t raw_collector,
@@ -738,6 +774,17 @@ int32_t mux_ghostty_terminal_restore(
   GhosttyResult result = ghostty_snapshot_decoder_new_buf(
       NULL, &decoder, snapshot, snapshot_len);
   if (result != GHOSTTY_SUCCESS) {
+    return (int32_t)result;
+  }
+
+  /* History comes back compressed, a page at a time, so restoring a pane
+   * with a long history never holds all of it uncompressed. */
+  bool compress_history = true;
+  result = ghostty_snapshot_decoder_set(
+      decoder, GHOSTTY_SNAPSHOT_DECODER_OPT_COMPRESS_HISTORY,
+      &compress_history);
+  if (result != GHOSTTY_SUCCESS) {
+    ghostty_snapshot_decoder_free(decoder);
     return (int32_t)result;
   }
 

@@ -665,6 +665,13 @@ pub trait TerminalEngine: Send {
         None
     }
 
+    /// One bounded step of compressing the history of a terminal gone
+    /// quiet. Returns whether another step has work to do; engines that
+    /// cannot compress have none.
+    fn compress_history_step(&mut self) -> bool {
+        false
+    }
+
     /// Return the emulator to legacy keyboard encoding without advancing the
     /// PTY output sequence. Callers must mirror the control sequence to every
     /// render replica as part of the current ordered output event.

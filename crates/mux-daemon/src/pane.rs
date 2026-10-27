@@ -31,6 +31,9 @@ const OUTPUT_STREAM_GAP: Duration = Duration::from_millis(2);
 /// How long output after a lull waits for more: long enough that a screen
 /// drawn in one go is sent whole, short enough not to hold up a key's echo.
 const OUTPUT_LULL_IDLE: Duration = Duration::from_micros(150);
+/// How long a pane is quiet before its history is compressed, so the work
+/// never lands while a program is printing.
+const HISTORY_COMPRESSION_IDLE: Duration = Duration::from_secs(5);
 /// Home, erase the screen, erase the history.
 const CLEAR_SCREEN_AND_HISTORY: &[u8] = b"\x1b[H\x1b[2J\x1b[3J";
 const CLEAR_HISTORY: &[u8] = b"\x1b[3J";
@@ -89,7 +92,30 @@ impl PaneOutputWorker {
     fn run(self, output_receiver: &Receiver<Vec<u8>>) {
         let mut foreground = ForegroundProcessTracker::new(self.shell_process_id);
         let mut last_batch: Option<Instant> = None;
-        while let Ok(first) = output_receiver.recv() {
+        let mut compression_owed = false;
+        loop {
+            let first = if compression_owed {
+                match output_receiver.recv_timeout(HISTORY_COMPRESSION_IDLE) {
+                    Ok(first) => first,
+                    Err(RecvTimeoutError::Timeout) => {
+                        match self.compress_history(output_receiver) {
+                            Ok(first) => first,
+                            Err(TryRecvError::Empty) => {
+                                compression_owed = false;
+                                continue;
+                            }
+                            Err(TryRecvError::Disconnected) => break,
+                        }
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            } else {
+                match output_receiver.recv() {
+                    Ok(first) => first,
+                    Err(_) => break,
+                }
+            };
+            compression_owed = true;
             // Output after a lull, such as the echo of a key, goes out almost
             // at once, with the rest of the screen if more is being drawn.
             // Output that keeps coming waits a moment for more, so a flood is
@@ -141,6 +167,23 @@ impl PaneOutputWorker {
                 break;
             }
         }
+    }
+
+    /// Compress the quiet pane's history a step at a time, letting go of
+    /// the terminal between steps, until it is done or output arrives.
+    /// Gives back output that arrived, which leaves the rest for the next
+    /// quiet spell, and `Empty` once the history is done.
+    fn compress_history(
+        &self,
+        output_receiver: &Receiver<Vec<u8>>,
+    ) -> Result<Vec<u8>, TryRecvError> {
+        while self.terminal.lock().compress_history_step() {
+            match output_receiver.try_recv() {
+                Err(TryRecvError::Empty) => {}
+                arrived => return arrived,
+            }
+        }
+        output_receiver.try_recv()
     }
 
     fn apply_terminal_output(

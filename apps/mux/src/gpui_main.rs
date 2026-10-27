@@ -16,6 +16,7 @@ mod file_drop;
 mod find;
 mod gpui_terminal;
 mod ground;
+mod history_compression;
 mod ime;
 mod layout;
 mod links;
@@ -301,6 +302,10 @@ struct PaneReplica {
     redraw_at: Option<Instant>,
     /// The pointer the pane's program asked for, as of its last frame.
     mouse_shape: MouseShape,
+    /// When output last arrived, and whether the history has had any since
+    /// it was last compressed.
+    output_at: Instant,
+    compression_owed: bool,
 }
 
 fn next_frame_serial() -> u64 {
@@ -342,6 +347,8 @@ impl PaneReplica {
             secret_input: false,
             redraw_at: None,
             mouse_shape: MouseShape::default(),
+            output_at: Instant::now(),
+            compression_owed: false,
         }
     }
 
@@ -409,6 +416,8 @@ impl PaneReplica {
             });
         }
         self.title.scan(&bytes);
+        self.output_at = Instant::now();
+        self.compression_owed = true;
         if bytes.len() <= pane_parser::PARSE_IN_PLACE_BYTES
             && let Some(mut engine) = self.engine.try_lock()
             && engine.next_output_sequence() == sequence
@@ -733,6 +742,9 @@ struct MuxApp {
     /// agent is starting, working or waiting, so an idle pane costs nothing.
     agent_pulse: u8,
     agent_pulse_running: bool,
+    /// When the timer that compresses quiet panes' history started, while
+    /// it runs.
+    history_compression_since: Option<Instant>,
     /// Whether each profile's launcher was found on this machine.
     agent_availability: HashMap<String, bool>,
     /// The launcher's chosen agent while no agent runs in the tab.
@@ -964,6 +976,7 @@ impl MuxApp {
             agent_context: AgentContextMode::Tab,
             agent_pulse: 0,
             agent_pulse_running: false,
+            history_compression_since: None,
             agent_availability: HashMap::new(),
             launcher_choice: None,
             launcher_copied: None,
@@ -1144,6 +1157,7 @@ impl MuxApp {
         self.ensure_cursor_blink(cx);
         self.ensure_run_clock(cx);
         self.ensure_selection_scroll(cx);
+        self.ensure_history_compression(cx);
     }
 
     fn ensure_agent_pulse(&mut self, cx: &mut Context<Self>) {

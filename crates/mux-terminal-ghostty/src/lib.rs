@@ -712,6 +712,9 @@ mod linked {
             out_status: *mut CProgramStatus,
         ) -> bool;
         fn mux_ghostty_terminal_mouse_shape(terminal: *mut c_void, out_shape: *mut u8) -> i32;
+        fn mux_ghostty_terminal_compress_step(terminal: *mut c_void, out_pending: *mut bool)
+        -> i32;
+        fn mux_ghostty_terminal_memory_bytes(terminal: *mut c_void, out_bytes: *mut u64) -> i32;
         fn mux_ghostty_renderer_images(
             renderer: *mut c_void,
             out_placements: *mut *const CImagePlacement,
@@ -1140,6 +1143,10 @@ mod linked {
             Self::screen_text(self).ok()
         }
 
+        fn compress_history_step(&mut self) -> bool {
+            Self::compress_history_step(self).unwrap_or(false)
+        }
+
         fn next_output_sequence(&self) -> u64 {
             self.next_sequence
         }
@@ -1449,6 +1456,31 @@ mod linked {
                 title: text(&status.title, status.title_len.into()),
                 message: text(&status.message, status.message_len.into()),
             })
+        }
+
+        /// One bounded step of compressing the terminal's history, for a
+        /// pane gone quiet. Returns whether another step has work to do.
+        /// History read back later, as by scrolling, is uncompressed again.
+        pub fn compress_history_step(&mut self) -> Result<bool, GhosttyError> {
+            let mut pending = false;
+            // SAFETY: the terminal is owned and borrowed mutably for the call.
+            let result = unsafe {
+                mux_ghostty_terminal_compress_step(self.terminal.as_ptr(), &raw mut pending)
+            };
+            check(result)?;
+            Ok(pending)
+        }
+
+        /// The bytes of memory the terminal holds, history at its compressed
+        /// size and images included.
+        pub fn memory_bytes(&self) -> Result<u64, GhosttyError> {
+            let mut bytes = 0_u64;
+            // SAFETY: the terminal is borrowed for this read-only query.
+            let result = unsafe {
+                mux_ghostty_terminal_memory_bytes(self.terminal.as_ptr(), &raw mut bytes)
+            };
+            check(result)?;
+            Ok(bytes)
         }
 
         /// The pointer shape the program asked for over its pane (OSC 22).
@@ -2368,6 +2400,27 @@ mod linked {
                 .apply_output(3, b"\x1b]7501;state=working:id=build:progress=5\x07")
                 .expect("record");
             assert!(engine.take_program_status().is_none());
+        }
+
+        #[test]
+        fn quiet_history_compresses_and_still_reads_back() {
+            let mut engine = sized_engine(80, 24);
+            let mut output = Vec::new();
+            for line in 0..5_000 {
+                output.extend_from_slice(format!("line {line} of repeated history\r\n").as_bytes());
+            }
+            engine.apply_output(1, &output).expect("output");
+            let before = engine.memory_bytes().expect("memory before");
+            let mut steps = 0;
+            while engine.compress_history_step().expect("compress") {
+                steps += 1;
+                assert!(steps < 100_000, "compression never finished");
+            }
+            let after = engine.memory_bytes().expect("memory after");
+            assert!(after <= before, "{after} bytes after, {before} before");
+            let text = engine.screen_text().expect("history");
+            assert!(text.contains("line 0 of repeated history"));
+            assert!(text.contains("line 4999 of repeated history"));
         }
 
         #[test]
