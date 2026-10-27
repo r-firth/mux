@@ -358,17 +358,16 @@ impl PaneReplica {
     }
 
     /// The program in front of the shell, when the pane's title doesn't
-    /// already name it. Shells that don't set a title while a program runs,
-    /// as macOS's zsh doesn't, would otherwise leave the pane named for its
-    /// directory; a program that sets its own title, as an editor does, is
-    /// left to say it.
+    /// already say what is running. Shells that don't set a title while a
+    /// program runs, as macOS's zsh doesn't, would otherwise leave the pane
+    /// named for its directory; a program that sets its own title, as an
+    /// editor or Codex does, is left to say it.
     fn untitled_program(&self) -> Option<&str> {
         let program = self.program.as_deref()?;
-        let named = self.title.title().is_some_and(|title| {
-            title
-                .to_lowercase()
-                .contains(program.to_lowercase().as_str())
-        });
+        let named = self
+            .title
+            .title()
+            .is_some_and(|title| chrome::title_says_what_runs(title, program));
         (!named).then_some(program)
     }
 

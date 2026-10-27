@@ -223,6 +223,14 @@ pub fn is_path(place: &str) -> bool {
         && !place.contains(char::is_whitespace)
 }
 
+/// Whether a pane's title says what is running in it: it names the program,
+/// or is anything but the directory a shell titles its pane with, as the
+/// command line a shell's integration shows or a title the program set.
+#[must_use]
+pub fn title_says_what_runs(title: &str, program: &str) -> bool {
+    title.to_lowercase().contains(&program.to_lowercase()) || !is_path(terminal_place(title))
+}
+
 /// A tab-sized name for a terminal title: the last component of a directory,
 /// or the command that is running, cut to fit.
 #[must_use]
@@ -310,6 +318,19 @@ mod tests {
         assert_eq!(terminal_place("me@box: ~/projects/mux"), "~/projects/mux");
         assert_eq!(terminal_place("nvim layout.rs"), "nvim layout.rs");
         assert_eq!(terminal_place("ssh me@box: test"), "ssh me@box: test");
+    }
+
+    #[test]
+    fn a_title_other_than_a_directory_says_what_runs() {
+        assert!(title_says_what_runs(
+            "Wait 10 seconds | swarm-frontend",
+            "node"
+        ));
+        assert!(title_says_what_runs("cargo test", "cargo"));
+        assert!(title_says_what_runs("~/src/node-app", "node"));
+        assert!(!title_says_what_runs("~/src", "node"));
+        assert!(!title_says_what_runs("ryan@mac:~/projects", "node"));
+        assert!(!title_says_what_runs("…/mux/crates/mux-daemon", "sleep"));
     }
 
     #[test]
