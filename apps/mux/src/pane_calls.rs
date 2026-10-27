@@ -11,8 +11,10 @@
 //! ends in a pane out of sight, or while mux is in the background, says it
 //! is done and how long it took, or that it failed when the shell's marks
 //! say it did, once it has run for ten seconds or more. One that ended as it
-//! should is only news, so it calls in its tab's own ink rather than peach,
-//! its dot, words and rings alike; peach is kept for what wants you.
+//! should is only news, as is a program saying it is done (OSC 7501), so it
+//! calls in its tab's own ink rather than peach, its dot, words and rings
+//! alike. Peach is kept for what wants you, and a bell rung after news turns
+//! it peach.
 //!
 //! A bell in the pane you are looking at has nothing to mark, so the pane
 //! flashes instead, washed for a moment in its tab's ink.
@@ -77,7 +79,7 @@ impl MuxApp {
             self.note_call_order(pane_id);
         }
         for (pane_id, pane) in &mut self.panes {
-            let Some(call) = pane.title.take_attention() else {
+            let Some((call, news)) = pane.title.take_call() else {
                 continue;
             };
             if Some(*pane_id) == watched {
@@ -86,20 +88,23 @@ impl MuxApp {
                 }
                 continue;
             }
-            match (self.pane_calls.get(pane_id), call) {
-                // A bell rung after a notification adds nothing to it.
-                (Some(Attention::Notification(_)), Attention::Bell) => {}
-                (previous, call) => {
-                    fresh |= previous.is_none();
-                    changed |= previous != Some(&call);
-                    if let Attention::Notification(said) = &call {
-                        notices.push((*pane_id, said.clone()));
-                    }
-                    self.pane_calls.insert(*pane_id, call);
-                    self.news_calls.remove(pane_id);
-                    called.push(*pane_id);
-                }
+            let previous = self.pane_calls.get(pane_id);
+            let was_news = self.news_calls.contains(pane_id);
+            // A program's own notification goes to Notification Center; a
+            // bell under words already there says nothing new.
+            if let Attention::Notification(said) = &call {
+                notices.push((*pane_id, said.clone()));
             }
+            let (call, news) = next_call(previous, call, news);
+            fresh |= previous.is_none();
+            changed |= previous != Some(&call) || was_news != news;
+            self.pane_calls.insert(*pane_id, call);
+            if news {
+                self.news_calls.insert(*pane_id);
+            } else {
+                self.news_calls.remove(pane_id);
+            }
+            called.push(*pane_id);
         }
         for pane_id in called {
             self.note_call_order(pane_id);
@@ -289,6 +294,16 @@ impl MuxApp {
     }
 }
 
+/// What a pane calls with once `call` comes after the call it has, and
+/// whether that is only news. A bell rung after a notification adds nothing
+/// to its words, but it wants you, so the call is no longer news.
+fn next_call(previous: Option<&Attention>, call: Attention, news: bool) -> (Attention, bool) {
+    match (previous, call) {
+        (Some(said @ Attention::Notification(_)), Attention::Bell) => (said.clone(), false),
+        (_, call) => (call, news),
+    }
+}
+
 /// Whether a program ended as it should, so its finishing is only news: with
 /// no failure, or stopped on purpose by Ctrl+C or a terminate signal.
 fn finished_cleanly(exit_status: Option<i32>) -> bool {
@@ -327,7 +342,27 @@ pub(super) fn call_words(call: &Attention) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{duration_words, finished_cleanly, finished_words};
+    use super::{duration_words, finished_cleanly, finished_words, next_call};
+    use mux_terminal::Attention;
+
+    #[test]
+    fn a_bell_after_news_keeps_its_words_but_wants_you() {
+        let done = Attention::Notification("cargo is done".to_owned());
+        assert_eq!(
+            next_call(Some(&done), Attention::Bell, false),
+            (done.clone(), false)
+        );
+        assert_eq!(next_call(None, done.clone(), true), (done.clone(), true));
+        let failed = Attention::Notification("cargo failed".to_owned());
+        assert_eq!(
+            next_call(Some(&done), failed.clone(), false),
+            (failed, false)
+        );
+        assert_eq!(
+            next_call(Some(&Attention::Bell), done.clone(), true),
+            (done, true)
+        );
+    }
 
     #[test]
     fn a_program_that_ended_as_it_should_is_only_news() {

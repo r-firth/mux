@@ -10,12 +10,13 @@
 //! with focus. It breathes along the edge of a pane busy printing. A pane
 //! that rang or sent a notification, or an agent waiting on you, sends rings
 //! out through the grain until it is looked at; a tab out of sight rings from
-//! its chip. What wants you rings in peach, and a program that only finished
-//! cleanly in its tab's own ink. While a program runs in a tab out of sight,
-//! the grain around its chip breathes in that tab's ink, as a busy pane's
-//! edge does, more quietly. A pane showing its history cools the ground, and a new tab's ink
-//! dissolves in from its chip. With reduced motion the ground holds still,
-//! and its clock stops while the window is in the background.
+//! its chip. What wants you rings in peach, and news, a program that
+//! finished cleanly or said it is done, in its tab's own ink. While a program
+//! runs in a tab out of sight, the grain around its chip breathes in that
+//! tab's ink, as a busy pane's edge does, more quietly. A pane showing its
+//! history cools the ground, and a new tab's ink dissolves in from its chip.
+//! With reduced motion the ground holds still, and its clock stops while the
+//! window is in the background.
 
 use super::*;
 use gpui::{AnyElement, Edges, Pixels, canvas, fill};

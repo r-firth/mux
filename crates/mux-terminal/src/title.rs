@@ -17,6 +17,9 @@ pub struct TitleScanner {
     /// titled the pane with the command it runs.
     previous_title: Option<String>,
     attention: Option<Attention>,
+    /// Whether that call is only news, a program saying it is done, rather
+    /// than something that wants the user.
+    attention_is_news: bool,
     copied: Option<String>,
     /// The clipboard a program last asked to read with OSC 52, as it named it.
     read_asked: Option<String>,
@@ -157,7 +160,14 @@ impl TitleScanner {
     /// What the program has asked to be noticed by since this was last
     /// called. A notification outranks a bell rung alongside it.
     pub fn take_attention(&mut self) -> Option<Attention> {
-        self.attention.take()
+        self.take_call().map(|(call, _)| call)
+    }
+
+    /// The same, with whether the call is only news: a program saying with
+    /// OSC 7501 that it is done, with nothing since that wants the user.
+    pub fn take_call(&mut self) -> Option<(Attention, bool)> {
+        let news = std::mem::take(&mut self.attention_is_news);
+        self.attention.take().map(|call| (call, news))
     }
 
     /// How far along the program last said it was, if it has said since
@@ -238,6 +248,8 @@ impl TitleScanner {
                     if self.attention.is_none() {
                         self.attention = Some(Attention::Bell);
                     }
+                    // A bell wants the user, whatever was said before it.
+                    self.attention_is_news = false;
                     TitleScan::Ground
                 }
                 (TitleScan::Title, ESC) => TitleScan::TitleEscape,
@@ -346,6 +358,7 @@ impl TitleScanner {
             }
         };
         let said = said.split_whitespace().collect::<Vec<_>>().join(" ");
+        self.attention_is_news = false;
         self.attention = Some(if said.is_empty() {
             Attention::Bell
         } else {
@@ -388,6 +401,7 @@ impl TitleScanner {
                 if let Some(percent) = status.progress {
                     self.progress = Some(Progress::Paused(percent));
                 }
+                self.attention_is_news = false;
                 self.attention = Some(said(match status.need {
                     Some(ProgramNeed::Permission) => format!("{name} wants your permission"),
                     Some(ProgramNeed::Question) => format!("{name} has a question"),
@@ -398,9 +412,11 @@ impl TitleScanner {
             ProgramState::Done => {
                 self.progress = Some(Progress::Removed);
                 self.attention = Some(said(format!("{name} is done")));
+                self.attention_is_news = true;
             }
             ProgramState::Error => {
                 self.progress = Some(Progress::Error(status.progress.unwrap_or(100)));
+                self.attention_is_news = false;
                 self.attention = Some(said(format!("{name} failed")));
             }
             ProgramState::Idle | ProgramState::Clear => self.progress = Some(Progress::Removed),
@@ -546,6 +562,35 @@ mod tests {
             title: String::new(),
             message: String::new(),
         }
+    }
+
+    #[test]
+    fn a_program_saying_it_is_done_is_only_news() {
+        use crate::ProgramState;
+        let mut scanner = TitleScanner::default();
+        scanner.note_program_status(&status(ProgramState::Done));
+        assert_eq!(
+            scanner.take_call(),
+            Some((Attention::Notification("cargo is done".to_owned()), true))
+        );
+        for state in [ProgramState::Blocked, ProgramState::Error] {
+            scanner.note_program_status(&status(state));
+            assert!(matches!(scanner.take_call(), Some((_, false))));
+        }
+        // A bell after it wants you, though the words stay.
+        scanner.note_program_status(&status(ProgramState::Done));
+        scanner.scan(b"\x07");
+        assert_eq!(
+            scanner.take_call(),
+            Some((Attention::Notification("cargo is done".to_owned()), false))
+        );
+        // So does a notification.
+        scanner.note_program_status(&status(ProgramState::Done));
+        scanner.scan(b"\x1b]9;look\x07");
+        assert_eq!(
+            scanner.take_call(),
+            Some((Attention::Notification("look".to_owned()), false))
+        );
     }
 
     #[test]
