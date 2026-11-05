@@ -2610,18 +2610,20 @@ impl MuxApp {
             Action::ResizePane(direction) => {
                 self.send_workspace(WorkspaceCommand::ResizePane(direction));
             }
+            // ⌃p x closes the pane at once, whatever is running in it. A
+            // tab's only pane closes the tab.
             Action::ClosePane => {
-                // A tab's only pane closes the tab.
                 let lone = self
                     .session
                     .as_ref()
                     .and_then(Session::active_tab)
                     .filter(|tab| matches!(tab.layout, mux_workspace::PaneLayout::Leaf(_)))
                     .map(|tab| tab.id);
-                if let Some(tab_id) = lone {
-                    self.request_close(CloseTarget::Tab(tab_id));
-                } else if let Some(pane_id) = self.focused_pane_id() {
-                    self.request_close(CloseTarget::Pane(pane_id));
+                let target = lone
+                    .map(CloseTarget::Tab)
+                    .or_else(|| self.focused_pane_id().map(CloseTarget::Pane));
+                if let Some(target) = target {
+                    self.close_without_asking(target);
                 }
             }
             Action::TogglePaneZoom => self.send_workspace(WorkspaceCommand::TogglePaneZoom),
@@ -2629,10 +2631,7 @@ impl MuxApp {
             // ⌃t x closes the tab at once, whatever is running in it.
             Action::CloseTab => {
                 if let Some(tab_id) = self.active_tab_id() {
-                    if self.close_armed.take().is_some() {
-                        self.strip_message = None;
-                    }
-                    self.close_now(CloseTarget::Tab(tab_id));
+                    self.close_without_asking(CloseTarget::Tab(tab_id));
                 }
             }
             Action::RenameTab => self.open_rename_tab(window, cx),
@@ -2746,6 +2745,15 @@ impl MuxApp {
             true,
             cx,
         );
+    }
+
+    /// Close the pane or tab from the keys, whatever is running in it,
+    /// clearing a warning a mouse close left in the strip.
+    fn close_without_asking(&mut self, target: CloseTarget) {
+        if self.close_armed.take().is_some() {
+            self.strip_message = None;
+        }
+        self.close_now(target);
     }
 
     /// Close the pane or tab, if it is still the one with the keys.
