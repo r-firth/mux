@@ -2626,9 +2626,13 @@ impl MuxApp {
             }
             Action::TogglePaneZoom => self.send_workspace(WorkspaceCommand::TogglePaneZoom),
             Action::NewTab => self.send_workspace(WorkspaceCommand::NewTab),
+            // ⌃t x closes the tab at once, whatever is running in it.
             Action::CloseTab => {
                 if let Some(tab_id) = self.active_tab_id() {
-                    self.request_close(CloseTarget::Tab(tab_id));
+                    if self.close_armed.take().is_some() {
+                        self.strip_message = None;
+                    }
+                    self.close_now(CloseTarget::Tab(tab_id));
                 }
             }
             Action::RenameTab => self.open_rename_tab(window, cx),

@@ -108,8 +108,8 @@ With the mouse, drag a tab's chip along the strip to move it, and
 double-click the chip of the tab on screen to rename it. A chip's dot turns
 into a close mark under the pointer; click it, or middle-click the chip, to
 close that tab without leaving the one on screen. A tab with something
-running asks first. While a command runs in a tab out of sight, the ground
-around its chip breathes in its ink until the command ends; an editor or
+running asks first there; `Ctrl+t x` closes it at once. While a command
+runs in a tab out of sight, the ground around its chip breathes in its ink until the command ends; an editor or
 pager left open doesn't count. Right-click a chip for a menu of what Tab mode does to it,
 with close other tabs besides.
 
