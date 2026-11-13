@@ -1006,29 +1006,6 @@ mod tests {
         assert_eq!(blocked.headline(), Some("Bash: cargo test"));
         assert_eq!(blocked.since_ms, 4);
 
-        // Claude Code's notification of the same wait, a few seconds on,
-        // says less than the request did, and does not replace it.
-        assert_eq!(
-            fleet.report(
-                pane,
-                session,
-                report(
-                    ReportEvent::Blocked {
-                        need: Need::Permission,
-                        message: Some("Claude needs your permission".to_owned()),
-                    },
-                    5,
-                ),
-                cwd,
-                5,
-            ),
-            None
-        );
-        assert_eq!(
-            fleet.get(pane).and_then(FleetAgent::headline),
-            Some("Bash: cargo test")
-        );
-
         // The agent's own status says it is working again once allowed.
         let allowed = agent(fleet.status(
             pane,
@@ -1037,7 +1014,7 @@ mod tests {
                 need: None,
                 message: String::new(),
             },
-            6,
+            5,
         ));
         assert_eq!(allowed.state, FleetState::Working);
         assert_eq!(allowed.need, None);
@@ -1075,6 +1052,55 @@ mod tests {
         );
         assert_eq!(agent(fleet.seen(pane, 8)).state, FleetState::Idle);
         assert!(fleet.seen(pane, 9).is_none());
+    }
+
+    #[test]
+    fn told_twice_of_one_wait_the_first_account_stands() {
+        let mut fleet = Fleet::default();
+        let (pane, session) = (PaneId::new(), SessionId::new());
+        let cwd = Path::new("/tmp");
+        let blocked = |need, message: &str, at_ms| {
+            report(
+                ReportEvent::Blocked {
+                    need,
+                    message: Some(message.to_owned()),
+                },
+                at_ms,
+            )
+        };
+        fleet.report(
+            pane,
+            session,
+            blocked(Need::Permission, "Bash: cargo test", 1),
+            cwd,
+            1,
+        );
+        // Claude Code's notification of the same wait, a few seconds on,
+        // says less than the request did, and does not replace it.
+        assert_eq!(
+            fleet.report(
+                pane,
+                session,
+                blocked(Need::Permission, "Claude needs your permission", 2),
+                cwd,
+                2,
+            ),
+            None
+        );
+        assert_eq!(
+            fleet.get(pane).and_then(FleetAgent::headline),
+            Some("Bash: cargo test")
+        );
+        // Another thing asked is another wait.
+        let asked = agent(fleet.report(
+            pane,
+            session,
+            blocked(Need::Question, "Which database?", 3),
+            cwd,
+            3,
+        ));
+        assert_eq!(asked.headline(), Some("Which database?"));
+        assert_eq!(asked.since_ms, 1);
     }
 
     #[test]
