@@ -14,10 +14,12 @@ use mux_terminal::TerminalSize;
 use mux_workspace::{AgentSessionId, Direction, PaneId, SessionId, SplitAxis, WorkspaceCommand};
 use tokio::io::AsyncReadExt as _;
 
+mod fleet;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "muxctl",
-    about = "Diagnostic client for the persistent mux workspace daemon"
+    about = "Drive the Mux workspace daemon: sessions, panes, and the coding agents in them"
 )]
 struct Arguments {
     #[arg(long, global = true)]
@@ -131,22 +133,56 @@ enum Command {
     },
     /// End the external process for an ACP agent session.
     AgentEnd { session: AgentSessionId },
+    /// The coding agents running in terminal panes: list them, wait on
+    /// them, prompt them and read them.
+    Fleet {
+        #[command(subcommand)]
+        command: Option<fleet::FleetCommand>,
+        /// Print JSON rather than a table.
+        #[arg(long, global = true)]
+        json: bool,
+    },
+    /// Put Mux's hooks into coding agents, or take them out.
+    Hooks {
+        #[command(subcommand)]
+        command: Option<fleet::HooksCommand>,
+    },
+    /// What an installed hook runs. Reads the agent's hook input from
+    /// standard input and reports it for this pane; prints nothing.
+    #[command(hide = true)]
+    Hook {
+        agent: String,
+        event: Option<String>,
+    },
 }
 
 #[tokio::main]
 #[allow(clippy::too_many_lines)] // Flat CLI dispatch is clearer than one wrapper per subcommand.
 async fn main() -> Result<()> {
     let arguments = Arguments::parse();
-    let state_dir = arguments
-        .state_dir
-        .or_else(default_state_dir)
-        .context("could not determine a per-user state directory")?;
-    let socket = socket_path(&state_dir);
+    // These two need no daemon: a hook must never fail its agent, and
+    // hooks are installed whether or not Mux is running.
+    let command = match arguments.command {
+        Command::Hook { agent, event } => {
+            mux_client::hook::run(&agent, event.as_deref()).await;
+            return Ok(());
+        }
+        Command::Hooks { command } => return fleet::hooks(command),
+        command => command,
+    };
+    // Inside a pane, the daemon that owns the pane; else the user's own.
+    let socket = match (arguments.state_dir, std::env::var_os("MUX_SOCKET")) {
+        (Some(state_dir), _) => socket_path(&state_dir),
+        (None, Some(socket)) if !socket.is_empty() => PathBuf::from(socket),
+        (None, _) => socket_path(
+            &default_state_dir().context("could not determine a per-user state directory")?,
+        ),
+    };
     let mut client = Client::connect(&socket, "muxctl")
         .await
         .with_context(|| format!("connect to daemon at {}", socket.display()))?;
 
-    match arguments.command {
+    match command {
         Command::Health => {
             client.health().await?;
             println!("muxd {} is healthy", client.daemon_pid());
@@ -346,6 +382,8 @@ async fn main() -> Result<()> {
             client.close_agent(session).await?;
             println!("agent session ended");
         }
+        Command::Fleet { command, json } => fleet::run(&mut client, command, json).await?,
+        Command::Hook { .. } | Command::Hooks { .. } => unreachable!("handled before connecting"),
     }
     Ok(())
 }
