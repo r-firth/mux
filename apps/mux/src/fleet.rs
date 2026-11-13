@@ -76,7 +76,7 @@ pub(super) struct FleetView {
     card: Option<Card>,
     scroll: ScrollHandle,
     /// What a pane of another session shows, as last asked.
-    remote_text: Option<(PaneId, String)>,
+    remote_text: HashMap<PaneId, String>,
     /// The pane a new agent was started in, chosen once the agent shows.
     awaiting: Option<PaneId>,
     /// The pane the view last drew.
@@ -485,7 +485,7 @@ impl MuxApp {
                     view.selected = Some(pane_id);
                     view.selected_at = Instant::now();
                 }
-                if self.fleet_remote_pane() == Some(pane_id) {
+                if self.fleet_remote_panes().contains(&pane_id) {
                     self.backend.send(CommandMessage::PaneText {
                         pane_id,
                         lines: REMOTE_LINES,
@@ -595,6 +595,21 @@ impl MuxApp {
             .unwrap_or_else(|| said.to_owned())
     }
 
+    /// The panes on show that belong to other sessions, whose text is
+    /// asked for: every such agent's on the grid, the chosen one's beside
+    /// the roster.
+    fn fleet_remote_panes(&self) -> Vec<PaneId> {
+        if self.fleet_wall_open() {
+            self.fleet
+                .iter()
+                .map(|agent| agent.pane_id)
+                .filter(|pane_id| !self.panes.contains_key(pane_id))
+                .collect()
+        } else {
+            self.fleet_remote_pane().into_iter().collect()
+        }
+    }
+
     pub(super) fn fleet_open(&self) -> bool {
         self.fleet_view.is_some()
     }
@@ -674,7 +689,7 @@ impl MuxApp {
             expects_new_tab: false,
             card: None,
             scroll: ScrollHandle::new(),
-            remote_text: None,
+            remote_text: HashMap::new(),
             awaiting: None,
             drawn_pane: None,
             wall: false,
@@ -729,7 +744,6 @@ impl MuxApp {
         }
         view.selected = pane_id;
         view.selected_at = Instant::now();
-        view.remote_text = None;
         if let Some(row) = row {
             view.scroll.scroll_to_item(row);
         }
@@ -801,7 +815,6 @@ impl MuxApp {
         view.in_pane = false;
         view.selected = chosen;
         view.selected_at = Instant::now();
-        view.remote_text = None;
         if !wall {
             view.wall_shown.clear();
         }
@@ -845,7 +858,7 @@ impl MuxApp {
     /// Ask for what the chosen agent's pane shows, when it belongs to
     /// another session and so has no terminal here.
     fn ask_remote_text(&self) {
-        if let Some(pane_id) = self.fleet_remote_pane() {
+        for pane_id in self.fleet_remote_panes() {
             self.backend.send(CommandMessage::PaneText {
                 pane_id,
                 lines: REMOTE_LINES,
@@ -854,10 +867,13 @@ impl MuxApp {
     }
 
     pub(super) fn set_fleet_pane_text(&mut self, pane_id: PaneId, text: String) {
-        if self.fleet_remote_pane() == Some(pane_id)
-            && let Some(view) = self.fleet_view.as_mut()
-        {
-            view.remote_text = Some((pane_id, text));
+        let shown = self.fleet_remote_panes();
+        if let Some(view) = self.fleet_view.as_mut() {
+            view.remote_text
+                .retain(|pane_id, _| shown.contains(pane_id));
+            if shown.contains(&pane_id) {
+                view.remote_text.insert(pane_id, text);
+            }
         }
     }
 
@@ -1383,7 +1399,7 @@ impl MuxApp {
     /// How long until the view next reads differently by itself.
     fn next_fleet_reading(&self) -> Option<Duration> {
         self.fleet_view.as_ref()?;
-        if self.fleet_remote_pane().is_some() {
+        if !self.fleet_remote_panes().is_empty() {
             return Some(Duration::from_secs(1));
         }
         let now = now_ms();
@@ -2458,11 +2474,7 @@ impl MuxApp {
                 || "another session".to_owned(),
                 |session| format!("session {}", session.name),
             );
-        let text = view
-            .remote_text
-            .as_ref()
-            .filter(|(pane_id, _)| *pane_id == agent.pane_id)
-            .map(|(_, text)| text.as_str());
+        let text = view.remote_text.get(&agent.pane_id).map(String::as_str);
         let metrics = self.metrics;
         let room = ((frame.height - 36.0 - 12.0) / metrics.cell_height)
             .floor()
@@ -2564,6 +2576,20 @@ impl MuxApp {
         } else {
             agent.task.clone()
         };
+        // A pane of another session says so beside its project.
+        let place = if self.panes.contains_key(&pane_id) {
+            agent.project.name.clone()
+        } else {
+            let session = self
+                .sessions
+                .iter()
+                .find(|session| session.id == agent.session_id)
+                .map_or_else(
+                    || "another session".to_owned(),
+                    |session| session.name.clone(),
+                );
+            format!("{} · in {session}", agent.project.name)
+        };
         let head = v_flex()
             .flex_none()
             .h(px(TILE_HEAD - 1.0))
@@ -2590,7 +2616,7 @@ impl MuxApp {
                             .min_w_0()
                             .truncate()
                             .text_color(color(FAINT_TEXT))
-                            .child(agent.project.name.clone()),
+                            .child(place),
                     )
                     .child(
                         div()
@@ -2623,15 +2649,43 @@ impl MuxApp {
                     .child(pane.view)
                     .into_any_element()
             }
-            None => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(12.0))
-                .text_color(color(FAINT_TEXT))
-                .child("in another session")
-                .into_any_element(),
+            // A pane of another session has no terminal here: the foot of
+            // its text, at the size a tile's pane reads at.
+            None => {
+                let text = self
+                    .fleet_view
+                    .as_ref()
+                    .and_then(|view| view.remote_text.get(&pane_id));
+                let line_height = (TILE_MIN_FONT * 1.4).round();
+                let room = (body.height / line_height).floor().max(1.0) as usize;
+                let lines = text.map(|text| {
+                    let lines = text.trim_end().lines().collect::<Vec<_>>();
+                    lines[lines.len().saturating_sub(room)..]
+                        .iter()
+                        .map(|line| (*line).to_owned())
+                        .collect::<Vec<_>>()
+                });
+                v_flex()
+                    .size_full()
+                    .justify_end()
+                    .overflow_hidden()
+                    .px(px(4.0))
+                    .font_family(self.terminal_font.clone())
+                    .text_size(px(TILE_MIN_FONT))
+                    .line_height(px(line_height))
+                    .text_color(color(MUTED_TEXT))
+                    .children(lines.into_iter().flatten().map(|line| {
+                        div()
+                            .flex_none()
+                            .h(px(line_height))
+                            .child(if line.is_empty() {
+                                " ".to_owned()
+                            } else {
+                                line
+                            })
+                    }))
+                    .into_any_element()
+            }
         };
         v_flex()
             .id(SharedString::from(format!("fleet-tile-{pane_id}")))
