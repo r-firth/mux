@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0](https://github.com/r-firth/mux/compare/v0.10.1...v0.11.0) (2026-11-13)
+
+
+### Features
+
+* a fleet of coding agents, each a fact about a terminal pane, with hooks for Claude Code, Codex and Copilot that install and uninstall ([698f969](https://github.com/r-firth/mux/commit/698f969971b85279e7cae828c7e7a8a1b70e91db))
+* a grid tile for an agent in another session shows the foot of its pane's text, and its head says which session ([dd11df9](https://github.com/r-firth/mux/commit/dd11df9664bfb83fa5bb2de6457612e88b86022a))
+* a grid tile shows the foot of its pane at a size that reads, cropped not shrunk, under a head of two lines ([a3b4b79](https://github.com/r-firth/mux/commit/a3b4b79744a0f95727b33f385f26530659d06318))
+* a tab whose agent waits on you says needs you in peach, in the strip and the palette, as an agent pane's tab does ([8e22b63](https://github.com/r-firth/mux/commit/8e22b63170b547917c6e90724f55edac50aa78a7))
+* Cmd+Shift+A shows the fleet, a roster of the agents in terminal panes by project beside the chosen agent's live pane ([2504a97](https://github.com/r-firth/mux/commit/2504a971e020379ee66a38d841b53e9d813cb8b5))
+* mux hook reports for a coding agent's hook when there is no muxctl beside it ([6c381fc](https://github.com/r-firth/mux/commit/6c381fc1cb035c90d121144b58152bffff3d104d))
+* muxctl fleet lists, waits on, prompts and reads agents, and muxctl hooks installs their hooks ([7e449ea](https://github.com/r-firth/mux/commit/7e449ea9688ba6aafcf573f7225f585ec21bf1f4))
+* the daemon follows the agents in its panes by their hooks, OSC 7501, notifications and processes, and keeps their sessions to resume ([fd3f0fc](https://github.com/r-firth/mux/commit/fd3f0fc23b21ad4abafc6f84dac3cd3b7f85b382))
+* the fleet says a path from the agent's project, so a row shows which file is asked about ([ee935b7](https://github.com/r-firth/mux/commit/ee935b75ce2768753deea3e94a84e6843273ff6c))
+* the roster says done in the agent's ink, as its pane's head does, and an agent with nothing asked or said is one line ([1193d52](https://github.com/r-firth/mux/commit/1193d52ccfe63182e7ec2b911a2b076049edd7e0))
+* v turns the fleet into a grid of every agent's live pane, drawn small, the ones that wait first and calling in peach ([46ba76a](https://github.com/r-firth/mux/commit/46ba76ab27f6c50c7500fcf703378625e3d5f634))
+
+
+### Bug Fixes
+
+* a grid tile names another session's agent's session down to four tiles across a usual window ([a8e6aff](https://github.com/r-firth/mux/commit/a8e6affceb002a789bb7247cf56b6b54ae9dc50a))
+* a grid tile's second line is the head's size, and an agent that waits having said nothing says what it waits for, as its row does ([2c9ef47](https://github.com/r-firth/mux/commit/2c9ef47427126641f623cdec55c5147b82c1020c))
+* a key struck just after the fleet opens is the fleet's, and the grid fits twelve agents in a window ([f4fb946](https://github.com/r-firth/mux/commit/f4fb946e88c0db47f564ca7be3a6a7ba334d8bfa))
+* a narrow grid tile for another session's agent keeps its project whole and leaves the session unsaid ([7787347](https://github.com/r-firth/mux/commit/7787347da5dcfcc63f08d97b032a81eb8c01f8c1))
+* a pane's head, the ended card and the palette say an agent's paths from its project, and the head keeps the agent's name whole ([79beb0d](https://github.com/r-firth/mux/commit/79beb0dae831fd3796db23bc8c9a423062fdc876))
+* a short roster keeps its room for agents: one line of keys at its foot and no hooks line; under a full roster the hooks line is a band of its own ([9cc08b3](https://github.com/r-firth/mux/commit/9cc08b3201e9ed716c646b0999b5f94904568dcf))
+* an agent started by a wrapper script is found under the shell that runs it ([9ed7a6e](https://github.com/r-firth/mux/commit/9ed7a6e3b21899d69c88ccf8d34db7332ef69b56))
+* an agent's later word that it waits does not replace what it asked ([687679b](https://github.com/r-firth/mux/commit/687679bd22800483cb1a079128d42e979b8be841))
+* Codex's hook at a session's end asks for the 3 seconds Codex allows, so it no longer warns ([e9033fb](https://github.com/r-firth/mux/commit/e9033fb16294c1340a6d83d50fef4048443e19ea))
+* muxctl fleet prompt returns once the agent has taken the prompt up, so a wait straight after waits for that turn ([b08094a](https://github.com/r-firth/mux/commit/b08094ae2b8bf65c6cfbf90767798054fcc911de))
+* the ended agent's card shows the whole of its last words, no line cut along its foot ([302f798](https://github.com/r-firth/mux/commit/302f798194bee857e9eb1d2a4e8808ef93e3b9fe))
+* the fleet's roster names agents by their command, marks a worktree wt and keeps its foot to two lines ([bea4156](https://github.com/r-firth/mux/commit/bea415614ff2a9c305adecefdcdd7efa758be7d6))
+* the fleet's roster scrolls to the chosen agent, counting the heads over the rows ([e04975a](https://github.com/r-firth/mux/commit/e04975a33689073463fa1b94bfdb9e7235e33e2c))
+* the fleet's word about hooks counts the agents when there are two, so it fits a narrow roster ([678253d](https://github.com/r-firth/mux/commit/678253d8d146df659d00fc6dac4346aa87265392))
+* the grid's foot gives way in whole parts in a narrow window, its summary first, then the keys from the left ([bf4d3ea](https://github.com/r-firth/mux/commit/bf4d3eadf44a878c420afb43d4753d9e813215df))
+* the roster's head sums the fleet up in whole parts, the quiet ones giving way first ([9cc614a](https://github.com/r-firth/mux/commit/9cc614a313d537bbd006b5fd8dd44e2efc278432))
+* the start and hooks cards' heads are the session sheet's height ([1c3dc8e](https://github.com/r-firth/mux/commit/1c3dc8e7c8f1e076deca41e0de2bf3961f525643))
+* the start card names each agent once ([b08bfe3](https://github.com/r-firth/mux/commit/b08bfe38a475f9413e2b7df748412329904bc581))
+* what Mux says of trusting hooks in Codex is what Codex does: it asks at its next start ([6c479d9](https://github.com/r-firth/mux/commit/6c479d97e6e818533a58b5b7eb041d06b7e64481))
+* with the fleet open the strip follows the chosen agent's tab, and its one hint is never cut in half ([5334c35](https://github.com/r-firth/mux/commit/5334c35950f41e3a1d5c24f15068fffbe8357741))
+
 ## [0.10.1](https://github.com/r-firth/mux/compare/v0.10.0...v0.10.1) (2026-11-05)
 
 
