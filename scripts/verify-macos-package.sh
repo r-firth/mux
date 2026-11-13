@@ -45,6 +45,7 @@ app_icon="$app/Contents/Resources/AppIcon.icns"
 asset_catalog="$app/Contents/Resources/Assets.car"
 
 [ -x "$executable" ] || fail "bundle executable is missing"
+[ -x "$app/Contents/MacOS/muxctl" ] || fail "bundled muxctl is missing"
 [ -f "$ghostty" ] || fail "bundled libghostty-vt is missing"
 [ -f "$plist" ] || fail "Info.plist is missing"
 [ -f "$app_icon" ] || fail "app icon is missing"

@@ -28,6 +28,9 @@ else
   MUX_ZIG="$zig" MACOSX_DEPLOYMENT_TARGET=13.0 \
     cargo build -p mux --features product $cargo_profile_args
 fi
+# muxctl sits beside mux in the bundle: panes are handed it as MUX_CTL, which
+# the hooks Mux installs in coding agents run.
+MACOSX_DEPLOYMENT_TARGET=13.0 cargo build -p muxctl $cargo_profile_args
 
 target_profile_dir="$project_dir/target/$profile"
 if [ -n "${CARGO_BUILD_TARGET:-}" ]; then
@@ -42,6 +45,7 @@ resources_dir="$contents_dir/Resources"
 mkdir -p "$macos_dir" "$frameworks_dir" "$resources_dir"
 cp "$project_dir/packaging/macos/Info.plist" "$contents_dir/Info.plist"
 cp "$target_profile_dir/mux" "$macos_dir/mux"
+cp "$target_profile_dir/muxctl" "$macos_dir/muxctl"
 
 asset_catalog_info="$resources_dir/AssetCatalogInfo.plist"
 xcrun actool \
@@ -103,6 +107,7 @@ sign_code() {
 # Sign nested code first, then seal the outer bundle. Using --deep while
 # signing can accidentally apply the app's options to every nested code item.
 sign_code "$frameworks_dir/libghostty-vt.dylib"
+sign_code "$macos_dir/muxctl"
 sign_code "$app_dir"
 
 echo "$app_dir"
