@@ -29,6 +29,8 @@ const ROSTER_MAX: f32 = 460.0;
 /// The least the agent's pane keeps beside the roster.
 const PANE_MIN: f32 = 240.0;
 const ROW_HEIGHT: f32 = 46.0;
+/// A row with one line: an agent that was asked nothing and says nothing.
+const ROW_HEIGHT_BRIEF: f32 = 28.0;
 /// How tall the slab over an ended agent's pane is.
 const ENDED_CARD_HEIGHT: f32 = 92.0;
 /// How long an agent is chosen before its pane is sized to the view, so
@@ -1745,9 +1747,22 @@ impl MuxApp {
         .into_any_element()
     }
 
+    /// The colour an agent's state is said in, the one its pane's head
+    /// says it in: peach while it wants the user, its tab's ink once done.
+    fn fleet_state_tone(&self, agent: &FleetAgent) -> Hsla {
+        match agent.state {
+            FleetState::Blocked | FleetState::Error => color(SIGNAL),
+            FleetState::Working => color(MUTED_TEXT),
+            FleetState::Done => self
+                .tab_of_pane(agent.pane_id)
+                .map_or(color(MUTED_TEXT), |tab_id| self.tab_ink(tab_id).color()),
+            FleetState::Idle | FleetState::Unknown | FleetState::Ended => color(FAINT_TEXT),
+        }
+    }
+
     /// One agent in the roster, on two lines: its mark, name, what it was
     /// asked, and its state and for how long; then what it is at, and the
-    /// branch it is on.
+    /// branch it is on. One with neither a task nor a word is a single line.
     #[allow(clippy::too_many_lines)]
     fn fleet_row(
         &self,
@@ -1758,11 +1773,6 @@ impl MuxApp {
     ) -> gpui::AnyElement {
         let pane_id = agent.pane_id;
         let ended = agent.state == FleetState::Ended;
-        let state_tone = match agent.state {
-            FleetState::Blocked | FleetState::Error => SIGNAL,
-            FleetState::Working | FleetState::Done => MUTED_TEXT,
-            _ => FAINT_TEXT,
-        };
         let headline = agent.headline().map(str::to_owned).or_else(|| {
             (agent.state == FleetState::Blocked).then(|| match agent.need {
                 Some(mux_fleet::Need::Permission) => "asks to be allowed something".to_owned(),
@@ -1771,7 +1781,26 @@ impl MuxApp {
                 _ => "wants you".to_owned(),
             })
         });
-        let branch = agent.project.branch.clone();
+        let branch = agent.project.branch.clone().map(|branch| {
+            h_flex()
+                .flex_none()
+                .max_w(px(150.0))
+                .gap(px(6.0))
+                .text_size(px(12.0))
+                .text_color(color(FAINT_TEXT))
+                .child(div().min_w_0().truncate().child(branch))
+                .when(agent.project.worktree, |branch| {
+                    branch.child(div().flex_none().child("wt"))
+                })
+        });
+        // An agent with nothing asked of it and nothing to say is one line,
+        // its branch beside its state.
+        let brief = agent.task.is_none() && headline.is_none();
+        let (branch_beside, branch_below) = if brief {
+            (branch, None)
+        } else {
+            (None, branch)
+        };
         let first = h_flex()
             .h(px(20.0))
             .gap(px(8.0))
@@ -1799,10 +1828,11 @@ impl MuxApp {
                     .text_color(color(if ended { FAINT_TEXT } else { TEXT }))
                     .children(agent.task.clone()),
             )
+            .children(branch_beside)
             .child(
                 div()
                     .flex_none()
-                    .text_color(color(state_tone))
+                    .text_color(self.fleet_state_tone(agent))
                     .child(state_and_age(agent, now)),
             );
         let second = h_flex()
@@ -1822,23 +1852,12 @@ impl MuxApp {
                     })
                     .children(headline),
             )
-            .when_some(branch, |line, branch| {
-                line.child(
-                    h_flex()
-                        .flex_none()
-                        .max_w(px(150.0))
-                        .gap(px(6.0))
-                        .child(div().min_w_0().truncate().child(branch))
-                        .when(agent.project.worktree, |branch| {
-                            branch.child(div().flex_none().child("wt"))
-                        }),
-                )
-            });
+            .children(branch_below);
         h_flex()
             .id(SharedString::from(format!("fleet-row-{pane_id}")))
             .relative()
             .flex_none()
-            .h(px(ROW_HEIGHT))
+            .h(px(if brief { ROW_HEIGHT_BRIEF } else { ROW_HEIGHT }))
             .pl(px(24.0))
             .pr(px(10.0))
             .rounded(px(6.0))
@@ -1865,7 +1884,7 @@ impl MuxApp {
                 div()
                     .absolute()
                     .left(px(8.0))
-                    .top(px(5.0))
+                    .top(px(if brief { 4.0 } else { 5.0 }))
                     .text_color(color(SIGNAL))
                     .when(!chosen, gpui::Styled::invisible)
                     .child("›"),
@@ -1876,7 +1895,7 @@ impl MuxApp {
                     .min_w_0()
                     .when(ended, |row| row.opacity(0.75))
                     .child(first)
-                    .child(second),
+                    .when(!brief, |row| row.child(second)),
             )
             .into_any_element()
     }
