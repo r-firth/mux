@@ -65,7 +65,9 @@ impl DaemonServer {
         let listener = UnixListener::bind(&self.config.socket_path)?;
         set_private_socket_permissions(&self.config.socket_path)?;
         crate::shell_integration::install(&self.config.state_dir);
+        crate::pane_environment::install(&self.config.socket_path);
         self.state.restore_workspace();
+        self.state.restore_fleet();
         info!(socket = %self.config.socket_path.display(), "workspace daemon listening");
 
         // Programs finishing in a pane are noticed by looking, once a second:
@@ -81,6 +83,7 @@ impl DaemonServer {
                 if polls == 0 {
                     watched.save_workspace();
                     watched.save_pane_text();
+                    watched.save_fleet();
                 }
             }
         });
@@ -93,6 +96,7 @@ impl DaemonServer {
             loop {
                 ticks.tick().await;
                 watched.announce_secret_input();
+                watched.announce_fleet();
             }
         });
 
@@ -162,6 +166,7 @@ async fn handle_connection(
 
     let mut incoming = FrameReader::<ClientMessage>::spawn(reader);
     let mut agent_events = state.subscribe_agent_events();
+    let mut fleet_events = state.subscribe_fleet_events();
     let mut subscription: Option<(mux_workspace::SessionId, broadcast::Receiver<ServerEvent>)> =
         None;
 
@@ -186,6 +191,15 @@ async fn handle_connection(
                         Err(broadcast::error::RecvError::Closed) => subscription = None,
                     }
                 }
+                event = fleet_events.recv() => {
+                    match event {
+                        Ok(event) => write_frame(&mut writer, &ServerMessage::Event(ServerEvent::Fleet(event))).await?,
+                        // A client that fell behind lists the fleet again
+                        // when it next shows it; nothing here is lost for
+                        // good.
+                        Err(broadcast::error::RecvError::Lagged(_) | broadcast::error::RecvError::Closed) => {}
+                    }
+                }
                 event = agent_events.recv() => {
                     match event {
                         Ok(event) => write_frame(&mut writer, &ServerMessage::Event(ServerEvent::Agent(event))).await?,
@@ -204,6 +218,15 @@ async fn handle_connection(
                 incoming = incoming.next() => {
                     let message = incoming.ok_or(ConnectionError::ClientDisconnected)??;
                     process_message(message, &state, &mut writer, &mut subscription).await?;
+                }
+                event = fleet_events.recv() => {
+                    match event {
+                        Ok(event) => write_frame(&mut writer, &ServerMessage::Event(ServerEvent::Fleet(event))).await?,
+                        // A client that fell behind lists the fleet again
+                        // when it next shows it; nothing here is lost for
+                        // good.
+                        Err(broadcast::error::RecvError::Lagged(_) | broadcast::error::RecvError::Closed) => {}
+                    }
                 }
                 event = agent_events.recv() => {
                     match event {
@@ -332,6 +355,21 @@ where
         }
         Request::ClearPane { pane_id } => state.clear_pane(pane_id).map(|()| Response::Ack),
         Request::ResetPane { pane_id } => state.reset_pane(pane_id).map(|()| Response::Ack),
+        Request::ListFleet => Ok(Response::Fleet(state.list_fleet())),
+        Request::ReportAgent { pane_id, report } => {
+            state.report_agent(pane_id, report).map(|()| Response::Ack)
+        }
+        Request::FleetSeen { pane_id } => {
+            state.fleet_seen(pane_id);
+            Ok(Response::Ack)
+        }
+        Request::ForgetFleetAgent { pane_id } => {
+            state.forget_fleet_agent(pane_id);
+            Ok(Response::Ack)
+        }
+        Request::PaneText { pane_id, lines } => {
+            state.pane_text(pane_id, lines).map(Response::PaneText)
+        }
     };
 
     if unacknowledged_input && response == Ok(Response::Ack) {

@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 mux-acp = { path = "../mux-acp" }
+mux-fleet = { path = "../mux-fleet" }
 mux-terminal = { path = "../mux-terminal" }
 mux-workspace = { path = "../mux-workspace" }
 postcard.workspace = true

@@ -30,6 +30,7 @@ parking_lot.workspace = true
 mux-acp = { path = "../../crates/mux-acp" }
 mux-client = { path = "../../crates/mux-client" }
 mux-daemon = { path = "../../crates/mux-daemon", default-features = false }
+mux-fleet = { path = "../../crates/mux-fleet" }
 mux-protocol = { path = "../../crates/mux-protocol" }
 mux-terminal = { path = "../../crates/mux-terminal" }
 mux-terminal-ghostty = { path = "../../crates/mux-terminal-ghostty", default-features = false }

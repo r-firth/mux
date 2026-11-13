@@ -3,6 +3,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
+pub mod hook;
+
 use directories::ProjectDirs;
 use mux_acp::{AgentConfigValueSelection, AgentPrompt, AgentSessionSnapshot, AgentSpec};
 use mux_protocol::{
@@ -291,6 +293,52 @@ impl Client {
         }
     }
 
+    /// Every coding agent running in a terminal pane, the most pressing
+    /// first.
+    pub async fn list_fleet(&mut self) -> Result<Vec<mux_fleet::FleetAgent>, ClientError> {
+        match self.request(Request::ListFleet).await? {
+            Response::Fleet(agents) => Ok(agents),
+            response => Err(ClientError::UnexpectedResponse(Box::new(response))),
+        }
+    }
+
+    /// Pass on what an agent's hook said the agent in a pane has done.
+    pub async fn report_agent(
+        &mut self,
+        pane_id: PaneId,
+        report: mux_fleet::AgentReport,
+    ) -> Result<(), ClientError> {
+        expect_acknowledgement(
+            self.request(Request::ReportAgent { pane_id, report })
+                .await?,
+            &Response::Ack,
+        )
+    }
+
+    /// Say the user has looked at a pane whose agent had finished.
+    pub async fn fleet_seen(&mut self, pane_id: PaneId) -> Result<(), ClientError> {
+        expect_acknowledgement(
+            self.request(Request::FleetSeen { pane_id }).await?,
+            &Response::Ack,
+        )
+    }
+
+    /// Let go of the ended agent session kept for a pane.
+    pub async fn forget_fleet_agent(&mut self, pane_id: PaneId) -> Result<(), ClientError> {
+        expect_acknowledgement(
+            self.request(Request::ForgetFleetAgent { pane_id }).await?,
+            &Response::Ack,
+        )
+    }
+
+    /// The last `lines` lines a pane shows, as plain text.
+    pub async fn pane_text(&mut self, pane_id: PaneId, lines: u32) -> Result<String, ClientError> {
+        match self.request(Request::PaneText { pane_id, lines }).await? {
+            Response::PaneText(text) => Ok(text),
+            response => Err(ClientError::UnexpectedResponse(Box::new(response))),
+        }
+    }
+
     pub async fn prompt_agent(
         &mut self,
         session_id: AgentSessionId,
@@ -495,7 +543,8 @@ impl Client {
             | ServerEvent::AgentResyncRequired
             | ServerEvent::PaneCommandFinished { .. }
             | ServerEvent::PaneCommandStarted { .. }
-            | ServerEvent::PaneSecretInput { .. }) => Some(event),
+            | ServerEvent::PaneSecretInput { .. }
+            | ServerEvent::Fleet(_)) => Some(event),
         }
     }
 
@@ -530,7 +579,8 @@ fn attachment_supersedes_event(event: &ServerEvent, session_id: SessionId) -> bo
         | ServerEvent::AgentResyncRequired
         | ServerEvent::PaneCommandFinished { .. }
         | ServerEvent::PaneCommandStarted { .. }
-        | ServerEvent::PaneSecretInput { .. } => false,
+        | ServerEvent::PaneSecretInput { .. }
+        | ServerEvent::Fleet(_) => false,
     }
 }
 

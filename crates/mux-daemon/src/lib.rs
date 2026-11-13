@@ -1,4 +1,5 @@
 mod pane;
+mod pane_environment;
 mod server;
 mod shell_integration;
 mod state;

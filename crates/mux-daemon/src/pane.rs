@@ -264,6 +264,14 @@ pub struct PaneRuntime {
     output_injector: OutputInjector,
 }
 
+/// A process as the system knows it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessIdentity {
+    pub name: String,
+    pub executable: Option<std::path::PathBuf>,
+    pub arguments: Vec<String>,
+}
+
 struct ForegroundCommand {
     since: Instant,
     name: String,
@@ -380,6 +388,12 @@ impl PaneRuntime {
             }
         }
         for (key, value) in crate::shell_integration::environment(&command.program) {
+            builder.env(key, value);
+        }
+        // For what runs in the pane to say which pane it is in: the hooks
+        // Mux puts in coding agents, and an agent driving Mux itself.
+        builder.env("MUX_PANE_ID", id.to_string());
+        for (key, value) in crate::pane_environment::environment() {
             builder.env(key, value);
         }
         for (key, value) in &command.environment {
@@ -521,6 +535,51 @@ impl PaneRuntime {
             return None;
         }
         Some(process_name(foreground))
+    }
+
+    /// The program in front of the pane's shell as the system knows it:
+    /// its name, the file it runs, and its arguments. An agent can run
+    /// under a name that isn't its own, and the rest tells which it is.
+    #[must_use]
+    pub fn foreground_identity(&self) -> Option<ProcessIdentity> {
+        if self.exit_status.lock().is_some() {
+            return None;
+        }
+        let foreground = foreground_process_id(&self.master)?;
+        if Some(foreground) == self.process_id {
+            return None;
+        }
+        let pid = Pid::from_u32(foreground);
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing()
+                .with_exe(UpdateKind::Always)
+                .with_cmd(UpdateKind::Always),
+        );
+        let process = system.process(pid)?;
+        Some(ProcessIdentity {
+            name: process.name().to_string_lossy().into_owned(),
+            executable: process.exe().map(std::path::Path::to_path_buf),
+            arguments: process
+                .cmd()
+                .iter()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect(),
+        })
+    }
+
+    /// What the pane's program has said of itself since the last look:
+    /// its status (OSC 7501), and a notification or a bell.
+    pub fn take_said(
+        &self,
+    ) -> (
+        Option<mux_terminal::ProgramStatus>,
+        Option<mux_terminal::Attention>,
+    ) {
+        let mut scanner = self.title.lock();
+        (scanner.take_status_said(), scanner.take_attention())
     }
 
     /// What the pane shows, history first, as plain text.

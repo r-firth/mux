@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 directories.workspace = true
 mux-acp = { path = "../mux-acp" }
+mux-fleet = { path = "../mux-fleet" }
 mux-protocol = { path = "../mux-protocol" }
 mux-terminal = { path = "../mux-terminal" }
 mux-workspace = { path = "../mux-workspace" }

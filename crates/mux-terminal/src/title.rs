@@ -28,6 +28,9 @@ pub struct TitleScanner {
     commands: std::collections::VecDeque<CommandEnding>,
     command_started: Option<std::time::Instant>,
     marks_starts: bool,
+    /// What the program last said it is doing (OSC 7501), read from the
+    /// output itself for whoever has no terminal engine to ask.
+    status_said: Option<crate::ProgramStatus>,
 }
 
 /// How the command run from one prompt ended, as far as the shell said.
@@ -97,6 +100,67 @@ impl Progress {
     }
 }
 
+/// A program status report: `state=working:kind=…:app=…:msg=<base64>`. A
+/// query (`?`) is no report, and one with an `id` is about a task within
+/// the program, such as a build an agent runs, not the program itself.
+fn parse_program_status(report: &str) -> Option<crate::ProgramStatus> {
+    use crate::{ProgramNeed, ProgramState};
+    use base64::Engine as _;
+    let decoded = |value: &str| {
+        base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .unwrap_or_default()
+    };
+    let mut status = crate::ProgramStatus {
+        state: ProgramState::Clear,
+        need: None,
+        progress: None,
+        app: String::new(),
+        title: String::new(),
+        message: String::new(),
+    };
+    let mut stated = false;
+    for field in report.split(':') {
+        let (key, value) = field.split_once('=')?;
+        match key {
+            "state" => {
+                status.state = match value {
+                    "idle" => ProgramState::Idle,
+                    "working" => ProgramState::Working,
+                    "done" => ProgramState::Done,
+                    "blocked" => ProgramState::Blocked,
+                    "error" => ProgramState::Error,
+                    "clear" => ProgramState::Clear,
+                    _ => return None,
+                };
+                stated = true;
+            }
+            "kind" => {
+                status.need = match value {
+                    "permission" => Some(ProgramNeed::Permission),
+                    "question" => Some(ProgramNeed::Question),
+                    "auth" => Some(ProgramNeed::Auth),
+                    _ => None,
+                };
+            }
+            "progress" => {
+                status.progress = value
+                    .parse::<u16>()
+                    .ok()
+                    .map(|percent| u8::try_from(percent.min(100)).unwrap_or(100));
+            }
+            "app" => value.clone_into(&mut status.app),
+            "title" => status.title = decoded(value),
+            "msg" => status.message = decoded(value),
+            "id" if !value.is_empty() => return None,
+            _ => {}
+        }
+    }
+    stated.then_some(status)
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum TitleScan {
     #[default]
@@ -117,6 +181,8 @@ const ESC: u8 = 0x1b;
 const BEL: u8 = 0x07;
 const MAX_TITLE_BYTES: usize = 256;
 const MAX_NOTICE_BYTES: usize = 512;
+/// The longest program status report (OSC 7501) the protocol allows.
+const MAX_STATUS_BYTES: usize = 4096;
 /// The most of a copy kept, base64 and all: past it, the copy is dropped
 /// rather than cut short.
 const MAX_CLIPBOARD_BYTES: usize = 8 * 1024 * 1024;
@@ -168,6 +234,13 @@ impl TitleScanner {
     pub fn take_call(&mut self) -> Option<(Attention, bool)> {
         let news = std::mem::take(&mut self.attention_is_news);
         self.attention.take().map(|call| (call, news))
+    }
+
+    /// What the program said it is doing (OSC 7501) since this was last
+    /// called, as read from its output. A window asks its terminal engine
+    /// instead, which reads the same sequence.
+    pub fn take_status_said(&mut self) -> Option<crate::ProgramStatus> {
+        self.status_said.take()
     }
 
     /// How far along the program last said it was, if it has said since
@@ -239,7 +312,12 @@ impl TitleScanner {
                 }
                 (TitleScan::Notice(number), ESC) => TitleScan::NoticeEscape(number),
                 (TitleScan::Notice(number), _) => {
-                    if self.buffer.len() < MAX_NOTICE_BYTES {
+                    let most = if number == 7501 {
+                        MAX_STATUS_BYTES
+                    } else {
+                        MAX_NOTICE_BYTES
+                    };
+                    if self.buffer.len() < most {
                         self.buffer.push(byte);
                     }
                     TitleScan::Notice(number)
@@ -272,7 +350,7 @@ impl TitleScanner {
                     self.buffer.clear();
                     TitleScan::Clipboard
                 }
-                (TitleScan::Number(number @ (9 | 133 | 777)), b';') => {
+                (TitleScan::Number(number @ (9 | 133 | 777 | 7501)), b';') => {
                     self.buffer.clear();
                     TitleScan::Notice(number)
                 }
@@ -326,6 +404,12 @@ impl TitleScanner {
         self.buffer.clear();
         if number == 133 {
             self.commit_shell_mark(&text);
+            return;
+        }
+        if number == 7501 {
+            if let Some(status) = parse_program_status(&text) {
+                self.status_said = Some(status);
+            }
             return;
         }
         let said = if number == 9 {
@@ -753,5 +837,31 @@ mod tests {
         assert_eq!(scanner.title(), Some("~/src/mux"));
         scanner.scan(b"\x1b]2;cargo test\x07");
         assert_eq!(scanner.title(), Some("cargo test"));
+    }
+
+    #[test]
+    fn a_program_status_report_is_read_from_the_output() {
+        let mut scanner = TitleScanner::default();
+        scanner.scan(b"\x1b]7501;?\x1b\\");
+        assert!(scanner.take_status_said().is_none());
+        scanner.scan(b"\x1b]7501;state=blocked:kind=permission:app=claude:msg=QXBwbHk/\x1b\\");
+        let status = scanner.take_status_said().expect("status");
+        assert_eq!(status.state, crate::ProgramState::Blocked);
+        assert_eq!(status.need, Some(crate::ProgramNeed::Permission));
+        assert_eq!(status.app, "claude");
+        assert_eq!(status.message, "Apply?");
+        assert!(scanner.take_status_said().is_none());
+        // A task within the program is not the program.
+        scanner.scan(b"\x1b]7501;state=working:id=build:progress=5\x07");
+        assert!(scanner.take_status_said().is_none());
+        // Split across reads, and ended with a bell.
+        scanner.scan(b"\x1b]7501;state=wor");
+        scanner.scan(b"king\x07");
+        assert_eq!(
+            scanner.take_status_said().map(|status| status.state),
+            Some(crate::ProgramState::Working)
+        );
+        // It asks for nothing by itself: no call, and no bell from its end.
+        assert!(scanner.take_attention().is_none());
     }
 }

@@ -20,6 +20,7 @@ use tokio::sync::broadcast;
 
 use crate::pane::{ForegroundChange, PaneRuntime};
 
+mod fleet;
 mod reopen;
 mod restore;
 
@@ -32,6 +33,11 @@ pub struct DaemonState {
     saved_workspace: Mutex<String>,
     /// What each pane's text was when last written to disk, as a hash.
     saved_pane_text: Mutex<HashMap<PaneId, u64>>,
+    /// The coding agents in the panes.
+    fleet: Mutex<mux_fleet::Fleet>,
+    fleet_events: broadcast::Sender<mux_fleet::FleetEvent>,
+    /// The fleet as last written to disk.
+    saved_fleet: Mutex<String>,
 }
 
 impl DaemonState {
@@ -43,6 +49,9 @@ impl DaemonState {
             agents: AgentManager::new(),
             saved_workspace: Mutex::new(String::new()),
             saved_pane_text: Mutex::new(HashMap::new()),
+            fleet: Mutex::new(mux_fleet::Fleet::default()),
+            fleet_events: broadcast::channel(256).0,
+            saved_fleet: Mutex::new(String::new()),
         }
     }
 
@@ -114,21 +123,22 @@ impl DaemonState {
             let session_id = session.model.read().id;
             let panes = session.panes.read().values().cloned().collect::<Vec<_>>();
             for pane in panes {
-                let event = match pane.look_at_foreground() {
-                    Some(ForegroundChange::Started(program)) => ServerEvent::PaneCommandStarted {
+                let Some(change) = pane.look_at_foreground() else {
+                    continue;
+                };
+                self.note_foreground(session_id, &pane, &change);
+                let event = match change {
+                    ForegroundChange::Started(program) => ServerEvent::PaneCommandStarted {
                         session_id,
                         pane_id: pane.id,
                         program,
                     },
-                    Some(ForegroundChange::Finished(program, took)) => {
-                        ServerEvent::PaneCommandFinished {
-                            session_id,
-                            pane_id: pane.id,
-                            program,
-                            seconds: took.as_secs(),
-                        }
-                    }
-                    None => continue,
+                    ForegroundChange::Finished(program, took) => ServerEvent::PaneCommandFinished {
+                        session_id,
+                        pane_id: pane.id,
+                        program,
+                        seconds: took.as_secs(),
+                    },
                 };
                 let _ = session.events.send(event);
             }
@@ -403,7 +413,11 @@ impl DaemonState {
 
     pub fn write_input(&self, pane_id: PaneId, bytes: &[u8]) -> Result<(), RemoteError> {
         let pane = self.find_pane(pane_id)?;
-        pane.write(bytes).map_err(internal_error)
+        pane.write(bytes).map_err(internal_error)?;
+        if bytes.contains(&b'\r') {
+            self.note_submitted(pane_id);
+        }
+        Ok(())
     }
 
     pub fn resize_pane(
