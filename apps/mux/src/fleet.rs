@@ -2098,7 +2098,7 @@ impl MuxApp {
         );
         let mut card = v_flex().gap(px(2.0)).child(
             h_flex()
-                .h(px(24.0))
+                .h(px(28.0))
                 .pl(px(24.0))
                 .pr(px(10.0))
                 .justify_between()
@@ -2137,7 +2137,7 @@ impl MuxApp {
     fn fleet_hooks_card(&self, choice: usize) -> gpui::AnyElement {
         let mut card = v_flex().gap(px(2.0)).child(
             h_flex()
-                .h(px(24.0))
+                .h(px(28.0))
                 .pl(px(24.0))
                 .pr(px(10.0))
                 .justify_between()
