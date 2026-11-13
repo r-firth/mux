@@ -2678,58 +2678,55 @@ impl MuxApp {
                     .text_color(color(if wants { TEXT } else { MUTED_TEXT }))
                     .children(beside),
             );
-        let shown = match pane {
-            Some(pane) => {
-                // A pane sits in its tile's top left, as its text does in
-                // it; one that holds more than the tile is tall shows the
-                // foot of it, where its latest output and its cursor are.
-                let top = (body.height - pane.foot).min(0.0);
-                div()
-                    .absolute()
-                    .left_0()
-                    .top(px(top))
-                    .w(px(pane.width))
-                    .h(px(pane.height))
-                    .child(pane.view)
-                    .into_any_element()
-            }
+        let shown = if let Some(pane) = pane {
+            // A pane sits in its tile's top left, as its text does in
+            // it; one that holds more than the tile is tall shows the
+            // foot of it, where its latest output and its cursor are.
+            let top = (body.height - pane.foot).min(0.0);
+            div()
+                .absolute()
+                .left_0()
+                .top(px(top))
+                .w(px(pane.width))
+                .h(px(pane.height))
+                .child(pane.view)
+                .into_any_element()
+        } else {
             // A pane of another session has no terminal here: the foot of
             // its text, at the size a tile's pane reads at.
-            None => {
-                let text = self
-                    .fleet_view
-                    .as_ref()
-                    .and_then(|view| view.remote_text.get(&pane_id));
-                let line_height = (TILE_MIN_FONT * 1.4).round();
-                let room = (body.height / line_height).floor().max(1.0) as usize;
-                let lines = text.map(|text| {
-                    let lines = text.trim_end().lines().collect::<Vec<_>>();
-                    lines[lines.len().saturating_sub(room)..]
-                        .iter()
-                        .map(|line| (*line).to_owned())
-                        .collect::<Vec<_>>()
-                });
-                v_flex()
-                    .size_full()
-                    .justify_end()
-                    .overflow_hidden()
-                    .px(px(4.0))
-                    .font_family(self.terminal_font.clone())
-                    .text_size(px(TILE_MIN_FONT))
-                    .line_height(px(line_height))
-                    .text_color(color(MUTED_TEXT))
-                    .children(lines.into_iter().flatten().map(|line| {
-                        div()
-                            .flex_none()
-                            .h(px(line_height))
-                            .child(if line.is_empty() {
-                                " ".to_owned()
-                            } else {
-                                line
-                            })
-                    }))
-                    .into_any_element()
-            }
+            let text = self
+                .fleet_view
+                .as_ref()
+                .and_then(|view| view.remote_text.get(&pane_id));
+            let line_height = (TILE_MIN_FONT * 1.4).round();
+            let room = (body.height / line_height).floor().max(1.0) as usize;
+            let lines = text.map(|text| {
+                let lines = text.trim_end().lines().collect::<Vec<_>>();
+                lines[lines.len().saturating_sub(room)..]
+                    .iter()
+                    .map(|line| (*line).to_owned())
+                    .collect::<Vec<_>>()
+            });
+            v_flex()
+                .size_full()
+                .justify_end()
+                .overflow_hidden()
+                .px(px(4.0))
+                .font_family(self.terminal_font.clone())
+                .text_size(px(TILE_MIN_FONT))
+                .line_height(px(line_height))
+                .text_color(color(MUTED_TEXT))
+                .children(lines.into_iter().flatten().map(|line| {
+                    div()
+                        .flex_none()
+                        .h(px(line_height))
+                        .child(if line.is_empty() {
+                            " ".to_owned()
+                        } else {
+                            line
+                        })
+                }))
+                .into_any_element()
         };
         v_flex()
             .id(SharedString::from(format!("fleet-tile-{pane_id}")))
