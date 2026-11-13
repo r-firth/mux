@@ -1155,7 +1155,7 @@ impl MuxApp {
                     Ok(changed) => {
                         let said = match (hooked, changed, kind) {
                             (true, _, AgentKind::Codex) => {
-                                "hooked codex · run /hooks in codex once to trust it".to_owned()
+                                "hooked codex · it asks to trust them when next started".to_owned()
                             }
                             (true, _, AgentKind::Copilot) => {
                                 "hooked copilot · restart copilot to load it".to_owned()
