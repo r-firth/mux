@@ -400,6 +400,27 @@ fn summary(agents: &[FleetAgent]) -> String {
         .join(" · ")
 }
 
+/// The summary in no more than `room` characters: its leading parts, whole.
+/// The states that want the user come first, so what gives way is the
+/// quiet end of it.
+fn summary_within(agents: &[FleetAgent], room: usize) -> String {
+    let said = summary(agents);
+    let mut kept = 0;
+    for (at, _) in said.match_indices(" · ") {
+        if said[..at].chars().count() > room {
+            break;
+        }
+        kept = at;
+    }
+    if said.chars().count() <= room {
+        said
+    } else if kept > 0 {
+        said[..kept].to_owned()
+    } else {
+        said
+    }
+}
+
 /// The next agent waiting on the user after `from` in `order`, coming
 /// round at the ends, or the one before with `forward` false.
 fn next_waiting(
@@ -2190,7 +2211,9 @@ impl MuxApp {
         let groups = roster(&self.fleet);
         let focused = !view.in_pane;
         let ink = self.active_ink();
-        let said = summary(&self.fleet);
+        // The head's room after its title, in characters of its small type.
+        let room = ((frame.width - 30.0 - 16.0 - 12.0 - 52.0) / 7.3).floor();
+        let said = summary_within(&self.fleet, room.max(0.0) as usize);
 
         let mut list = v_flex()
             .id("fleet-roster-rows")
@@ -3156,6 +3179,13 @@ mod tests {
         ];
         assert_eq!(summary(&agents), "2 waiting · 1 working · 1 done · 1 idle");
         assert_eq!(summary(&[]), "");
+        assert_eq!(summary_within(&agents, 40), summary(&agents));
+        assert_eq!(
+            summary_within(&agents, 30),
+            "2 waiting · 1 working · 1 done"
+        );
+        assert_eq!(summary_within(&agents, 12), "2 waiting");
+        assert_eq!(summary_within(&agents, 3), summary(&agents));
     }
 
     #[test]
