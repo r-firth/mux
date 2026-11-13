@@ -312,6 +312,37 @@ pub(super) fn agent_name(kind: AgentKind) -> String {
     kind.command().to_owned()
 }
 
+/// What an agent says, with the paths in it said from where it works: a
+/// file in its directory or its project by the rest of its path, and one
+/// under the home directory from `~`. A row has little room, and the end
+/// of a path says more than its start.
+fn said_from_project(agent: &FleetAgent, said: &str, home: Option<&std::path::Path>) -> String {
+    let mut said = said.to_owned();
+    let mut places = vec![agent.cwd.as_path(), agent.project.root.as_path()];
+    places.sort_by_key(|place| std::cmp::Reverse(place.as_os_str().len()));
+    for place in places {
+        let place = place.to_string_lossy();
+        if place.len() > 1 {
+            said = said.replace(&format!("{place}/"), "");
+        }
+    }
+    if let Some(home) = home.map(|home| home.to_string_lossy())
+        && home.len() > 1
+    {
+        said = said.replace(&format!("{home}/"), "~/");
+    }
+    said
+}
+
+/// A line of an agent's, as a row or a tile's head says it.
+fn fleet_said(agent: &FleetAgent, said: Option<&str>) -> Option<String> {
+    static HOME: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    let home = HOME.get_or_init(|| {
+        directories::BaseDirs::new().map(|directories| directories.home_dir().to_path_buf())
+    });
+    said.map(|said| said_from_project(agent, said, home.as_deref()))
+}
+
 /// The state as a row has room for it.
 const fn state_word(state: FleetState) -> &'static str {
     match state {
@@ -1800,7 +1831,7 @@ impl MuxApp {
     ) -> gpui::AnyElement {
         let pane_id = agent.pane_id;
         let ended = agent.state == FleetState::Ended;
-        let headline = agent.headline().map(str::to_owned).or_else(|| {
+        let headline = fleet_said(agent, agent.headline()).or_else(|| {
             (agent.state == FleetState::Blocked).then(|| match agent.need {
                 Some(mux_fleet::Need::Permission) => "asks to be allowed something".to_owned(),
                 Some(mux_fleet::Need::Question) => "has a question".to_owned(),
@@ -2510,7 +2541,7 @@ impl MuxApp {
         let ended = agent.state == FleetState::Ended;
         // What a waiting agent asks takes the place of what it was asked.
         let beside = if wants {
-            agent.headline().map(str::to_owned).or(agent.task.clone())
+            fleet_said(agent, agent.headline()).or(agent.task.clone())
         } else {
             agent.task.clone()
         };
@@ -2979,6 +3010,25 @@ mod tests {
         assert_eq!(roster_list_index(&agents, agents[4].pane_id), Some(4));
         assert_eq!(roster_list_index(&agents, agents[3].pane_id), Some(7));
         assert_eq!(roster_list_index(&agents, PaneId::new()), None);
+    }
+
+    #[test]
+    fn paths_are_said_from_where_the_agent_works() {
+        let mut agent = agent("gofer", FleetState::Blocked, 1);
+        agent.cwd = PathBuf::from("/Users/r/src/gofer/crates/core");
+        agent.project.root = PathBuf::from("/Users/r/src/gofer");
+        let home = PathBuf::from("/Users/r");
+        let said = |line: &str| said_from_project(&agent, line, Some(&home));
+        assert_eq!(
+            said("Write: /Users/r/src/gofer/crates/core/src/retry.rs"),
+            "Write: src/retry.rs"
+        );
+        assert_eq!(
+            said("Edit: /Users/r/src/gofer/README.md"),
+            "Edit: README.md"
+        );
+        assert_eq!(said("Read: /Users/r/.zshrc"), "Read: ~/.zshrc");
+        assert_eq!(said("Bash: cargo test"), "Bash: cargo test");
     }
 
     #[test]
