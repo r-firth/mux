@@ -11,7 +11,8 @@
 //!
 //! `v` turns the view into a wall: every agent's pane at once, each drawn
 //! small in a tile under its name and state, the ones that wait first. The
-//! panes keep their own sizes; only the drawing is scaled. A waiting
+//! panes keep their own sizes; a tile draws its pane smaller, never too
+//! small to read, and crops to the foot of what it holds. A waiting
 //! agent's tile calls as a pane that calls does, in peach on the ground
 //! around it.
 //!
@@ -2521,8 +2522,8 @@ impl MuxApp {
 
     /// One tile of the wall: a head of two lines, the agent's mark, name,
     /// project and state, then what it was asked (or what it asks, while it
-    /// waits), over its pane drawn small. The chosen tile wears the ink a focused pane does,
-    /// and one that waits on the user a peach edge.
+    /// waits), over its pane drawn small. The chosen tile wears the ink a
+    /// focused pane does, and one that waits on the user a peach edge.
     #[allow(clippy::too_many_lines)]
     fn render_wall_tile(
         &self,
