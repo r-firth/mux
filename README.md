@@ -133,7 +133,7 @@ with `/new my-agent [cwd]`.
 ## The fleet
 
 An agent's own interface works in Mux as it does anywhere: run `claude`,
-`codex` or `copilot` from a shell in any pane. Mux follows each one where it
+`codex`, `copilot`, `pi` or another agent Mux knows from a shell in any pane. Mux follows each one where it
 runs. `Cmd+Shift+A` shows them all, grouped by project, with what each was
 asked and whether it is working, done or waiting on you, beside the chosen
 agent's live pane. Return steps into that pane to answer it, Tab goes to the
@@ -142,10 +142,12 @@ shows every agent's live pane at once in a grid, the waiting ones first and
 calling in peach.
 
 Press `h` in the fleet, or run `muxctl hooks install`, to put Mux's hooks
-into Claude Code, Codex and Copilot, so each reports its prompts, tools and
+into Claude Code, Codex, Copilot and pi, so each reports its prompts, tools and
 requests for permission. The hooks do nothing outside a Mux pane and come
 out again with `muxctl hooks uninstall`. An agent without hooks is still
-listed, with what its notifications say. `muxctl fleet` lists the agents,
+listed, with what its notifications say: Gemini, OpenCode, Cursor, Amp, Aider,
+Goose, Droid, Kilo, Kimi, Qwen, Cline, Devin, Grok, Hermes, Kiro, Letta,
+Antigravity, Qoder, Mastra, Maki, Muse and Oh My Pi are known by their programs. `muxctl fleet` lists the agents,
 waits on them, prompts them and reads them from a script.
 
 ## Development

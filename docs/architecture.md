@@ -161,7 +161,9 @@ nothing and always succeeds. `muxctl hook` reads the agent's event and
 reports it to the daemon for that pane. Installing touches only Mux's own
 entries in `~/.claude/settings.json`, `~/.codex/hooks.json` and
 `~/.copilot/hooks/mux.json`, and copies a file beside itself the first time
-it changes it.
+it changes it. pi has no hooks to list: Mux's is an extension of its own,
+`~/.pi/agent/extensions/mux-fleet.ts`, that runs `muxctl hook pi` at pi's
+events.
 
 The daemon keeps one fleet for all its sessions, tells every client of each
 change, and writes it to `fleet.json` in the state directory, so an agent

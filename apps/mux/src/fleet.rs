@@ -1291,6 +1291,9 @@ impl MuxApp {
                             (true, _, AgentKind::Copilot) => {
                                 "hooked copilot · restart copilot to load it".to_owned()
                             }
+                            (true, true, AgentKind::Pi) => {
+                                "hooked pi · restart pi or /reload to load it".to_owned()
+                            }
                             (true, true, _) => format!("hooked {name}"),
                             (true, false, _) => format!("{name} is already hooked"),
                             (false, true, _) => format!("took mux's hooks out of {name}"),

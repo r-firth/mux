@@ -42,10 +42,26 @@ pub enum AgentKind {
     Aider,
     Goose,
     Droid,
+    Pi,
+    Omp,
+    Kilo,
+    Kimi,
+    Qwen,
+    Cline,
+    Devin,
+    Grok,
+    Hermes,
+    Kiro,
+    Letta,
+    Antigravity,
+    Qoder,
+    Mastra,
+    Maki,
+    Muse,
 }
 
 impl AgentKind {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 26] = [
         Self::Claude,
         Self::Codex,
         Self::Copilot,
@@ -56,10 +72,26 @@ impl AgentKind {
         Self::Aider,
         Self::Goose,
         Self::Droid,
+        Self::Pi,
+        Self::Omp,
+        Self::Kilo,
+        Self::Kimi,
+        Self::Qwen,
+        Self::Cline,
+        Self::Devin,
+        Self::Grok,
+        Self::Hermes,
+        Self::Kiro,
+        Self::Letta,
+        Self::Antigravity,
+        Self::Qoder,
+        Self::Mastra,
+        Self::Maki,
+        Self::Muse,
     ];
 
     /// The agents Mux installs hooks into.
-    pub const HOOKED: [Self; 3] = [Self::Claude, Self::Codex, Self::Copilot];
+    pub const HOOKED: [Self; 4] = [Self::Claude, Self::Codex, Self::Copilot, Self::Pi];
 
     /// The name for people.
     #[must_use]
@@ -75,6 +107,22 @@ impl AgentKind {
             Self::Aider => "Aider",
             Self::Goose => "Goose",
             Self::Droid => "Droid",
+            Self::Pi => "Pi",
+            Self::Omp => "Oh My Pi",
+            Self::Kilo => "Kilo Code",
+            Self::Kimi => "Kimi Code",
+            Self::Qwen => "Qwen Code",
+            Self::Cline => "Cline",
+            Self::Devin => "Devin",
+            Self::Grok => "Grok",
+            Self::Hermes => "Hermes",
+            Self::Kiro => "Kiro",
+            Self::Letta => "Letta Code",
+            Self::Antigravity => "Antigravity",
+            Self::Qoder => "Qoder",
+            Self::Mastra => "Mastra Code",
+            Self::Maki => "Maki",
+            Self::Muse => "Muse",
         }
     }
 
@@ -92,6 +140,22 @@ impl AgentKind {
             Self::Aider => "aider",
             Self::Goose => "goose",
             Self::Droid => "droid",
+            Self::Pi => "pi",
+            Self::Omp => "omp",
+            Self::Kilo => "kilo",
+            Self::Kimi => "kimi",
+            Self::Qwen => "qwen",
+            Self::Cline => "cline",
+            Self::Devin => "devin",
+            Self::Grok => "grok",
+            Self::Hermes => "hermes",
+            Self::Kiro => "kiro-cli",
+            Self::Letta => "letta",
+            Self::Antigravity => "agy",
+            Self::Qoder => "qodercli",
+            Self::Mastra => "mastracode",
+            Self::Maki => "maki",
+            Self::Muse => "muse",
         }
     }
 
@@ -101,6 +165,39 @@ impl AgentKind {
         Self::ALL
             .into_iter()
             .find(|kind| kind.command().eq_ignore_ascii_case(name))
+    }
+
+    /// Other names the agent's program goes by.
+    const fn aliases(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude => &["claude-code"],
+            Self::Copilot => &["github-copilot"],
+            Self::Cursor => &["cursor"],
+            Self::OpenCode => &["open-code"],
+            Self::Amp => &["amp-local"],
+            Self::Kilo => &["kilo-code"],
+            Self::Kimi => &["kimi-code"],
+            Self::Qwen => &["qwen-code"],
+            Self::Devin => &["devin-cli"],
+            Self::Grok => &["grok-build"],
+            Self::Hermes => &["hermes-agent"],
+            Self::Kiro => &["kiro"],
+            Self::Letta => &["letta-code"],
+            Self::Antigravity => &["antigravity", "antigravity-cli"],
+            Self::Qoder => &["qoder", "qoderclicn", "qodercn"],
+            Self::Mastra => &["mastra-code"],
+            Self::Muse => &["muse-code", "muse-cli"],
+            _ => &[],
+        }
+    }
+
+    /// Whether `name` is what the agent's program is called.
+    fn is_called(self, name: &str) -> bool {
+        self.command().eq_ignore_ascii_case(name)
+            || self
+                .aliases()
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(name))
     }
 
     /// Directory names that only this agent's own files sit under, for
@@ -117,6 +214,22 @@ impl AgentKind {
             Self::Aider => &["aider", "aider-chat"],
             Self::Goose => &["goose"],
             Self::Droid => &["droid"],
+            Self::Pi => &["pi-coding-agent"],
+            Self::Omp => &["omp"],
+            Self::Kilo => &["kilo", "kilocode"],
+            Self::Kimi => &["kimi", "kimi-cli"],
+            Self::Qwen => &["qwen", "qwen-code"],
+            Self::Cline => &["cline"],
+            Self::Devin => &["devin"],
+            Self::Grok => &["grok"],
+            Self::Hermes => &["hermes", "hermes-agent"],
+            Self::Kiro => &["kiro", "kiro-cli"],
+            Self::Letta => &["letta", "letta-code"],
+            Self::Antigravity => &["antigravity"],
+            Self::Qoder => &["qodercli", "qoder"],
+            Self::Mastra => &["mastracode"],
+            Self::Maki => &["maki"],
+            Self::Muse => &["muse"],
         }
     }
 
@@ -140,7 +253,13 @@ impl AgentKind {
                 .unwrap_or(stem);
             Self::ALL
                 .into_iter()
-                .find(|kind| kind.command().eq_ignore_ascii_case(stem))
+                .find(|kind| kind.is_called(stem))
+                .or_else(|| {
+                    // Muse runs as `muse-bin-<version>`.
+                    stem.strip_prefix("muse-bin-")
+                        .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+                        .then_some(Self::Muse)
+                })
         };
         if let Some(kind) = named(name) {
             return Some(kind);
@@ -200,6 +319,7 @@ impl AgentKind {
             Self::Claude => Some(format!("claude --resume {agent_session}")),
             Self::Codex => Some(format!("codex resume {agent_session}")),
             Self::Copilot => Some(format!("copilot --resume {agent_session}")),
+            Self::Pi => Some(format!("pi --session {agent_session}")),
             _ => None,
         }
     }
@@ -1283,5 +1403,32 @@ mod tests {
         assert_eq!(one_line("abcdefgh", 5).as_deref(), Some("abcd…"));
         assert_eq!(one_line(" \n ", 5), None);
         assert_eq!(one_line("a\x1b[31mb", 9).as_deref(), Some("a[31mb"));
+    }
+
+    #[test]
+    fn the_agents_herdr_knows_are_known_by_their_programs() {
+        for (name, kind) in [
+            ("pi", AgentKind::Pi),
+            ("omp", AgentKind::Omp),
+            ("kilo", AgentKind::Kilo),
+            ("qwen", AgentKind::Qwen),
+            ("kiro-cli", AgentKind::Kiro),
+            ("agy", AgentKind::Antigravity),
+            ("qodercli", AgentKind::Qoder),
+            ("muse-bin-0.1.0-R708.1", AgentKind::Muse),
+        ] {
+            assert_eq!(AgentKind::detect(name, None, &[]), Some(kind), "{name}");
+        }
+        assert_eq!(AgentKind::detect("muse-binary", None, &[]), None);
+        // pi is a Node program, started by its package's script.
+        let script = "/opt/homebrew/lib/node_modules/@mariozechner/pi-coding-agent/dist/cli.js";
+        assert_eq!(
+            AgentKind::detect("node", None, &["node".to_owned(), script.to_owned()]),
+            Some(AgentKind::Pi)
+        );
+        assert_eq!(
+            AgentKind::Pi.resume_command("0195c3a1-7b1e-7c2d-9a3f-1f2e3d4c5b6a"),
+            Some("pi --session 0195c3a1-7b1e-7c2d-9a3f-1f2e3d4c5b6a".to_owned())
+        );
     }
 }
