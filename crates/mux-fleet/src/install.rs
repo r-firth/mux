@@ -22,7 +22,8 @@
 //!
 //! - Claude Code: `hooks` in `~/.claude/settings.json`.
 //! - Codex: `~/.codex/hooks.json`. Codex asks the user to trust a new
-//!   hook, with `/hooks`, before it runs it, and trusts it by its text, so
+//!   hook before it runs it, when it next starts or with `/hooks` in one
+//!   that is running, and trusts it by its text, so
 //!   the command is kept the same from one Mux to the next.
 //! - Copilot: a file of Mux's own, `~/.copilot/hooks/mux.json`.
 

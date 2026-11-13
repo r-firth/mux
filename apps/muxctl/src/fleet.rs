@@ -115,7 +115,8 @@ pub fn hooks(command: Option<HooksCommand>) -> Result<()> {
                 );
                 if changed && kind == AgentKind::Codex {
                     println!(
-                        "  Codex runs a new hook only once you trust it: run /hooks in Codex, once."
+                        "  Codex runs a new hook only once you trust it. It asks when it next \
+                         starts; in one already running, /hooks then t."
                     );
                 }
                 if changed && kind == AgentKind::Copilot {
@@ -470,7 +471,8 @@ fn explain(agent: &FleetAgent) {
     if agent.signal != Signal::Hooks {
         match hooked {
             Some(HookStatus::Installed) if agent.kind == AgentKind::Codex => println!(
-                "  hooks     installed, but nothing heard: run /hooks in Codex to trust them"
+                "  hooks     installed, but nothing heard yet: Codex reports from its first \
+                 prompt, and only once its hooks are trusted (/hooks there shows whether)"
             ),
             Some(HookStatus::Installed) => println!(
                 "  hooks     installed, but nothing heard: an agent started before they were \
