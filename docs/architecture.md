@@ -14,6 +14,7 @@ workspace daemon
   sessions -> tabs -> pane layout
   pane -> PTY + child + canonical terminal engine
   agent session -> external ACP process + durable UI snapshot
+  fleet -> the coding agent in each terminal pane, and what it is doing
 ```
 
 ## Boundaries
@@ -37,6 +38,12 @@ workspace daemon
   stable ACP v1 through the maintained Rust SDK, owns external agent processes,
   normalizes streaming messages/tools/plans/permissions, and exposes modes and
   configuration without agent-specific UI code.
+
+- `mux-fleet` owns the coding agents that run in terminal panes: which
+  agent a process is, what its hooks and its output say it is doing, the
+  project it works in, and putting Mux's hooks into an agent's settings and
+  taking them out. It keeps no clock and starts no process; the daemon feeds
+  it and says when things happened.
 
 ## Attach consistency
 
@@ -136,6 +143,35 @@ detaches that view; explicit `/end` closes the selected process and the GUI
 hides its closed snapshot from the session picker. A new agent is started for a
 pane ID rather than a GUI-supplied guessed path, so the daemon can resolve the
 foreground shell's current directory at the moment of launch.
+
+## Fleet
+
+An agent run from a shell, `claude` or `codex` in a terminal pane, is a fact
+about that pane, not a session Mux owns. The daemon learns of it from four
+signals, taking each as it comes: the hooks Mux installs in the agent, OSC 7501
+in the pane's output, a notification or a bell, and the process in front of
+the pane's shell, which says an agent is there and when it has gone. Mux
+never reads an agent's screen to guess its state.
+
+Every pane's environment carries `MUX_PANE_ID` and `MUX_CTL`, the `muxctl`
+beside the Mux that owns the pane. An installed hook is one shell line,
+`[ -z "$MUX_PANE_ID" ] || "$MUX_CTL" hook claude Stop`, so it does nothing
+outside a Mux pane, names no path an update could leave stale, prints
+nothing and always succeeds. `muxctl hook` reads the agent's event and
+reports it to the daemon for that pane. Installing touches only Mux's own
+entries in `~/.claude/settings.json`, `~/.codex/hooks.json` and
+`~/.copilot/hooks/mux.json`, and copies a file beside itself the first time
+it changes it.
+
+The daemon keeps one fleet for all its sessions, tells every client of each
+change, and writes it to `fleet.json` in the state directory, so an agent
+that has ended, or was running when the daemon stopped, is still listed
+with the command that picks its session up again. The GUI holds a copy and
+draws the fleet view from it: the roster is its own, and the chosen agent's
+pane is that pane's ordinary terminal, shown alone, so stepping into it is
+the same input path as typing in its tab. A pane of another session has no
+terminal in this window, so the view asks the daemon for the end of its
+text instead.
 
 ## Agent boundary
 
