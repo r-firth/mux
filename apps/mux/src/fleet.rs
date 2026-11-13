@@ -206,6 +206,22 @@ fn roster_order(agents: &[FleetAgent]) -> Vec<PaneId> {
         .collect()
 }
 
+/// Which of the roster's list an agent's row is, counting the head each
+/// project has over its rows: what scrolling to the row goes by.
+fn roster_list_index(agents: &[FleetAgent], pane_id: PaneId) -> Option<usize> {
+    let mut index = 0;
+    for group in roster(agents) {
+        index += 1;
+        for agent in group.agents {
+            if agent.pane_id == pane_id {
+                return Some(index);
+            }
+            index += 1;
+        }
+    }
+    None
+}
+
 /// The wall's agents in the order it tiles them: the ones that wait on the
 /// user first, then those with news, at work, idle and ended, each kind by
 /// how long it has been so.
@@ -624,7 +640,7 @@ impl MuxApp {
     }
 
     fn select_fleet_agent(&mut self, pane_id: Option<PaneId>, cx: &mut Context<Self>) {
-        let order = roster_order(&self.fleet);
+        let row = pane_id.and_then(|pane_id| roster_list_index(&self.fleet, pane_id));
         let was_in_view = self.panes_in_view();
         let Some(view) = self.fleet_view.as_mut() else {
             return;
@@ -635,9 +651,8 @@ impl MuxApp {
         view.selected = pane_id;
         view.selected_at = Instant::now();
         view.remote_text = None;
-        if let Some(index) = pane_id.and_then(|pane_id| order.iter().position(|at| *at == pane_id))
-        {
-            view.scroll.scroll_to_item(index);
+        if let Some(row) = row {
+            view.scroll.scroll_to_item(row);
         }
         self.ask_remote_text();
         // The roster's one pane changes with the choice.
@@ -2905,6 +2920,12 @@ mod tests {
             ]
         );
         assert_eq!(roster_order(&agents)[0], agents[2].pane_id);
+        // A row is scrolled to by its place among the rows and the heads
+        // over them: mux's head, its two rows, gofer's head, then gofer's.
+        assert_eq!(roster_list_index(&agents, agents[2].pane_id), Some(1));
+        assert_eq!(roster_list_index(&agents, agents[4].pane_id), Some(4));
+        assert_eq!(roster_list_index(&agents, agents[3].pane_id), Some(7));
+        assert_eq!(roster_list_index(&agents, PaneId::new()), None);
     }
 
     #[test]
