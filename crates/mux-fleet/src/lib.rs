@@ -211,6 +211,9 @@ fn is_runtime(name: &str) -> bool {
         .iter()
         .any(|runtime| name == *runtime || name.starts_with(&format!("{runtime}3")))
         || name.starts_with("python")
+        // A wrapper script by an agent's name runs under the shell of its
+        // first line.
+        || ["sh", "bash", "zsh", "dash", "ksh", "fish"].contains(&name.as_str())
 }
 
 /// What an agent is doing.
@@ -905,6 +908,17 @@ mod tests {
         );
         assert_eq!(
             AgentKind::detect("node", None, &args(&["node", "server.js"])),
+            None
+        );
+        // A wrapper script runs under its shell; a shell at its prompt, or
+        // one running something else, is no agent.
+        assert_eq!(
+            AgentKind::detect("bash", None, &args(&["/bin/sh", "./claude"])),
+            Some(AgentKind::Claude)
+        );
+        assert_eq!(AgentKind::detect("zsh", None, &args(&["-zsh"])), None);
+        assert_eq!(
+            AgentKind::detect("bash", None, &args(&["bash", "-c", "claude --help | less"])),
             None
         );
         assert_eq!(
