@@ -1156,14 +1156,6 @@ impl Keymap {
         keymap.bind(
             InputMode::Normal,
             KeyChord {
-                key: Key::Character('a'),
-                modifiers: Modifiers::SUPER.union(Modifiers::SHIFT),
-            },
-            Action::OpenAgentSurface,
-        );
-        keymap.bind(
-            InputMode::Normal,
-            KeyChord {
                 key: Key::Character('s'),
                 modifiers: Modifiers::SUPER.union(Modifiers::SHIFT),
             },

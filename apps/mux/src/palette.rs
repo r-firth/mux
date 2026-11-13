@@ -56,6 +56,8 @@ enum Destination {
     Command(Command),
     /// One of the agent profiles, by its place in the list.
     Agent(usize),
+    /// A coding agent running in a terminal pane, by its pane and session.
+    FleetAgent(PaneId, SessionId),
     /// A command run in a pane, by its prompt's row.
     Ran(PaneId, usize),
     /// What was typed, found in the pane with the keys, when nothing else
@@ -99,6 +101,9 @@ enum Command {
     CopyOutput,
     OpenHistory,
     RevealDirectory,
+    Fleet,
+    StartFleetAgent,
+    FleetHooks,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -320,6 +325,10 @@ impl MuxApp {
             }
             Destination::Command(command) => self.run_palette_command(command, window, cx),
             Destination::Agent(index) => self.open_agent_from_palette(index, window, cx),
+            Destination::FleetAgent(pane_id, session_id) => {
+                self.close_fleet(false, window, cx);
+                self.go_to_fleet_agent(pane_id, session_id, cx);
+            }
             Destination::Ran(pane_id, row) => self.go_to_command(pane_id, row, cx),
             Destination::FindInPane => {
                 if let Some(query) = query {
@@ -385,7 +394,7 @@ impl MuxApp {
                 return;
             }
             Command::GoToCall => {
-                self.go_to_call(cx);
+                self.go_to_call(window, cx);
                 return;
             }
             Command::OpenHistory => {
@@ -418,6 +427,18 @@ impl MuxApp {
             }
             Command::NewSession => {
                 self.start_session_here();
+                return;
+            }
+            Command::Fleet => {
+                self.toggle_fleet(window, cx);
+                return;
+            }
+            Command::StartFleetAgent => {
+                self.open_fleet_start(true, window, cx);
+                return;
+            }
+            Command::FleetHooks => {
+                self.open_fleet_hooks(window, cx);
                 return;
             }
         };
@@ -516,6 +537,7 @@ impl MuxApp {
                 self.push_tab_rows(&mut rows, position, tab, tab.id == session.active_tab);
             }
         }
+        self.push_fleet_rows(&mut rows);
         let current = self.session.as_ref().map(|session| session.id);
         for session in self
             .sessions
@@ -574,6 +596,54 @@ impl MuxApp {
                     .map(|words| (words, tone))
                     .or_else(|| place.clone().map(|place| (place, FAINT_TEXT))),
             };
+            rows.push(row);
+        }
+    }
+
+    /// A row for each coding agent running in a terminal pane, in whatever
+    /// tab or session: its name and what it was asked, with its state.
+    fn push_fleet_rows(&self, rows: &mut Vec<Row>) {
+        for agent in &self.fleet {
+            if !agent.state.is_live() {
+                continue;
+            }
+            let name = fleet::agent_name(agent.kind);
+            let label = agent
+                .task
+                .as_ref()
+                .map_or_else(|| name.clone(), |task| format!("{name} · {task}"));
+            let mut row = Row::new(
+                Destination::FleetAgent(agent.pane_id, agent.session_id),
+                "agent",
+                label,
+                1,
+            );
+            let wants = agent.state.wants_user();
+            let ink = self
+                .session
+                .as_ref()
+                .and_then(|session| {
+                    session
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.layout.contains(agent.pane_id))
+                })
+                .map_or(color(MUTED_TEXT), |tab| self.tab_ink(tab.id).color());
+            row.mark = if wants {
+                Mark::Dot(color(SIGNAL))
+            } else {
+                Mark::Ring(ink)
+            };
+            row.tone = MUTED_TEXT;
+            row.hint = Some((
+                agent.state.word().to_owned(),
+                if wants { SIGNAL } else { FAINT_TEXT },
+            ));
+            row.also = format!(
+                "{} {} fleet agent",
+                agent.kind.command(),
+                agent.project.name
+            );
             rows.push(row);
         }
     }
@@ -796,7 +866,7 @@ impl MuxApp {
     /// What mux can do, each with the keys that do it and other words it
     /// answers to. Some say what they will do to the pane or tab on screen.
     #[allow(clippy::too_many_lines)] // One entry per command.
-    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 34] {
+    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 37] {
         let zoomed = self.active_tab_zoomed();
         let agent_here = self
             .active_agent_pane()
@@ -935,7 +1005,7 @@ impl MuxApp {
             ),
             (
                 Command::GoToCall,
-                "",
+                "⌘j",
                 "go to the pane that called",
                 "jump bell notification agent waiting needs attention",
             ),
@@ -954,6 +1024,28 @@ impl MuxApp {
                     "open an agent here"
                 },
                 "claude code codex copilot acp ai chat",
+            ),
+            (
+                Command::Fleet,
+                "⌘⇧a",
+                if self.fleet_open() {
+                    "hide the fleet"
+                } else {
+                    "show the fleet"
+                },
+                "agents roster claude codex copilot running waiting",
+            ),
+            (
+                Command::StartFleetAgent,
+                "",
+                "start an agent here",
+                "new run launch claude codex copilot gemini fleet tab",
+            ),
+            (
+                Command::FleetHooks,
+                "",
+                "hook coding agents…",
+                "hooks install uninstall claude codex copilot fleet",
             ),
             (
                 Command::Sessions,

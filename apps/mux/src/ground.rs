@@ -1595,6 +1595,14 @@ impl MuxApp {
                 past = true;
             }
         }
+        // The fleet's view lays slabs of its own, and its roster takes the
+        // light while it has the keys.
+        if let Some((fleet_slabs, fleet_focus)) = self.fleet_ground(viewport) {
+            slabs.extend(fleet_slabs);
+            if fleet_focus.is_some() {
+                focus = fleet_focus;
+            }
+        }
         let mut running = Vec::new();
         let chip = self.ground_chips(&mut calls, &mut running);
         Scene {
@@ -1623,14 +1631,17 @@ impl MuxApp {
     ) -> Option<layout::Rect> {
         let session = self.session.as_ref()?;
         let scrolled = self.tab_strip_scroll.offset();
-        let mut chip = None;
+        // While the fleet is on screen its chip is the one in front, and
+        // the tab beneath it is out of sight like the rest.
+        let fleet = self.fleet_open();
+        let mut chip = fleet.then(|| self.fleet_chip_rect());
         for (position, tab) in session.tabs.iter().enumerate() {
             let Some(bounds) = self.tab_strip_scroll.bounds_for_item(position) else {
                 continue;
             };
             let mut rect = rect_of(bounds);
             rect.x += f32::from(scrolled.x);
-            if tab.id == session.active_tab {
+            if tab.id == session.active_tab && !fleet {
                 chip = Some(rect);
                 continue;
             }

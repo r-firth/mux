@@ -103,6 +103,21 @@ pub enum CommandMessage {
         target: CloseTarget,
         pane_ids: Vec<PaneId>,
     },
+    /// Ask for every agent in a terminal pane afresh.
+    ListFleet,
+    /// The agent that finished in this pane has been looked at.
+    FleetSeen {
+        pane_id: PaneId,
+    },
+    /// Let go of the ended agent session kept for a pane.
+    ForgetFleetAgent {
+        pane_id: PaneId,
+    },
+    /// Ask for the last lines a pane of another session shows.
+    PaneText {
+        pane_id: PaneId,
+        lines: u32,
+    },
 }
 
 /// What a close is for: the focused pane, a tab, or every tab but one.
@@ -162,6 +177,7 @@ async fn run(
     let attachment = client.attach(SessionSelector::Id(session_id)).await?;
     let mut connection = BackendConnection::new(client, &attachment);
     send_event(events, UserEvent::Attached(attachment))?;
+    connection.publish_fleet(events).await?;
 
     loop {
         tokio::select! {
@@ -245,6 +261,18 @@ impl BackendConnection {
     async fn publish_sessions(&mut self, events: &EventSender) -> Result<()> {
         match self.client.list_sessions().await {
             Ok(sessions) => send_event(events, UserEvent::Sessions(sessions)),
+            Err(error) => {
+                report_backend_error(events, error);
+                Ok(())
+            }
+        }
+    }
+
+    /// Every agent in a terminal pane, as the daemon has them now. Changes
+    /// after this arrive as events.
+    async fn publish_fleet(&mut self, events: &EventSender) -> Result<()> {
+        match self.client.list_fleet().await {
+            Ok(agents) => send_event(events, UserEvent::Fleet(agents)),
             Err(error) => {
                 report_backend_error(events, error);
                 Ok(())
@@ -532,7 +560,11 @@ impl BackendConnection {
             | CommandMessage::RevealPath { .. }
             | CommandMessage::ClearPane { .. }
             | CommandMessage::ResetPane { .. }
-            | CommandMessage::CheckRunning { .. }) => {
+            | CommandMessage::CheckRunning { .. }
+            | CommandMessage::ListFleet
+            | CommandMessage::FleetSeen { .. }
+            | CommandMessage::ForgetFleetAgent { .. }
+            | CommandMessage::PaneText { .. }) => {
                 self.handle_pane_question(command, events).await?;
             }
         }
@@ -562,6 +594,19 @@ impl BackendConnection {
             CommandMessage::CheckRunning { target, pane_ids } => {
                 self.check_running(events, target, pane_ids).await?;
             }
+            CommandMessage::ListFleet => self.publish_fleet(events).await?,
+            CommandMessage::FleetSeen { pane_id } => {
+                report_pane_result(events, self.client.fleet_seen(pane_id).await);
+            }
+            CommandMessage::ForgetFleetAgent { pane_id } => {
+                report_pane_result(events, self.client.forget_fleet_agent(pane_id).await);
+            }
+            CommandMessage::PaneText { pane_id, lines } => {
+                // A pane that has closed since has nothing to show.
+                if let Ok(text) = self.client.pane_text(pane_id, lines).await {
+                    send_event(events, UserEvent::FleetPaneText { pane_id, text })?;
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -577,10 +622,13 @@ impl BackendConnection {
             | ServerEvent::PaneExited { .. }
             | ServerEvent::PaneCommandFinished { .. }
             | ServerEvent::PaneCommandStarted { .. }
-            | ServerEvent::PaneSecretInput { .. }) => send_event(events, UserEvent::Server(event)),
+            | ServerEvent::PaneSecretInput { .. }
+            | ServerEvent::Fleet(_)) => send_event(events, UserEvent::Server(event)),
             ServerEvent::ResyncRequired { session_id } => {
                 let attachment = self.client.attach(SessionSelector::Id(session_id)).await?;
-                self.publish_attachment(events, attachment)
+                self.publish_attachment(events, attachment)?;
+                // Events were lost; the fleet's may have been among them.
+                self.publish_fleet(events).await
             }
             ServerEvent::WorkspaceChanged { session_id } => {
                 if self.take_echo(session_id) {
@@ -595,7 +643,10 @@ impl BackendConnection {
             ServerEvent::Agent(event) => send_event(events, UserEvent::Agent(event)),
             ServerEvent::AgentResyncRequired => {
                 let agents = self.client.list_agent_sessions().await?;
-                send_event(events, UserEvent::Agents(agents))
+                send_event(events, UserEvent::Agents(agents))?;
+                // The fleet's events share the daemon's notice that some
+                // were lost.
+                self.publish_fleet(events).await
             }
         }
     }

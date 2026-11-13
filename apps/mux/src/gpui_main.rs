@@ -14,6 +14,7 @@ mod desktop_notice;
 mod early_typing;
 mod file_drop;
 mod find;
+mod fleet;
 mod gpui_terminal;
 mod ground;
 mod history_compression;
@@ -240,6 +241,7 @@ gpui::actions!(
         ZoomMuxWindow,
         ToggleMuxFullScreen,
         ToggleAgentPane,
+        ToggleMuxFleet,
         ZoomMuxPane
     ]
 );
@@ -275,6 +277,13 @@ enum UserEvent {
     PaneParsed {
         pane_id: PaneId,
         error: Option<String>,
+    },
+    /// Every agent in a terminal pane, as the daemon has them now.
+    Fleet(Vec<mux_fleet::FleetAgent>),
+    /// The last of what a pane of another session shows.
+    FleetPaneText {
+        pane_id: PaneId,
+        text: String,
     },
 }
 
@@ -766,6 +775,22 @@ struct MuxApp {
     /// Sessions that finished a turn while nobody was looking at them. Their
     /// tab's dot turns sage until the session is on screen again.
     agent_unseen: HashSet<AgentSessionId>,
+    /// The coding agents in terminal panes, in every session, as the daemon
+    /// last said, and the view of them while it is open.
+    fleet: Vec<mux_fleet::FleetAgent>,
+    fleet_view: Option<fleet::FleetView>,
+    /// Finished agents the daemon has been told were looked at, until it
+    /// says so itself.
+    fleet_seen_sent: HashSet<PaneId>,
+    /// Whether Mux's hooks are in each agent it has them for, as last read.
+    fleet_hooks: Vec<(mux_fleet::AgentKind, mux_fleet::install::HookStatus)>,
+    /// The agents found on this machine, once looked for.
+    fleet_launchers: Option<Vec<mux_fleet::AgentKind>>,
+    fleet_clock_running: bool,
+    /// An agent's pane to go to once its session is attached.
+    fleet_goto: Option<PaneId>,
+    /// An agent whose command is typed once its new tab has come.
+    fleet_start: Option<fleet::FleetStart>,
     /// GUI-local tab colours. New tabs take the next ink by position and keep
     /// it, so closing a tab never repaints its neighbours.
     tab_rename: Option<TabRename>,
@@ -995,6 +1020,14 @@ impl MuxApp {
             permission_choice: None,
             agent_placeholder: String::new(),
             agent_unseen: HashSet::new(),
+            fleet: Vec::new(),
+            fleet_view: None,
+            fleet_seen_sent: HashSet::new(),
+            fleet_hooks: Vec::new(),
+            fleet_launchers: None,
+            fleet_clock_running: false,
+            fleet_goto: None,
+            fleet_start: None,
             tab_rename: None,
             pane_rename: None,
             tab_strip_scroll: ScrollHandle::new(),
@@ -1170,6 +1203,7 @@ impl MuxApp {
         self.ensure_run_clock(cx);
         self.ensure_selection_scroll(cx);
         self.ensure_history_compression(cx);
+        self.ensure_fleet_clock(cx);
     }
 
     fn ensure_agent_pulse(&mut self, cx: &mut Context<Self>) {
@@ -1222,6 +1256,7 @@ impl MuxApp {
 
     fn agent_pulse_wanted(&self) -> bool {
         self.agent_pane_is_live()
+            || self.fleet_pulse_wanted()
             || (self.motion == MotionPreference::Full
                 && (self.agents.iter().any(|agent| {
                     matches!(
@@ -1577,6 +1612,14 @@ impl MuxApp {
                 }
                 error.map_or(Ok(()), |error| Err(anyhow!(error)))
             }
+            UserEvent::Fleet(agents) => {
+                self.set_fleet(agents);
+                Ok(())
+            }
+            UserEvent::FleetPaneText { pane_id, text } => {
+                self.set_fleet_pane_text(pane_id, text);
+                Ok(())
+            }
         };
         if let Err(error) = result {
             self.report_ui_error(&error, cx);
@@ -1637,6 +1680,7 @@ impl MuxApp {
             // or tab chord typed in it); the keyboard follows it to the shell.
             self.focus_handle.focus(window, cx);
         }
+        self.fleet_follow_workspace(window, cx);
         Ok(())
     }
 
@@ -1752,7 +1796,9 @@ impl MuxApp {
     }
 
     fn active_ink(&self) -> Ink {
-        self.active_tab_id()
+        // The fleet's view wears the ink of the chosen agent's tab.
+        self.fleet_ink_tab()
+            .or_else(|| self.active_tab_id())
             .map_or(Ink::Peach, |tab_id| self.tab_ink(tab_id))
     }
 
@@ -1844,6 +1890,7 @@ impl MuxApp {
                     pane.secret_input = secret;
                 }
             }
+            ServerEvent::Fleet(event) => self.apply_fleet_event(event),
         }
         Ok(())
     }
@@ -1937,6 +1984,10 @@ impl MuxApp {
     }
 
     fn terminal_pane_is_visible(&self, pane_id: PaneId) -> bool {
+        // The fleet's view shows one pane, whatever its tab.
+        if self.fleet_open() {
+            return self.fleet_shown_pane() == Some(pane_id);
+        }
         let Some(session) = self.session.as_ref() else {
             return false;
         };
@@ -2275,6 +2326,16 @@ impl MuxApp {
             return;
         }
         if self.pane_menu_open() && self.pane_menu_key(&event.keystroke, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if self.fleet_roster_has_keys() {
+            // The roster has taken what keys are its own; none of the rest
+            // is for the pane beside it.
+            cx.propagate();
+            return;
+        }
+        if self.fleet_pane_key(&event.keystroke, window, cx) {
             cx.stop_propagation();
             return;
         }
@@ -4262,7 +4323,22 @@ impl MuxApp {
         let Some(session) = &self.session else {
             return layout::WorkspaceGeometry::default();
         };
-        let geometry = layout::calculate(session, width, height, headed);
+        let geometry = match self.fleet_layout(width, height) {
+            // The fleet's view shows one pane, the chosen agent's, which
+            // takes the view's size once it has been chosen a moment.
+            Some(fleet) => {
+                let geometry = layout::WorkspaceGeometry {
+                    panes: fleet.pane.into_iter().collect(),
+                    seams: Vec::new(),
+                };
+                self.publish_fleet_pane();
+                if !self.fleet_pane_settled() {
+                    return geometry;
+                }
+                geometry
+            }
+            None => layout::calculate(session, width, height, headed),
+        };
         let sizes = terminal_sizes_for_geometry(&geometry, self.metrics);
         for (pane_id, size) in sizes {
             if self.sent_sizes.get(&pane_id) != Some(&size) {
@@ -4295,6 +4371,7 @@ impl MuxApp {
             self.show_size_readout(cx);
         }
         self.clear_seen_pane_call(window);
+        self.mark_fleet_seen(window);
         self.release_hidden_images(window);
     }
 
@@ -4413,6 +4490,7 @@ impl MuxApp {
                     if event.click_count() == 2 && active {
                         this.open_rename_tab(window, cx);
                     } else {
+                        this.leave_fleet_for_tab(window, cx);
                         this.send_workspace(WorkspaceCommand::SelectTab(tab_id));
                     }
                 }),
@@ -4645,8 +4723,11 @@ impl MuxApp {
             .items_center()
             .gap(px(2.0));
         if let Some(session) = &self.session {
+            // While the fleet is on screen its chip is the tab in front,
+            // and every real tab is one out of sight.
+            let fleet = self.fleet_open();
             for (position, tab) in session.tabs.iter().enumerate() {
-                let active = tab.id == session.active_tab;
+                let active = tab.id == session.active_tab && !fleet;
                 tabs = tabs.child(self.render_tab_chip(position, tab, active, cx));
             }
             let shown = Some((session.active_tab, self.mode));
@@ -4688,6 +4769,7 @@ impl MuxApp {
             strip = strip.child(div().flex_none().w(px(72.0)).h_full());
         }
         strip
+            .children(self.render_fleet_chip(cx))
             .child(tabs)
             .child(Self::with_new_tab_pane_drop(
                 div()
@@ -4703,7 +4785,8 @@ impl MuxApp {
                     .hover(|style| style.text_color(color(TEXT)).bg(wash(0.05)))
                     .active(|style| style.bg(wash(0.10)))
                     .tooltip(|_, cx| strip_tooltip("new tab", Some("⌃t n"), cx))
-                    .on_click(cx.listener(|this, _, _, _| {
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.leave_fleet_for_tab(window, cx);
                         this.send_workspace(WorkspaceCommand::NewTab);
                     }))
                     .child("+"),
@@ -4770,6 +4853,8 @@ impl MuxApp {
             &[("a-z", "copy"), ("⇧", "paste"), ("esc", "close")]
         } else {
             match self.mode {
+                // The roster's own keys are at its foot.
+                InputMode::Normal if self.fleet_roster_has_keys() => &[("⌘p", "go to")],
                 InputMode::Normal => &[
                     ("⌘p", "go to"),
                     ("⌃a", "agent"),
@@ -5228,8 +5313,12 @@ impl MuxApp {
         let frame = geometry.frame;
         let focused = geometry.focused;
         let pane = self.panes.get(&geometry.pane_id);
-        let agent_pane = self.active_agent_pane() == Some(geometry.pane_id);
+        let agent_pane =
+            !self.fleet_open() && self.active_agent_pane() == Some(geometry.pane_id);
         let agent = self.active_agent().filter(|_| agent_pane);
+        // A coding agent run in the pane's shell names the pane, and says
+        // what it was asked and how it is getting on.
+        let fleet_head = self.fleet_head(geometry.pane_id).filter(|_| !agent_pane);
         // Every pane of a synced tab takes the keys, so each wears the ink.
         let synced = self.pane_synced(self.active_tab_id(), geometry.pane_id);
         let edge = |rest: f32| {
@@ -5248,15 +5337,25 @@ impl MuxApp {
             )
         } else if let Some(name) = self.pane_name(geometry.pane_id) {
             name.to_owned().into()
+        } else if let Some((name, _, _)) = &fleet_head {
+            name.clone().into()
         } else {
             pane.and_then(PaneReplica::timed_head_title)
                 .map_or_else(|| format!("pane {number}").into(), Into::into)
         };
-        // A named pane still says what its shell does, beside the name.
-        let beside = self
-            .pane_name(geometry.pane_id)
-            .and(pane)
-            .and_then(PaneReplica::timed_head_title);
+        // A named pane still says what its shell does, beside the name; an
+        // agent's pane, what the agent was asked.
+        let beside = match &fleet_head {
+            Some((name, task, _)) => match (self.pane_name(geometry.pane_id), task) {
+                (Some(_), Some(task)) => Some(format!("{name} · {task}")),
+                (Some(_), None) => Some(name.clone()),
+                (None, task) => task.clone(),
+            },
+            None => self
+                .pane_name(geometry.pane_id)
+                .and(pane)
+                .and_then(PaneReplica::timed_head_title),
+        };
         let call = self
             .pane_call(geometry.pane_id)
             .filter(|_| !focused && !agent_pane);
@@ -5369,6 +5468,14 @@ impl MuxApp {
         }
         if let Some((state, tone)) = agent.and_then(|agent| agent_view::agent_state(agent.status)) {
             head = head.child(div().flex_none().text_color(color(tone)).child(state));
+        }
+        // An agent's state, unless the pane's call is already saying it.
+        if let Some((state, tone)) = fleet_head
+            .as_ref()
+            .and_then(|(_, _, state)| *state)
+            .filter(|_| call.is_none())
+        {
+            head = head.child(div().flex_none().text_color(tone).child(state));
         }
         if agent_pane && focused {
             head = head.child(
@@ -5549,6 +5656,7 @@ impl MuxApp {
                         return;
                     }
                     this.focus_handle.focus(window, cx);
+                    this.enter_fleet_pane_by_pointer(pane_id, window, cx);
                     this.pointer_down(pane_id, rect, event);
                     cx.notify();
                 });
@@ -5630,6 +5738,8 @@ impl UserEvent {
             Self::StripProblem(_) => "strip-problem",
             Self::RunningChecked { .. } => "running-checked",
             Self::PaneParsed { .. } => "pane-parsed",
+            Self::Fleet(_) => "fleet",
+            Self::FleetPaneText { .. } => "fleet-pane-text",
         }
     }
 }
@@ -5664,7 +5774,12 @@ impl Render for MuxApp {
             .on_action(cx.listener(|this, _: &OpenQuickSelect, window, cx| {
                 this.toggle_quick_select(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &GoToMuxCall, _, cx| this.go_to_call(cx)))
+            .on_action(cx.listener(|this, _: &GoToMuxCall, window, cx| {
+                this.go_to_call(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleMuxFleet, window, cx| {
+                this.toggle_fleet(window, cx);
+            }))
             .on_key_down(cx.listener(Self::handle_key_down))
             .on_key_up(cx.listener(Self::handle_key_up))
             // Quick select is for the keys: a click anywhere puts it away
@@ -5674,7 +5789,26 @@ impl Render for MuxApp {
                     cx.notify();
                 }
             }));
-        let drawn = self.draw_layout(&geometry, viewport, window);
+        let fleet = self.fleet_layout(f32::from(viewport.width), f32::from(viewport.height));
+        let drawn = if fleet.is_some() {
+            // The view's one pane is simply there: nothing glides.
+            motion::DrawnLayout {
+                panes: geometry
+                    .panes
+                    .iter()
+                    .enumerate()
+                    .map(|(index, geometry)| motion::DrawnPane {
+                        index,
+                        geometry: *geometry,
+                        opacity: 1.0,
+                        ringed: geometry.focused,
+                    })
+                    .collect(),
+                ..motion::DrawnLayout::default()
+            }
+        } else {
+            self.draw_layout(&geometry, viewport, window)
+        };
         self.publish_ground(&drawn, viewport, window, cx);
         let mut root = Self::with_pointer_capture(
             Self::with_window_actions(
@@ -5690,7 +5824,7 @@ impl Render for MuxApp {
         .text_color(theme.text)
         .child(self.render_tabs(cx));
 
-        let zoomed = self.active_tab_zoomed();
+        let zoomed = fleet.is_none() && self.active_tab_zoomed();
         let hints = if self.mode == InputMode::Pane && pane_count > 1 {
             neighbour_hints(&geometry.panes)
         } else {
@@ -5705,7 +5839,7 @@ impl Render for MuxApp {
             let pane_id = geometry.pane_id;
             let shown = self.pane_content_opacity(&geometry, pane.opacity, pane_count);
             root = root.child(self.render_pane_slab(pane, zoomed, cx));
-            if self.active_agent_pane() == Some(pane_id) {
+            if fleet.is_none() && self.active_agent_pane() == Some(pane_id) {
                 let (frame, focused) = (geometry.frame, geometry.focused);
                 root = root.child(self.render_agent_pane(pane_id, frame, focused, window, cx));
             } else {
@@ -5733,6 +5867,9 @@ impl Render for MuxApp {
             .retain(|pane_id, _| shown_terminals.contains(pane_id));
         for (index, seam) in geometry.seams.into_iter().enumerate() {
             root = root.child(self.render_seam(index, seam, cx));
+        }
+        if let Some(fleet) = &fleet {
+            root = root.children(self.render_fleet(fleet, cx));
         }
         root.children(self.render_seam_drag_shield())
             .children(self.render_session_sheet(cx))
@@ -5859,6 +5996,11 @@ fn kbd(key: impl Into<SharedString>, key_color: Hsla) -> impl IntoElement {
 
 /// A short ink notch on the focused slab's top edge, visible at a glance.
 fn pane_focus_notch(pane_id: PaneId, ink: Ink, motion: MotionPreference) -> gpui::AnyElement {
+    focus_notch(format!("pane-focus-{pane_id}").into(), ink, motion)
+}
+
+/// The notch a slab with the keys wears, growing in when it takes them.
+fn focus_notch(id: SharedString, ink: Ink, motion: MotionPreference) -> gpui::AnyElement {
     let notch = div()
         .absolute()
         .top_0()
@@ -5872,7 +6014,7 @@ fn pane_focus_notch(pane_id: PaneId, ink: Ink, motion: MotionPreference) -> gpui
     } else {
         notch
             .with_animation(
-                SharedString::from(format!("pane-focus-{pane_id}")),
+                id,
                 interface_animation(220),
                 |notch, delta| {
                     notch
@@ -6644,6 +6786,7 @@ fn configure_application_menu(cx: &mut App) {
             name: "Window".into(),
             disabled: false,
             items: vec![
+                MenuItem::action("Show the Fleet", ToggleMuxFleet),
                 MenuItem::action("Go to the Pane That Called", GoToMuxCall),
                 MenuItem::separator(),
                 MenuItem::action("Minimize", MinimizeMuxWindow),
@@ -6703,6 +6846,8 @@ fn configure_application_actions(cx: &mut App) {
         KeyBinding::new("cmd-g", FindOlder, None),
         KeyBinding::new("cmd-shift-g", FindNewer, None),
         KeyBinding::new("cmd-shift-space", OpenQuickSelect, None),
+        KeyBinding::new("cmd-shift-a", ToggleMuxFleet, None),
+        KeyBinding::new("cmd-j", GoToMuxCall, None),
     ]);
     bind_field_keys(cx);
     // Terminal panes own Tab; the component root must not turn it into focus traversal.
