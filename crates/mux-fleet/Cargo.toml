@@ -1,0 +1,18 @@
+[package]
+name = "mux-fleet"
+version = "0.10.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+mux-workspace = { path = "../mux-workspace" }
+serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

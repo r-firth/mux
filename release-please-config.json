@@ -39,6 +39,11 @@
         },
         {
           "type": "toml",
+          "path": "crates/mux-fleet/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
           "path": "crates/mux-protocol/Cargo.toml",
           "jsonpath": "$.package.version"
         },
@@ -60,7 +65,7 @@
         {
           "type": "toml",
           "path": "Cargo.lock",
-          "jsonpath": "$.package[?(@.name.value == 'mux' || @.name.value == 'muxctl' || @.name.value == 'mux-acp' || @.name.value == 'mux-client' || @.name.value == 'mux-daemon' || @.name.value == 'mux-protocol' || @.name.value == 'mux-terminal' || @.name.value == 'mux-terminal-ghostty' || @.name.value == 'mux-workspace')].version"
+          "jsonpath": "$.package[?(@.name.value == 'mux' || @.name.value == 'muxctl' || @.name.value == 'mux-acp' || @.name.value == 'mux-client' || @.name.value == 'mux-daemon' || @.name.value == 'mux-fleet' || @.name.value == 'mux-protocol' || @.name.value == 'mux-terminal' || @.name.value == 'mux-terminal-ghostty' || @.name.value == 'mux-workspace')].version"
         }
       ]
     }

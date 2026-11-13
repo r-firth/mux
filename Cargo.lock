@@ -4409,6 +4409,7 @@ dependencies = [
  "mux-acp",
  "mux-client",
  "mux-daemon",
+ "mux-fleet",
  "mux-protocol",
  "mux-terminal",
  "mux-terminal-ghostty",
@@ -4446,6 +4447,7 @@ version = "0.10.1"
 dependencies = [
  "directories",
  "mux-acp",
+ "mux-fleet",
  "mux-protocol",
  "mux-terminal",
  "mux-workspace",
@@ -4463,6 +4465,7 @@ dependencies = [
  "directories",
  "mux-acp",
  "mux-client",
+ "mux-fleet",
  "mux-protocol",
  "mux-terminal",
  "mux-terminal-ghostty",
@@ -4481,10 +4484,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mux-fleet"
+version = "0.10.1"
+dependencies = [
+ "mux-workspace",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "mux-protocol"
 version = "0.10.1"
 dependencies = [
  "mux-acp",
+ "mux-fleet",
  "mux-terminal",
  "mux-workspace",
  "postcard",
@@ -4535,6 +4550,7 @@ dependencies = [
  "clap",
  "mux-acp",
  "mux-client",
+ "mux-fleet",
  "mux-protocol",
  "mux-terminal",
  "mux-workspace",

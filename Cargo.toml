@@ -5,6 +5,7 @@ members = [
     "crates/mux-acp",
     "crates/mux-client",
     "crates/mux-daemon",
+    "crates/mux-fleet",
     "crates/mux-protocol",
     "crates/mux-terminal",
     "crates/mux-terminal-ghostty",
