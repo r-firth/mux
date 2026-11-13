@@ -1534,7 +1534,7 @@ impl MuxApp {
                     card = card.child(Self::fleet_card_line(
                         index == choice.min(found.len() - 1),
                         agent_name(*kind),
-                        kind.command().to_owned(),
+                        String::new(),
                         FAINT_TEXT,
                     ));
                 }
