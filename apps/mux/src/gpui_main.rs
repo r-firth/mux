@@ -4747,15 +4747,18 @@ impl MuxApp {
                 let active = tab.id == session.active_tab && !fleet;
                 tabs = tabs.child(self.render_tab_chip(position, tab, active, cx));
             }
-            let shown = Some((session.active_tab, self.mode));
+            // With the fleet open the strip keeps the chosen agent's tab
+            // in sight: it is the one the view is showing.
+            let followed = self
+                .fleet_chosen_tab()
+                .filter(|_| fleet)
+                .unwrap_or(session.active_tab);
+            let shown = Some((followed, self.mode));
             if self.tab_strip_active.replace(shown) != shown {
                 self.tab_strip_follow.set(true);
             }
             if self.tab_strip_follow.get()
-                && let Some(position) = session
-                    .tabs
-                    .iter()
-                    .position(|tab| tab.id == session.active_tab)
+                && let Some(position) = session.tabs.iter().position(|tab| tab.id == followed)
             {
                 self.tab_strip_scroll.scroll_to_item(position);
             }
@@ -4918,6 +4921,9 @@ impl MuxApp {
         let mut row = h_flex()
             .min_w(px(0.0))
             .when(!normal, |row| row.flex_none().max_w(gpui::relative(0.72)))
+            // One hint alone has nothing to give way to, so it keeps its
+            // width and the tabs scroll: wrapping would leave it cut.
+            .when(normal && hints.len() == 1, Styled::flex_none)
             .h(px(24.0))
             .flex_wrap()
             .when(normal, Styled::flex_row_reverse)

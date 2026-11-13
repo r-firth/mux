@@ -575,6 +575,11 @@ impl MuxApp {
             .filter(|pane_id| !self.panes.contains_key(pane_id))
     }
 
+    /// The tab the chosen agent's pane is in, when it is in this session.
+    pub(super) fn fleet_chosen_tab(&self) -> Option<TabId> {
+        self.tab_of_pane(self.fleet_selected()?.pane_id)
+    }
+
     /// Whether an agent in one of the tab's panes waits on the user.
     pub(super) fn fleet_waits_in_tab(&self, tab_id: TabId) -> bool {
         self.fleet.iter().any(|agent| {
