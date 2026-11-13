@@ -575,6 +575,14 @@ impl MuxApp {
             .filter(|pane_id| !self.panes.contains_key(pane_id))
     }
 
+    /// What a pane's program said, with its paths said from the project
+    /// of the agent in the pane, when one is.
+    pub(super) fn fleet_said_in(&self, pane_id: PaneId, said: &str) -> String {
+        self.fleet_agent_in(pane_id)
+            .and_then(|agent| fleet_said(agent, Some(said)))
+            .unwrap_or_else(|| said.to_owned())
+    }
+
     pub(super) fn fleet_open(&self) -> bool {
         self.fleet_view.is_some()
     }
@@ -2390,9 +2398,7 @@ impl MuxApp {
                     .text_size(px(12.0))
                     .text_color(color(MUTED_TEXT))
                     .child(
-                        agent
-                            .message
-                            .clone()
+                        fleet_said(agent, agent.message.as_deref())
                             .unwrap_or_else(|| "it said nothing at the end".to_owned()),
                     ),
             )
