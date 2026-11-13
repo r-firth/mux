@@ -614,11 +614,15 @@ impl Fleet {
                 set_state(agent, FleetState::Working, now_ms);
             }
             ReportEvent::Blocked { need, message } => {
-                if let Some(message) = message.as_deref().and_then(|line| one_line(line, MAX_LINE))
-                {
-                    agent.message = Some(message);
-                } else if agent.state != FleetState::Blocked {
-                    agent.message = None;
+                // Told again of a wait it has already put a name to, as by
+                // Claude Code's notification some seconds after the request
+                // itself, the first account stands: it names the thing asked.
+                let told_already = agent.state == FleetState::Blocked
+                    && agent.need == Some(need)
+                    && agent.message.is_some();
+                let said = message.as_deref().and_then(|line| one_line(line, MAX_LINE));
+                if !told_already && (said.is_some() || agent.state != FleetState::Blocked) {
+                    agent.message = said;
                 }
                 set_state(agent, FleetState::Blocked, now_ms);
                 agent.need = Some(need);
@@ -1002,6 +1006,29 @@ mod tests {
         assert_eq!(blocked.headline(), Some("Bash: cargo test"));
         assert_eq!(blocked.since_ms, 4);
 
+        // Claude Code's notification of the same wait, a few seconds on,
+        // says less than the request did, and does not replace it.
+        assert_eq!(
+            fleet.report(
+                pane,
+                session,
+                report(
+                    ReportEvent::Blocked {
+                        need: Need::Permission,
+                        message: Some("Claude needs your permission".to_owned()),
+                    },
+                    5,
+                ),
+                cwd,
+                5,
+            ),
+            None
+        );
+        assert_eq!(
+            fleet.get(pane).and_then(FleetAgent::headline),
+            Some("Bash: cargo test")
+        );
+
         // The agent's own status says it is working again once allowed.
         let allowed = agent(fleet.status(
             pane,
@@ -1010,7 +1037,7 @@ mod tests {
                 need: None,
                 message: String::new(),
             },
-            5,
+            6,
         ));
         assert_eq!(allowed.state, FleetState::Working);
         assert_eq!(allowed.need, None);
