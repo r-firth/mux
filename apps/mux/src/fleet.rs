@@ -2618,8 +2618,9 @@ impl MuxApp {
         } else {
             agent.task.clone()
         };
-        // A pane of another session says so beside its project.
-        let place = if self.panes.contains_key(&pane_id) {
+        // A pane of another session says so beside its project, where the
+        // head has room for both.
+        let place = if self.panes.contains_key(&pane_id) || frame.width < 380.0 {
             agent.project.name.clone()
         } else {
             let session = self
