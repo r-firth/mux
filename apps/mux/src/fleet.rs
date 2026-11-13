@@ -40,8 +40,8 @@ const SEEN_AFTER: Duration = Duration::from_millis(1200);
 const REMOTE_LINES: u32 = 200;
 /// The least a tile of the wall is, the gap between tiles, and the heights
 /// of a tile's head and the wall's foot.
-const TILE_MIN_WIDTH: f32 = 300.0;
-const TILE_MIN_HEIGHT: f32 = 190.0;
+const TILE_MIN_WIDTH: f32 = 260.0;
+const TILE_MIN_HEIGHT: f32 = 165.0;
 const TILE_HEAD: f32 = 26.0;
 const TILE_PAD: f32 = 5.0;
 const WALL_FOOT: f32 = 36.0;
@@ -820,6 +820,14 @@ impl MuxApp {
         if let Some(view) = &self.fleet_view {
             view.focus.focus(window, cx);
         }
+    }
+
+    /// Whether the roster's own element has the focus yet: it takes it a
+    /// frame after the view opens.
+    pub(super) fn fleet_roster_focused(&self, window: &Window) -> bool {
+        self.fleet_view
+            .as_ref()
+            .is_some_and(|view| view.focus.is_focused(window))
     }
 
     /// Step back from the agent's pane to the roster.
@@ -2417,6 +2425,7 @@ impl MuxApp {
     /// was asked (or what it asks, while it waits) and its state, over its
     /// pane drawn small. The chosen tile wears the ink a focused pane does,
     /// and one that waits on the user a peach edge.
+    #[allow(clippy::too_many_lines)]
     fn render_wall_tile(
         &self,
         tile: &WallTile,
@@ -2457,14 +2466,17 @@ impl MuxApp {
                     .text_color(color(if chosen { TEXT } else { MUTED_TEXT }))
                     .child(agent_name(agent.kind)),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .max_w(px(frame.width * 0.3))
-                    .truncate()
-                    .text_color(color(FAINT_TEXT))
-                    .child(agent.project.name.clone()),
-            )
+            // A narrow tile keeps its head for what the agent was asked.
+            .when(frame.width >= 340.0, |head| {
+                head.child(
+                    div()
+                        .flex_none()
+                        .max_w(px(frame.width * 0.3))
+                        .truncate()
+                        .text_color(color(FAINT_TEXT))
+                        .child(agent.project.name.clone()),
+                )
+            })
             .child(
                 div()
                     .flex_1()
@@ -2685,7 +2697,12 @@ impl MuxApp {
     }
 
     /// A key while the roster has the keyboard.
-    fn fleet_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn fleet_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let keystroke = &event.keystroke;
         let key = keystroke.key.as_str();
         let Some(view) = self.fleet_view.as_ref() else {
@@ -3003,7 +3020,7 @@ mod tests {
         assert_eq!(wall_grid(12, width, height), (4, 3));
         // More than fit at the least size go a page at a time.
         let (columns, rows) = wall_grid(40, width, height);
-        assert_eq!((columns, rows), (4, 3));
+        assert_eq!((columns, rows), (4, 4));
         // A window too small for two tiles still shows one.
         assert_eq!(wall_grid(5, 200.0, 100.0), (1, 1));
     }

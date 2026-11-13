@@ -2335,9 +2335,15 @@ impl MuxApp {
             return;
         }
         if self.fleet_roster_has_keys() {
-            // The roster has taken what keys are its own; none of the rest
-            // is for the pane beside it.
-            cx.propagate();
+            if self.fleet_roster_focused(window) {
+                // The roster has taken what keys are its own; none of the
+                // rest is for the pane beside it.
+                cx.propagate();
+            } else {
+                // A key struck in the moment before the roster has the
+                // focus is the roster's all the same.
+                self.fleet_key(event, window, cx);
+            }
             return;
         }
         if self.fleet_pane_key(&event.keystroke, window, cx) {

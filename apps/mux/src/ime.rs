@@ -86,6 +86,11 @@ impl MuxApp {
     /// every pane synced with it.
     fn commit_composed(&mut self, text: &str, cx: &mut Context<Self>) {
         self.ime_marked = None;
+        // Behind the fleet's roster no pane is being typed into.
+        if self.fleet_roster_has_keys() {
+            cx.notify();
+            return;
+        }
         let Some(pane_id) = self.terminal_input_pane_id() else {
             cx.notify();
             return;
