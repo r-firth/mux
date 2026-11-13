@@ -2275,11 +2275,13 @@ impl MuxApp {
         let resumes = agent.resume_command();
         Self::fleet_slab(frame)
             .px(px(18.0))
-            .py(px(12.0))
+            .py(px(11.0))
             .gap(px(4.0))
             .whitespace_nowrap()
             .child(
                 h_flex()
+                    .flex_none()
+                    .h(px(20.0))
                     .gap(px(10.0))
                     .child(
                         div()
@@ -2303,6 +2305,8 @@ impl MuxApp {
             )
             .child(
                 div()
+                    .flex_none()
+                    .h(px(18.0))
                     .min_w_0()
                     .truncate()
                     .text_size(px(12.0))
@@ -2317,6 +2321,8 @@ impl MuxApp {
             .child(div().flex_1())
             .child(
                 h_flex()
+                    .flex_none()
+                    .h(px(20.0))
                     .gap(px(12.0))
                     .text_size(px(12.0))
                     .text_color(color(FAINT_TEXT))
