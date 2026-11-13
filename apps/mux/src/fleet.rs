@@ -335,6 +335,19 @@ fn said_from_project(agent: &FleetAgent, said: &str, home: Option<&std::path::Pa
     said
 }
 
+/// An agent's line under its name: what it says, and for one that waits
+/// having said nothing, what kind of thing it waits for.
+fn fleet_headline(agent: &FleetAgent) -> Option<String> {
+    fleet_said(agent, agent.headline()).or_else(|| {
+        (agent.state == FleetState::Blocked).then(|| match agent.need {
+            Some(mux_fleet::Need::Permission) => "asks to be allowed something".to_owned(),
+            Some(mux_fleet::Need::Question) => "has a question".to_owned(),
+            Some(mux_fleet::Need::Auth) => "needs you to sign in".to_owned(),
+            _ => "wants you".to_owned(),
+        })
+    })
+}
+
 /// A line of an agent's, as a row or a tile's head says it.
 fn fleet_said(agent: &FleetAgent, said: Option<&str>) -> Option<String> {
     static HOME: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
@@ -1868,14 +1881,7 @@ impl MuxApp {
     ) -> gpui::AnyElement {
         let pane_id = agent.pane_id;
         let ended = agent.state == FleetState::Ended;
-        let headline = fleet_said(agent, agent.headline()).or_else(|| {
-            (agent.state == FleetState::Blocked).then(|| match agent.need {
-                Some(mux_fleet::Need::Permission) => "asks to be allowed something".to_owned(),
-                Some(mux_fleet::Need::Question) => "has a question".to_owned(),
-                Some(mux_fleet::Need::Auth) => "needs you to sign in".to_owned(),
-                _ => "wants you".to_owned(),
-            })
-        });
+        let headline = fleet_headline(agent);
         let branch = agent.project.branch.clone().map(|branch| {
             h_flex()
                 .flex_none()
@@ -2572,7 +2578,7 @@ impl MuxApp {
         let ended = agent.state == FleetState::Ended;
         // What a waiting agent asks takes the place of what it was asked.
         let beside = if wants {
-            fleet_said(agent, agent.headline()).or(agent.task.clone())
+            fleet_headline(agent).or(agent.task.clone())
         } else {
             agent.task.clone()
         };
@@ -2631,6 +2637,7 @@ impl MuxApp {
                     .h(px(18.0))
                     .pl(px(14.0))
                     .truncate()
+                    .text_size(px(12.0))
                     .text_color(color(if wants { TEXT } else { MUTED_TEXT }))
                     .children(beside),
             );
