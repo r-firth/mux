@@ -43,6 +43,8 @@ const SEEN_AFTER: Duration = Duration::from_millis(1200);
 const REMOTE_LINES: u32 = 200;
 /// The least a tile of the wall is, the gap between tiles, and the heights
 /// of a tile's head and the wall's foot.
+/// A roster shorter than this says less at its foot.
+const SHORT_ROSTER: f32 = 420.0;
 const TILE_MIN_WIDTH: f32 = 260.0;
 const TILE_MIN_HEIGHT: f32 = 180.0;
 const TILE_HEAD: f32 = 46.0;
@@ -2023,7 +2025,7 @@ impl MuxApp {
     }
 
     /// The roster's foot: the keys that work now, in brackets.
-    fn fleet_hints(&self) -> gpui::AnyElement {
+    fn fleet_hints(&self, short: bool) -> gpui::AnyElement {
         let view = self.fleet_view.as_ref();
         let chosen = self.fleet_selected();
         let remote = self.fleet_remote_pane().is_some();
@@ -2074,10 +2076,17 @@ impl MuxApp {
             .children(hints.into_iter().map(|(key, label)| {
                 h_flex()
                     .flex_none()
+                    .h(px(20.0))
                     .gap(px(6.0))
+                    .items_center()
                     .child(kbd(key, color(MUTED_TEXT)))
                     .child(label)
             }))
+            // A short roster keeps its room for agents: one line of keys,
+            // the first of them, and the rest still work.
+            .when(short, |hints| {
+                hints.h(px(41.0)).gap_y(px(16.0)).overflow_hidden()
+            })
             .into_any_element()
     }
 
@@ -2274,7 +2283,8 @@ impl MuxApp {
         }
 
         let unhooked = self.unhooked_agents();
-        let hooks_line = (!unhooked.is_empty() && view.card.is_none()).then(|| {
+        let short = frame.height < SHORT_ROSTER && view.card.is_none();
+        let hooks_line = (!unhooked.is_empty() && view.card.is_none() && !short).then(|| {
             let names = unhooked
                 .iter()
                 .map(|kind| kind.command().to_owned())
@@ -2284,6 +2294,9 @@ impl MuxApp {
                 .flex_none()
                 .h(px(28.0))
                 .px(px(18.0))
+                // A band of its own under a full roster, not one more row.
+                .border_t_1()
+                .border_color(hairline(0.07))
                 .gap(px(12.0))
                 .items_center()
                 .text_size(px(12.0))
@@ -2386,7 +2399,7 @@ impl MuxApp {
             .child(list)
             .children(hooks_line)
             .children(card)
-            .child(self.fleet_hints())
+            .child(self.fleet_hints(short))
             .when(focused, |slab| {
                 slab.child(focus_notch("fleet-roster-focus".into(), ink, self.motion))
             });
