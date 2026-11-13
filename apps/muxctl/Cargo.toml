@@ -9,6 +9,7 @@ license.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 mux-acp = { path = "../../crates/mux-acp" }
+mux-fleet = { path = "../../crates/mux-fleet" }
 mux-client = { path = "../../crates/mux-client" }
 mux-protocol = { path = "../../crates/mux-protocol" }
 mux-terminal = { path = "../../crates/mux-terminal" }
