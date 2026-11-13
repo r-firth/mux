@@ -816,6 +816,10 @@ impl MuxApp {
         name: &str,
         places: &[String],
     ) -> Option<(String, u32)> {
+        // The agent's own row, below, says what it asks.
+        if !active && self.fleet_waits_in_tab(tab.id) {
+            return Some(("needs you".to_owned(), SIGNAL));
+        }
         if let Some(call) = self.tab_call(tab) {
             return Some((pane_calls::call_words(call).to_owned(), SIGNAL));
         }
