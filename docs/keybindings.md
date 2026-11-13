@@ -364,12 +364,14 @@ and `n` starts one where you were. `Cmd+P` lists each agent by name, and
 has "show the fleet", "start an agent here" and "hook coding agents…".
 
 `v` turns the fleet into a grid: every agent's pane at once, live, each
-drawn small in a tile under its name, project, what it was asked and its
-state. The agents that wait on you come first, then those that are done,
-working, idle and ended. A waiting agent's tile has a peach edge, says what
-it asks in its head, and calls in peach on the ground around it, as a pane
-that calls does. The panes keep their own sizes; only the drawing is
-smaller. Tiles share the window by how many agents there are, two side by
+in a tile under a head of two lines, its name, project and state, then
+what it was asked. The agents that wait on you come first, then those that
+are done, working, idle and ended. A waiting agent's tile has a peach edge,
+says what it asks in its head, and calls in peach on the ground around it,
+as a pane that calls does. The panes keep their own sizes; a tile draws its
+pane smaller, never too small to read, and shows the left of it and the
+foot of what it holds, where its latest output is, when the whole does not
+fit. Tiles share the window by how many agents there are, two side by
 side or twelve in four columns, and more than fit go a page at a time, the
 foot saying which. "show the fleet as a grid" in `Cmd+P` opens it directly.
 
