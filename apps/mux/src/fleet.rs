@@ -43,13 +43,14 @@ const REMOTE_LINES: u32 = 200;
 /// The least a tile of the wall is, the gap between tiles, and the heights
 /// of a tile's head and the wall's foot.
 const TILE_MIN_WIDTH: f32 = 260.0;
-const TILE_MIN_HEIGHT: f32 = 165.0;
-const TILE_HEAD: f32 = 26.0;
+const TILE_MIN_HEIGHT: f32 = 180.0;
+const TILE_HEAD: f32 = 46.0;
 const TILE_PAD: f32 = 5.0;
 const WALL_FOOT: f32 = 36.0;
-/// The smallest a tile's text is drawn: below it the tile shows the foot
-/// of its pane rather than the whole.
-const TILE_MIN_FONT: f32 = 3.0;
+/// The smallest a tile's text is drawn, which still reads: a pane too wide
+/// or too tall for its tile at that size shows its left side and the foot
+/// of what it holds, rather than the whole made smaller.
+const TILE_MIN_FONT: f32 = 8.0;
 /// How long a new tab's shell is waited on before the agent's command is
 /// typed regardless.
 const SHELL_WAIT: Duration = Duration::from_secs(4);
@@ -135,11 +136,35 @@ pub(super) struct WallLayout {
     pages: usize,
 }
 
-/// A tile's pane, drawn small: its view and the size it is drawn at.
+/// A tile's pane, drawn small: its view, the size it is drawn at, and how
+/// far down it the last of what it shows ends.
 pub(super) struct TilePane {
     view: Entity<gpui_terminal::TerminalView>,
     width: f32,
     height: f32,
+    foot: f32,
+}
+
+/// How many of a frame's rows, from its top, hold anything: text, a cell
+/// with a ground of its own, or the cursor. A program's latest output ends
+/// there, with only blank rows under it.
+fn rows_in_use(frame: &mux_terminal::RenderFrame) -> u16 {
+    let cols = usize::from(frame.cols.max(1));
+    let shows = |cell: &mux_terminal::RenderCell| {
+        !cell.grapheme.trim().is_empty() || cell.background != frame.background
+    };
+    let last_text = frame
+        .cells
+        .chunks(cols)
+        .rposition(|row| row.iter().any(shows))
+        .map_or(0, |row| row + 1);
+    let cursor = frame
+        .cursor
+        .filter(|cursor| cursor.visible)
+        .map_or(0, |cursor| usize::from(cursor.y) + 1);
+    u16::try_from(last_text.max(cursor))
+        .unwrap_or(u16::MAX)
+        .min(frame.rows)
 }
 
 /// Where the view's parts go.
@@ -1467,22 +1492,22 @@ impl MuxApp {
         }
     }
 
-    /// The metrics a pane of `cols` by `rows` is drawn with to fit a tile's
-    /// body: the terminal's own face, smaller, in quarter-point steps so
-    /// tiles of a size share what they shape.
+    /// The metrics a pane of `cols` is drawn with in a tile's body: the
+    /// terminal's own face, as large as shows the pane's whole width but
+    /// never too small to read, in quarter-point steps so tiles of a size
+    /// share what they shape. What does not fit then is cropped, not shrunk.
     fn tile_metrics(
         &mut self,
         cols: u16,
-        rows: u16,
         body: layout::Rect,
         cx: &mut Context<Self>,
     ) -> gpui_terminal::GridMetrics {
         let full = self.metrics;
         let pad = full.padding_x * 2.0;
-        let scale = ((body.width - pad) / (full.cell_width * f32::from(cols.max(1))))
-            .min((body.height - pad) / (full.cell_height * f32::from(rows.max(1))))
-            .min(1.0);
-        let size = ((full.font_size * scale * 4.0).floor() / 4.0).max(TILE_MIN_FONT);
+        let scale = ((body.width - pad) / (full.cell_width * f32::from(cols.max(1)))).min(1.0);
+        let size = ((full.font_size * scale * 4.0).floor() / 4.0)
+            .max(TILE_MIN_FONT)
+            .min(full.font_size);
         *self
             .fleet_tile_metrics
             .entry((self.terminal_font.clone(), size.to_bits()))
@@ -1511,7 +1536,7 @@ impl MuxApp {
             else {
                 continue;
             };
-            let metrics = self.tile_metrics(cols, rows, tile.body(), cx);
+            let metrics = self.tile_metrics(cols, tile.body(), cx);
             let Some(pane) = self.panes.get(&pane_id) else {
                 continue;
             };
@@ -1545,6 +1570,8 @@ impl MuxApp {
                     view,
                     width: metrics.cell_width * f32::from(cols) + metrics.padding_x * 2.0,
                     height: metrics.cell_height * f32::from(rows) + metrics.padding_y * 2.0,
+                    foot: metrics.cell_height * f32::from(rows_in_use(&pane.frame))
+                        + metrics.padding_y * 2.0,
                 },
             );
         }
@@ -2461,9 +2488,9 @@ impl MuxApp {
             .into_any_element()
     }
 
-    /// One tile of the wall: a head with the agent's mark, name, what it
-    /// was asked (or what it asks, while it waits) and its state, over its
-    /// pane drawn small. The chosen tile wears the ink a focused pane does,
+    /// One tile of the wall: a head of two lines, the agent's mark, name,
+    /// project and state, then what it was asked (or what it asks, while it
+    /// waits), over its pane drawn small. The chosen tile wears the ink a focused pane does,
     /// and one that waits on the user a peach edge.
     #[allow(clippy::too_many_lines)]
     fn render_wall_tile(
@@ -2481,61 +2508,62 @@ impl MuxApp {
         let ink = self.active_ink();
         let wants = agent.state.wants_user();
         let ended = agent.state == FleetState::Ended;
-        let state_tone = match agent.state {
-            FleetState::Blocked | FleetState::Error => SIGNAL,
-            FleetState::Working | FleetState::Done => MUTED_TEXT,
-            _ => FAINT_TEXT,
-        };
+        // What a waiting agent asks takes the place of what it was asked.
         let beside = if wants {
             agent.headline().map(str::to_owned).or(agent.task.clone())
         } else {
             agent.task.clone()
         };
-        let head = h_flex()
+        let head = v_flex()
             .flex_none()
             .h(px(TILE_HEAD - 1.0))
             .px(px(10.0))
-            .gap(px(8.0))
-            .items_center()
+            .pt(px(4.0))
             .text_size(px(12.0))
-            .child(self.fleet_dot(agent))
+            .child(
+                h_flex()
+                    .flex_none()
+                    .h(px(20.0))
+                    .gap(px(8.0))
+                    .items_center()
+                    .child(self.fleet_dot(agent))
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(color(if chosen { TEXT } else { MUTED_TEXT }))
+                            .child(agent_name(agent.kind)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(color(FAINT_TEXT))
+                            .child(agent.project.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(self.fleet_state_tone(agent))
+                            .child(state_and_age(agent, now)),
+                    ),
+            )
             .child(
                 div()
                     .flex_none()
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(color(if chosen { TEXT } else { MUTED_TEXT }))
-                    .child(agent_name(agent.kind)),
-            )
-            // A narrow tile keeps its head for what the agent was asked.
-            .when(frame.width >= 340.0, |head| {
-                head.child(
-                    div()
-                        .flex_none()
-                        .max_w(px(frame.width * 0.3))
-                        .truncate()
-                        .text_color(color(FAINT_TEXT))
-                        .child(agent.project.name.clone()),
-                )
-            })
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
+                    .h(px(18.0))
+                    .pl(px(14.0))
                     .truncate()
-                    .text_color(color(if wants { MUTED_TEXT } else { FAINT_TEXT }))
+                    .text_color(color(if wants { TEXT } else { MUTED_TEXT }))
                     .children(beside),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(color(state_tone))
-                    .child(state_and_age(agent, now)),
             );
         let shown = match pane {
             Some(pane) => {
                 // A pane sits in its tile's top left, as its text does in
-                // it; one too big even at the smallest text shows its foot.
-                let top = (body.height - pane.height).min(0.0);
+                // it; one that holds more than the tile is tall shows the
+                // foot of it, where its latest output and its cursor are.
+                let top = (body.height - pane.foot).min(0.0);
                 div()
                     .absolute()
                     .left_0()
