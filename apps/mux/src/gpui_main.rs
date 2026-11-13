@@ -11,6 +11,8 @@ mod chrome;
 mod cursor_blink;
 mod cursor_click;
 mod desktop_notice;
+#[cfg(all(target_os = "macos", debug_assertions))]
+mod draw_unseen;
 mod early_typing;
 mod file_drop;
 mod find;
@@ -7145,6 +7147,8 @@ fn run_graphical_application(
                     let state_dir = state_dir.clone();
                     move |window, cx| {
                         bezel_theme::appearance::observe_window(window, cx).detach();
+                        #[cfg(all(target_os = "macos", debug_assertions))]
+                        draw_unseen::keep_drawing(window, cx);
                         let view = cx
                             .new(|cx| MuxApp::new(window, cx, state_dir, settings, settings_error));
                         let ground = view.read(cx).ground_view.clone();
