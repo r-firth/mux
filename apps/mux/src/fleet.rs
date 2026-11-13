@@ -2781,13 +2781,17 @@ impl MuxApp {
     ) -> gpui::AnyElement {
         let now = now_ms();
         let chosen = self.fleet_selected().map(|agent| agent.pane_id);
+        // Said from the right, so the row reads choose … roster; in a
+        // narrow window the ones at its left give way first, whole.
         let hints = [
-            ("←↑↓→", "choose"),
-            ("⇥", "next waiting"),
-            ("↵", "type to it"),
-            ("g", "its tab"),
             ("v", "roster"),
+            ("g", "its tab"),
+            ("↵", "type to it"),
+            ("⇥", "next waiting"),
+            ("←↑↓→", "choose"),
         ];
+        // The summary has the foot's near half at most, in whole parts.
+        let room = ((wall.foot.width * 0.45 - 70.0) / 7.3).floor().max(0.0) as usize;
         let foot = h_flex()
             .absolute()
             .left(px(wall.foot.x))
@@ -2812,7 +2816,7 @@ impl MuxApp {
                     .text_color(color(TEXT))
                     .child("fleet"),
             )
-            .child(div().min_w_0().truncate().child(summary(&self.fleet)))
+            .child(div().flex_none().child(summary_within(&self.fleet, room)))
             .when(wall.pages > 1, |foot| {
                 foot.child(
                     div()
@@ -2821,14 +2825,25 @@ impl MuxApp {
                         .child(format!("page {} of {}", wall.page + 1, wall.pages)),
                 )
             })
-            .child(div().flex_1())
-            .children(hints.into_iter().map(|(key, label)| {
+            .child(
                 h_flex()
-                    .flex_none()
-                    .gap(px(6.0))
-                    .child(kbd(key, color(MUTED_TEXT)))
-                    .child(label)
-            }));
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(20.0))
+                    .flex_wrap()
+                    .flex_row_reverse()
+                    .overflow_hidden()
+                    .gap_x(px(12.0))
+                    .children(hints.into_iter().map(|(key, label)| {
+                        h_flex()
+                            .flex_none()
+                            .h(px(20.0))
+                            .gap(px(6.0))
+                            .items_center()
+                            .child(kbd(key, color(MUTED_TEXT)))
+                            .child(label)
+                    })),
+            );
         div()
             .id("fleet-wall")
             .key_context("MuxFleet")
