@@ -44,6 +44,7 @@ IDE.
 - Ghostty-owned terminal parsing, scrollback, input, selection, and mouse modes
 - Zellij-style keyboard control that stays out of Vim and shell input
 - Codex, Claude Agent, Gemini CLI, and GitHub Copilot CLI through ACP
+- A fleet view of the coding agents running in your panes, the ones waiting on you first
 - Native, GPU-rendered macOS interface with minimal permanent chrome
 
 ## Install
@@ -85,6 +86,8 @@ pane in the directory it was last in, with a fresh shell.
 | `Option` + arrows | Move between panes and across tab edges |
 | `Ctrl+p`, `f` | Zoom the focused pane |
 | `Ctrl+p`, `x` | Close the focused pane |
+| `Cmd+Shift+A` | Show the fleet: every coding agent in a pane, and what it is doing |
+| `Cmd+J` | Go to the agent, or pane, that wants you |
 
 Everything else reaches the foreground program normally. See the
 [complete keybinding reference](docs/keybindings.md) for pane, resize, tab,
@@ -126,6 +129,22 @@ Mux:
 The command must be an ACP server that communicates over standard input and
 output. Custom profiles appear alongside the built-ins in Settings and work
 with `/new my-agent [cwd]`.
+
+## The fleet
+
+An agent's own interface works in Mux as it does anywhere: run `claude`,
+`codex` or `copilot` from a shell in any pane. Mux follows each one where it
+runs. `Cmd+Shift+A` shows them all, grouped by project, with what each was
+asked and whether it is working, done or waiting on you, beside the chosen
+agent's live pane. Return steps into that pane to answer it, Tab goes to the
+next agent that waits, and `Cmd+J` goes straight to one from anywhere.
+
+Press `h` in the fleet, or run `muxctl hooks install`, to put Mux's hooks
+into Claude Code, Codex and Copilot, so each reports its prompts, tools and
+requests for permission. The hooks do nothing outside a Mux pane and come
+out again with `muxctl hooks uninstall`. An agent without hooks is still
+listed, with what its notifications say. `muxctl fleet` lists the agents,
+waits on them, prompts them and reads them from a script.
 
 ## Development
 

@@ -318,15 +318,56 @@ While a pane is zoomed, what a pane hidden behind it says shows in the
 zoomed pane's head (`zoom · behind: tests passed`), since the hidden pane
 has no head on screen.
 
-"go to the pane that called" in `Cmd+P` goes to the pane that called last
-and hasn't been looked at, in whatever tab it is, or failing that to an
-agent in another tab waiting for you to allow something.
+`Cmd+J` ("go to the pane that called" in `Cmd+P`) goes first to a coding
+agent waiting on you in a terminal pane, the one that began waiting last, in
+whatever tab or session; failing that to the pane that called last and
+hasn't been looked at; or failing that to an agent surface in another tab
+waiting for you to allow something.
 
 A program that reports its progress with OSC 9;4, as Ghostty shows, gets a
 thin bar along the top of its pane: the tab's ink while it goes, peach when
 it fails, muted while it waits, and a faint band while it is busy without
 saying how far. A tab out of sight carries the bar under its chip. A report
 not renewed for 15 seconds goes away, as in Ghostty.
+
+## Fleet
+
+A coding agent run from a shell in a pane, `claude`, `codex`, `copilot` or
+another Mux knows by name, is followed where it runs. Its pane's head says
+its name, what it was asked and its state, `waiting on you` in peach, and
+while any are running a `fleet` chip sits at the head of the strip, with a
+peach dot and a count when some wait on you.
+
+`Cmd+Shift+A`, or a click on the chip, lays the fleet over the panes: a
+roster on the left, the agents under the projects they work in, each with
+what it is doing, for how long and on which branch, and on the right the
+chosen agent's own pane, live. The agents that wait on you come first.
+
+| Keys | Action |
+| --- | --- |
+| Up / Down, `j` / `k` | Choose an agent |
+| Tab / Shift+Tab | The next or previous agent waiting on you |
+| Return, `Option+Right` | Step into the agent's pane; every key is then the agent's |
+| `Option+Left` | Step back from the pane to the roster |
+| `g` | Go to the agent's own tab, in whatever session, and close the fleet |
+| `n` | Start an agent in a new tab, in the chosen agent's project |
+| `h` | Put Mux's hooks into the agents, or take them out with `u` |
+| `r` | Pick an ended agent's session up again in its pane |
+| `x` | Forget an ended agent |
+| Escape or `Cmd+Shift+A` | Close the fleet, back to the tab it was opened over |
+
+Click a row to choose it and double-click to go to its tab; a click in the
+pane steps into it. An agent in another session shows the end of its pane
+as text, and Return goes there. With no agents running the roster says so,
+and `n` starts one where you were. `Cmd+P` lists each agent by name, and
+has "show the fleet", "start an agent here" and "hook coding agents…".
+
+Mux knows an agent is there from the process in front of the pane's shell.
+What it is doing comes from the agent itself: with Mux's hooks in Claude
+Code, Codex or Copilot, each prompt, tool, request for permission and end
+of a turn; otherwise OSC 7501, a notification or a bell. The hooks do
+nothing outside a Mux pane, and `h` in the fleet, or `muxctl hooks`, puts
+them in and takes them out.
 
 ## Closing what is running
 
