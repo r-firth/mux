@@ -141,6 +141,17 @@ pub enum InstallError {
     Unexpected { path: PathBuf, reason: String },
 }
 
+/// Seconds `kind` gives the hook for `event`. Codex allows a hook at a
+/// session's end 3 at most, and warns at every start of one that asks
+/// for more.
+fn timeout_seconds(kind: AgentKind, event: &str) -> u64 {
+    if kind == AgentKind::Codex && event == "SessionEnd" {
+        3
+    } else {
+        TIMEOUT_SECONDS
+    }
+}
+
 /// The command a hook runs for `event`.
 #[must_use]
 pub fn hook_command(kind: AgentKind, event: &str) -> String {
@@ -293,7 +304,7 @@ fn with_hooks(kind: AgentKind, file: &Path, current: &Value) -> Result<Value, In
         let mut handler = Map::new();
         handler.insert("type".to_owned(), json!("command"));
         handler.insert("command".to_owned(), json!(hook_command(kind, event)));
-        handler.insert("timeout".to_owned(), json!(TIMEOUT_SECONDS));
+        handler.insert("timeout".to_owned(), json!(timeout_seconds(kind, event)));
         if *alongside {
             handler.insert("async".to_owned(), json!(true));
         }
@@ -618,6 +629,10 @@ mod tests {
         );
         // Codex is not asked to run a hook alongside its work.
         assert!(hooks["hooks"]["Stop"][0]["hooks"][0].get("async").is_none());
+        // Nor for longer at a session's end than it allows, which it
+        // would warn of each time it starts.
+        assert_eq!(hooks["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"], 3);
+        assert_eq!(hooks["hooks"]["Stop"][0]["hooks"][0]["timeout"], 5);
         assert!(uninstall(AgentKind::Codex, &homes).expect("uninstall"));
         assert!(!file.exists());
     }
