@@ -137,7 +137,9 @@ An agent's own interface works in Mux as it does anywhere: run `claude`,
 runs. `Cmd+Shift+A` shows them all, grouped by project, with what each was
 asked and whether it is working, done or waiting on you, beside the chosen
 agent's live pane. Return steps into that pane to answer it, Tab goes to the
-next agent that waits, and `Cmd+J` goes straight to one from anywhere.
+next agent that waits, and `Cmd+J` goes straight to one from anywhere. `v`
+shows every agent's live pane at once in a grid, the waiting ones first and
+calling in peach.
 
 Press `h` in the fleet, or run `muxctl hooks install`, to put Mux's hooks
 into Claude Code, Codex and Copilot, so each reports its prompts, tools and

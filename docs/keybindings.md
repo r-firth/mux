@@ -350,6 +350,7 @@ chosen agent's own pane, live. The agents that wait on you come first.
 | Return, `Option+Right` | Step into the agent's pane; every key is then the agent's |
 | `Option+Left` | Step back from the pane to the roster |
 | `g` | Go to the agent's own tab, in whatever session, and close the fleet |
+| `v` | Show every agent's pane at once, in a grid |
 | `n` | Start an agent in a new tab, in the chosen agent's project |
 | `h` | Put Mux's hooks into the agents, or take them out with `u` |
 | `r` | Pick an ended agent's session up again in its pane |
@@ -361,6 +362,26 @@ pane steps into it. An agent in another session shows the end of its pane
 as text, and Return goes there. With no agents running the roster says so,
 and `n` starts one where you were. `Cmd+P` lists each agent by name, and
 has "show the fleet", "start an agent here" and "hook coding agents…".
+
+`v` turns the fleet into a grid: every agent's pane at once, live, each
+drawn small in a tile under its name, project, what it was asked and its
+state. The agents that wait on you come first, then those that are done,
+working, idle and ended. A waiting agent's tile has a peach edge, says what
+it asks in its head, and calls in peach on the ground around it, as a pane
+that calls does. The panes keep their own sizes; only the drawing is
+smaller. Tiles share the window by how many agents there are, two side by
+side or twelve in four columns, and more than fit go a page at a time, the
+foot saying which. "show the fleet as a grid" in `Cmd+P` opens it directly.
+
+| Keys | Action |
+| --- | --- |
+| Arrows, `h` / `j` / `k` / `l` | Choose a tile |
+| Tab / Shift+Tab | The next or previous agent waiting on you |
+| Return | Type to the chosen agent: back to the roster, in its pane |
+| `g` | Go to the agent's own tab and close the fleet |
+| `v` or Escape | Back to the roster |
+
+Click a tile to choose it, and double-click to type to its agent.
 
 Mux knows an agent is there from the process in front of the pane's shell.
 What it is doing comes from the agent itself: with Mux's hooks in Claude
