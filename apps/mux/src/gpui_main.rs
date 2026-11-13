@@ -5313,8 +5313,7 @@ impl MuxApp {
         let frame = geometry.frame;
         let focused = geometry.focused;
         let pane = self.panes.get(&geometry.pane_id);
-        let agent_pane =
-            !self.fleet_open() && self.active_agent_pane() == Some(geometry.pane_id);
+        let agent_pane = !self.fleet_open() && self.active_agent_pane() == Some(geometry.pane_id);
         let agent = self.active_agent().filter(|_| agent_pane);
         // A coding agent run in the pane's shell names the pane, and says
         // what it was asked and how it is getting on.
@@ -6013,15 +6012,11 @@ fn focus_notch(id: SharedString, ink: Ink, motion: MotionPreference) -> gpui::An
         notch.into_any_element()
     } else {
         notch
-            .with_animation(
-                id,
-                interface_animation(220),
-                |notch, delta| {
-                    notch
-                        .w(px(12.0 + delta * 28.0))
-                        .opacity(0.35 + delta * 0.65)
-                },
-            )
+            .with_animation(id, interface_animation(220), |notch, delta| {
+                notch
+                    .w(px(12.0 + delta * 28.0))
+                    .opacity(0.35 + delta * 0.65)
+            })
             .into_any_element()
     }
 }

@@ -141,9 +141,10 @@ fn roster_order(agents: &[FleetAgent]) -> Vec<PaneId> {
         .collect()
 }
 
-/// An agent's name as the panes say it: lowercase.
+/// An agent's name as the panes say it: the word that runs it, which is
+/// short enough to leave a row's room to what the agent was asked.
 pub(super) fn agent_name(kind: AgentKind) -> String {
-    kind.name().to_lowercase()
+    kind.command().to_owned()
 }
 
 /// The state as a row has room for it.
@@ -275,11 +276,7 @@ impl MuxApp {
                 // Whatever it says now, the last word sent about it has
                 // been heard.
                 self.fleet_seen_sent.remove(&pane_id);
-                if let Some(known) = self
-                    .fleet
-                    .iter_mut()
-                    .find(|known| known.pane_id == pane_id)
-                {
+                if let Some(known) = self.fleet.iter_mut().find(|known| known.pane_id == pane_id) {
                     *known = *agent;
                 } else {
                     self.fleet.push(*agent);
@@ -744,7 +741,10 @@ impl MuxApp {
     /// Look for the agents on this machine, for `n` to offer.
     fn find_fleet_launchers(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |entity, cx| {
-            let found = cx.background_executor().spawn(async { find_launchers() }).await;
+            let found = cx
+                .background_executor()
+                .spawn(async { find_launchers() })
+                .await;
             let _ = entity.update(cx, |this, cx| {
                 this.fleet_launchers = Some(found);
                 cx.notify();
@@ -756,7 +756,10 @@ impl MuxApp {
     /// Read whether Mux's hooks are in each agent it has them for.
     pub(super) fn refresh_fleet_hooks(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |entity, cx| {
-            let statuses = cx.background_executor().spawn(async { hook_statuses() }).await;
+            let statuses = cx
+                .background_executor()
+                .spawn(async { hook_statuses() })
+                .await;
             let _ = entity.update(cx, |this, cx| {
                 if this.fleet_hooks != statuses {
                     this.fleet_hooks = statuses;
@@ -1129,7 +1132,11 @@ impl MuxApp {
             ..detail
         });
         let pane = self.fleet_shown_pane().map(|pane_id| {
-            let head = if self.find.as_ref().is_some_and(|find| find.pane_id == pane_id) {
+            let head = if self
+                .find
+                .as_ref()
+                .is_some_and(|find| find.pane_id == pane_id)
+            {
                 layout::PANE_HEAD_HEIGHT
             } else {
                 layout::PANE_LEGEND_TOP
@@ -1195,7 +1202,11 @@ impl MuxApp {
     /// Where the fleet's chip sits in the strip, near enough for the
     /// ground's light to start from.
     pub(super) fn fleet_chip_rect(&self) -> layout::Rect {
-        let lead = if cfg!(target_os = "macos") { 82.0 } else { 10.0 };
+        let lead = if cfg!(target_os = "macos") {
+            82.0
+        } else {
+            10.0
+        };
         layout::Rect {
             x: lead,
             y: (layout::TAB_BAR_HEIGHT - 26.0) / 2.0,
@@ -1280,12 +1291,13 @@ impl MuxApp {
         match agent.state {
             FleetState::Blocked => dot.rounded_full().bg(color(SIGNAL)),
             FleetState::Error => dot.rounded(px(1.0)).bg(color(SIGNAL)),
-            FleetState::Working => dot
-                .rounded_full()
-                .bg(ink.opacity(self.agent_pulse_level())),
+            FleetState::Working => dot.rounded_full().bg(ink.opacity(self.agent_pulse_level())),
             FleetState::Done => dot.rounded_full().bg(ink),
             FleetState::Idle => dot.rounded_full().border_1().border_color(ink.opacity(0.8)),
-            FleetState::Unknown => dot.rounded_full().border_1().border_color(color(FAINT_TEXT)),
+            FleetState::Unknown => dot
+                .rounded_full()
+                .border_1()
+                .border_color(color(FAINT_TEXT)),
             FleetState::Ended => div()
                 .flex_none()
                 .w(px(6.0))
@@ -1379,7 +1391,7 @@ impl MuxApp {
                         .gap(px(6.0))
                         .child(div().min_w_0().truncate().child(branch))
                         .when(agent.project.worktree, |branch| {
-                            branch.child(div().flex_none().child("worktree"))
+                            branch.child(div().flex_none().child("wt"))
                         }),
                 )
             });
@@ -1450,18 +1462,16 @@ impl MuxApp {
             }
             (None, None) => vec![("n", "new"), ("h", "hooks"), ("esc", "close")],
             (None, Some(agent)) if agent.state == FleetState::Ended => vec![
-                ("↑↓", "choose"),
                 ("r", "resume"),
                 ("x", "forget"),
-                ("g", "go to its tab"),
+                ("g", "its tab"),
                 ("n", "new"),
                 ("h", "hooks"),
                 ("esc", "close"),
             ],
             (None, Some(_)) => vec![
-                ("↑↓", "choose"),
                 ("↵", if remote { "go there" } else { "type to it" }),
-                ("g", "go to its tab"),
+                ("g", "its tab"),
                 ("⇥", "next waiting"),
                 ("n", "new"),
                 ("h", "hooks"),
@@ -1492,12 +1502,10 @@ impl MuxApp {
 
     /// The start card: the agents found here, to pick one to run.
     fn fleet_start_card(&self, choice: usize, here: bool) -> gpui::AnyElement {
-        let place = self
-            .fleet_selected()
-            .filter(|_| !here)
-            .map_or_else(|| "where you were".to_owned(), |agent| {
-                format!("in {}", agent.project.name)
-            });
+        let place = self.fleet_selected().filter(|_| !here).map_or_else(
+            || "where you were".to_owned(),
+            |agent| format!("in {}", agent.project.name),
+        );
         let mut card = v_flex().gap(px(2.0)).child(
             h_flex()
                 .h(px(24.0))
@@ -1700,10 +1708,11 @@ impl MuxApp {
                 .cursor_pointer()
                 .hover(|line| line.text_color(color(MUTED_TEXT)))
                 .on_click(cx.listener(|this, _, window, cx| this.open_fleet_hooks(window, cx)))
-                .child(div().min_w_0().truncate().child(format!(
-                    "{} can tell mux more",
-                    chrome::names_list(&names)
-                )))
+                .child(div().min_w_0().truncate().child(if names.len() > 2 {
+                    format!("{} agents can tell mux more", names.len())
+                } else {
+                    format!("{} can tell mux more", chrome::names_list(&names))
+                }))
                 .child(div().flex_1())
                 .child(
                     h_flex()
@@ -1903,16 +1912,19 @@ impl MuxApp {
             .sessions
             .iter()
             .find(|session| session.id == agent.session_id)
-            .map_or_else(|| "another session".to_owned(), |session| {
-                format!("session {}", session.name)
-            });
+            .map_or_else(
+                || "another session".to_owned(),
+                |session| format!("session {}", session.name),
+            );
         let text = view
             .remote_text
             .as_ref()
             .filter(|(pane_id, _)| *pane_id == agent.pane_id)
             .map(|(_, text)| text.as_str());
         let metrics = self.metrics;
-        let room = ((frame.height - 36.0 - 12.0) / metrics.cell_height).floor().max(1.0) as usize;
+        let room = ((frame.height - 36.0 - 12.0) / metrics.cell_height)
+            .floor()
+            .max(1.0) as usize;
         let lines = text.map(|text| {
             let lines = text.trim_end().lines().collect::<Vec<_>>();
             lines[lines.len().saturating_sub(room)..]
@@ -1968,7 +1980,11 @@ impl MuxApp {
                             div()
                                 .flex_none()
                                 .h(px(metrics.cell_height))
-                                .child(if line.is_empty() { " ".to_owned() } else { line })
+                                .child(if line.is_empty() {
+                                    " ".to_owned()
+                                } else {
+                                    line
+                                })
                         })),
                         None => body.child(
                             div()
@@ -2215,7 +2231,10 @@ mod tests {
             state_and_age(&agent("mux", FleetState::Working, 159_000), now),
             "working 41s"
         );
-        assert_eq!(state_and_age(&agent("mux", FleetState::Idle, 1), now), "idle");
+        assert_eq!(
+            state_and_age(&agent("mux", FleetState::Idle, 1), now),
+            "idle"
+        );
         assert_eq!(
             state_and_age(&agent("mux", FleetState::Unknown, 190_000), now),
             "running 10s"
@@ -2244,14 +2263,29 @@ mod tests {
     fn tab_goes_round_the_agents_that_wait() {
         let order = [PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new()];
         let waits = |pane_id| pane_id == order[1] || pane_id == order[3];
-        assert_eq!(next_waiting(&order, waits, Some(order[0]), true), Some(order[1]));
-        assert_eq!(next_waiting(&order, waits, Some(order[1]), true), Some(order[3]));
-        assert_eq!(next_waiting(&order, waits, Some(order[3]), true), Some(order[1]));
-        assert_eq!(next_waiting(&order, waits, Some(order[1]), false), Some(order[3]));
+        assert_eq!(
+            next_waiting(&order, waits, Some(order[0]), true),
+            Some(order[1])
+        );
+        assert_eq!(
+            next_waiting(&order, waits, Some(order[1]), true),
+            Some(order[3])
+        );
+        assert_eq!(
+            next_waiting(&order, waits, Some(order[3]), true),
+            Some(order[1])
+        );
+        assert_eq!(
+            next_waiting(&order, waits, Some(order[1]), false),
+            Some(order[3])
+        );
         assert_eq!(next_waiting(&order, waits, None, true), Some(order[1]));
         // The only one waiting is where Tab stays.
         let one = |pane_id| pane_id == order[2];
-        assert_eq!(next_waiting(&order, one, Some(order[2]), true), Some(order[2]));
+        assert_eq!(
+            next_waiting(&order, one, Some(order[2]), true),
+            Some(order[2])
+        );
         assert_eq!(next_waiting(&order, |_| false, Some(order[0]), true), None);
         assert_eq!(next_waiting(&[], |_| true, None, true), None);
     }
