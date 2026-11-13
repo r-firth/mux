@@ -1708,7 +1708,7 @@ impl MuxApp {
                 .cursor_pointer()
                 .hover(|line| line.text_color(color(MUTED_TEXT)))
                 .on_click(cx.listener(|this, _, window, cx| this.open_fleet_hooks(window, cx)))
-                .child(div().min_w_0().truncate().child(if names.len() > 2 {
+                .child(div().min_w_0().truncate().child(if names.len() > 1 {
                     format!("{} agents can tell mux more", names.len())
                 } else {
                     format!("{} can tell mux more", chrome::names_list(&names))
