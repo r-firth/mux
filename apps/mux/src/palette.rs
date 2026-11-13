@@ -340,6 +340,7 @@ impl MuxApp {
         cx.notify();
     }
 
+    #[allow(clippy::too_many_lines)]
     fn run_palette_command(
         &mut self,
         command: Command,
