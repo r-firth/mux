@@ -575,6 +575,13 @@ impl MuxApp {
             .filter(|pane_id| !self.panes.contains_key(pane_id))
     }
 
+    /// Whether an agent in one of the tab's panes waits on the user.
+    pub(super) fn fleet_waits_in_tab(&self, tab_id: TabId) -> bool {
+        self.fleet.iter().any(|agent| {
+            agent.state == FleetState::Blocked && self.tab_of_pane(agent.pane_id) == Some(tab_id)
+        })
+    }
+
     /// What a pane's program said, with its paths said from the project
     /// of the agent in the pane, when one is.
     pub(super) fn fleet_said_in(&self, pane_id: PaneId, said: &str) -> String {

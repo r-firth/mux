@@ -4525,6 +4525,7 @@ impl MuxApp {
         let news = self.tab_call_is_news(tab);
         let dot = match activity {
             Some(AgentTabActivity::Attention) => color(SIGNAL),
+            _ if !active && self.fleet_waits_in_tab(tab_id) => color(SIGNAL),
             _ if call.is_some() => Self::call_color(news, ink),
             Some(AgentTabActivity::Working) => ink.color().opacity(self.agent_pulse_level()),
             _ if unseen => color(SAGE),
@@ -4535,7 +4536,9 @@ impl MuxApp {
         chip = chip.child(self.render_tab_label(tab_id, label, active, group, cx));
         // Said in words as well, since a peach-inked tab's dot is peach
         // anyway: what its agent or a pane of it wants.
-        let wants = if activity == Some(AgentTabActivity::Attention) {
+        let wants = if activity == Some(AgentTabActivity::Attention)
+            || (!active && self.fleet_waits_in_tab(tab_id))
+        {
             Some(("needs you".to_owned(), color(SIGNAL)))
         } else {
             call.map(|call| {
