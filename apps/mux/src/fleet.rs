@@ -9,6 +9,12 @@
 //! it was opened over. While it is closed, a chip at the head of the strip
 //! says agents are there, and how many are waiting.
 //!
+//! `v` turns the view into a wall: every agent's pane at once, each drawn
+//! small in a tile under its name and state, the ones that wait first. The
+//! panes keep their own sizes; only the drawing is scaled. A waiting
+//! agent's tile calls as a pane that calls does, in peach on the ground
+//! around it.
+//!
 //! The daemon keeps the fleet (see `mux-fleet`); this window keeps a copy,
 //! told of each change, and says when a finished agent has been looked at.
 
@@ -32,6 +38,16 @@ const SETTLE: Duration = Duration::from_millis(140);
 const SEEN_AFTER: Duration = Duration::from_millis(1200);
 /// How much of another session's pane is asked for.
 const REMOTE_LINES: u32 = 200;
+/// The least a tile of the wall is, the gap between tiles, and the heights
+/// of a tile's head and the wall's foot.
+const TILE_MIN_WIDTH: f32 = 300.0;
+const TILE_MIN_HEIGHT: f32 = 190.0;
+const TILE_HEAD: f32 = 26.0;
+const TILE_PAD: f32 = 5.0;
+const WALL_FOOT: f32 = 36.0;
+/// The smallest a tile's text is drawn: below it the tile shows the foot
+/// of its pane rather than the whole.
+const TILE_MIN_FONT: f32 = 3.0;
 /// How long a new tab's shell is waited on before the agent's command is
 /// typed regardless.
 const SHELL_WAIT: Duration = Duration::from_secs(4);
@@ -61,6 +77,12 @@ pub(super) struct FleetView {
     awaiting: Option<PaneId>,
     /// The pane the view last drew.
     drawn_pane: Option<PaneId>,
+    /// Whether the view is the wall, every agent's pane in a tile, rather
+    /// than the roster beside one pane.
+    wall: bool,
+    /// The panes on the wall as last laid out, and how many to a row.
+    wall_shown: Vec<PaneId>,
+    wall_columns: usize,
 }
 
 /// A small sheet over the foot of the roster.
@@ -81,8 +103,45 @@ pub(super) struct FleetStart {
     known: HashSet<PaneId>,
 }
 
-/// Where the view's parts go.
+/// One agent's tile on the wall.
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct WallTile {
+    pane_id: PaneId,
+    frame: layout::Rect,
+}
+
+impl WallTile {
+    /// Where the tile draws its pane, inside its edge and under its head.
+    fn body(&self) -> layout::Rect {
+        layout::Rect {
+            x: self.frame.x + 1.0 + TILE_PAD,
+            y: self.frame.y + TILE_HEAD,
+            width: (self.frame.width - 2.0 - TILE_PAD * 2.0).max(1.0),
+            height: (self.frame.height - TILE_HEAD - 1.0 - TILE_PAD).max(1.0),
+        }
+    }
+}
+
+/// The wall: the tiles of the page on screen, and the foot under them.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct WallLayout {
+    tiles: Vec<WallTile>,
+    columns: usize,
+    foot: layout::Rect,
+    /// Which page of tiles this is, from 0, and of how many.
+    page: usize,
+    pages: usize,
+}
+
+/// A tile's pane, drawn small: its view and the size it is drawn at.
+pub(super) struct TilePane {
+    view: Entity<gpui_terminal::TerminalView>,
+    width: f32,
+    height: f32,
+}
+
+/// Where the view's parts go.
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct FleetLayout {
     pub(super) roster: layout::Rect,
     /// Everything right of the roster.
@@ -91,6 +150,8 @@ pub(super) struct FleetLayout {
     card: Option<layout::Rect>,
     /// The chosen agent's pane, when this window has it.
     pub(super) pane: Option<layout::PaneGeometry>,
+    /// The wall, when the view is one: nothing else is drawn then.
+    wall: Option<WallLayout>,
 }
 
 /// What a pane's head says of the agent in it: its name, what it was
@@ -143,6 +204,63 @@ fn roster_order(agents: &[FleetAgent]) -> Vec<PaneId> {
         .iter()
         .flat_map(|group| group.agents.iter().map(|agent| agent.pane_id))
         .collect()
+}
+
+/// The wall's agents in the order it tiles them: the ones that wait on the
+/// user first, then those with news, at work, idle and ended, each kind by
+/// how long it has been so.
+fn wall_order(agents: &[FleetAgent]) -> Vec<PaneId> {
+    let mut order: Vec<&FleetAgent> = agents.iter().collect();
+    order.sort_by_key(|agent| (agent.state.rank(), agent.since_ms, agent.pane_id));
+    order.into_iter().map(|agent| agent.pane_id).collect()
+}
+
+/// How `count` tiles share a wall this size: how many to a row and how many
+/// rows a page has. Every tile keeps its least size, so a wall with more
+/// agents than fit shows them a page at a time; among the ways that fit,
+/// the one whose tiles hold the largest pane wins.
+fn wall_grid(count: usize, width: f32, height: f32) -> (usize, usize) {
+    let gap = layout::PANE_GAP;
+    let most = |room: f32, least: f32| (((room + gap) / (least + gap)).floor() as usize).max(1);
+    let most_columns = most(width, TILE_MIN_WIDTH);
+    let most_rows = most(height, TILE_MIN_HEIGHT);
+    let count = count.max(1);
+    (1..=most_columns.min(count))
+        .map(|columns| (columns, count.div_ceil(columns).min(most_rows)))
+        .max_by(|a, b| {
+            let score = |(columns, rows): (usize, usize)| {
+                let tile_width = (width - gap * (columns - 1) as f32) / columns as f32;
+                let tile_height = (height - gap * (rows - 1) as f32) / rows as f32;
+                // A pane is about eight wide to five high; a page that
+                // holds every agent beats one that doesn't.
+                let fits = columns * rows >= count;
+                (fits, (tile_width / 1.6).min(tile_height))
+            };
+            let (a_fits, a_size) = score(*a);
+            let (b_fits, b_size) = score(*b);
+            a_fits
+                .cmp(&b_fits)
+                .then(a_size.total_cmp(&b_size))
+                // Of two as good, the wider wall.
+                .then(a.0.cmp(&b.0))
+        })
+        .unwrap_or((1, 1))
+}
+
+/// Where a step that way from tile `at` lands, of `count` tiles in rows of
+/// `columns`: along the row and on to the next, or up and down a column,
+/// stopping at the wall's edges.
+fn wall_step(at: usize, count: usize, columns: usize, key: &str) -> usize {
+    let columns = columns.max(1);
+    match key {
+        "left" | "h" => at.saturating_sub(1),
+        "right" | "l" => (at + 1).min(count.saturating_sub(1)),
+        "up" | "k" if at >= columns => at - columns,
+        "down" | "j" if at + columns < count => at + columns,
+        // Down from the row above a short last row goes to its end.
+        "down" | "j" if at / columns < count.saturating_sub(1) / columns => count - 1,
+        _ => at,
+    }
 }
 
 /// An agent's name as the panes say it: the word that runs it, which is
@@ -318,6 +436,10 @@ impl MuxApp {
             view.selected = None;
             view.selected_at = Instant::now();
         }
+        // A wall with no agents has nothing to show.
+        if self.fleet.is_empty() {
+            view.wall = false;
+        }
     }
 
     /// The live agent in a pane, if one is there.
@@ -334,15 +456,38 @@ impl MuxApp {
             .selected
             .and_then(|pane_id| self.fleet.iter().find(|agent| agent.pane_id == pane_id));
         chosen.or_else(|| {
-            let first = roster_order(&self.fleet).into_iter().next()?;
+            let first = self.fleet_order().into_iter().next()?;
             self.fleet.iter().find(|agent| agent.pane_id == first)
         })
+    }
+
+    /// The agents in the order the view lists them: the wall's while it is
+    /// one, else the roster's.
+    fn fleet_order(&self) -> Vec<PaneId> {
+        if self.fleet_wall_open() {
+            wall_order(&self.fleet)
+        } else {
+            roster_order(&self.fleet)
+        }
+    }
+
+    /// Whether the view is the wall.
+    pub(super) fn fleet_wall_open(&self) -> bool {
+        self.fleet_view.as_ref().is_some_and(|view| view.wall)
+    }
+
+    /// Whether a pane is on the wall, on the page on screen.
+    pub(super) fn fleet_wall_shows(&self, pane_id: PaneId) -> bool {
+        self.fleet_view
+            .as_ref()
+            .is_some_and(|view| view.wall && view.wall_shown.contains(&pane_id))
     }
 
     /// The chosen agent's pane, while the view shows it and this window has
     /// it: the one pane on screen then.
     pub(super) fn fleet_shown_pane(&self) -> Option<PaneId> {
         self.fleet_selected()
+            .filter(|_| !self.fleet_wall_open())
             .map(|agent| agent.pane_id)
             .filter(|pane_id| self.panes.contains_key(pane_id))
     }
@@ -350,6 +495,7 @@ impl MuxApp {
     /// The chosen agent's pane when it belongs to another session.
     fn fleet_remote_pane(&self) -> Option<PaneId> {
         self.fleet_selected()
+            .filter(|_| !self.fleet_wall_open())
             .map(|agent| agent.pane_id)
             .filter(|pane_id| !self.panes.contains_key(pane_id))
     }
@@ -436,6 +582,9 @@ impl MuxApp {
             remote_text: None,
             awaiting: None,
             drawn_pane: None,
+            wall: false,
+            wall_shown: Vec::new(),
+            wall_columns: 1,
         });
         // The slabs are simply there, not gliding in from the tab's.
         self.layout_motion = motion::LayoutMotion::default();
@@ -476,6 +625,7 @@ impl MuxApp {
 
     fn select_fleet_agent(&mut self, pane_id: Option<PaneId>, cx: &mut Context<Self>) {
         let order = roster_order(&self.fleet);
+        let was_in_view = self.panes_in_view();
         let Some(view) = self.fleet_view.as_mut() else {
             return;
         };
@@ -490,6 +640,8 @@ impl MuxApp {
             view.scroll.scroll_to_item(index);
         }
         self.ask_remote_text();
+        // The roster's one pane changes with the choice.
+        self.publish_panes_come_into_view(&was_in_view);
         // Its pane is sized, and its news read, once it has been chosen a
         // moment.
         for wait in [SETTLE, SEEN_AFTER] {
@@ -517,7 +669,7 @@ impl MuxApp {
 
     /// Tab and Shift+Tab: the next agent that waits on the user.
     fn choose_next_waiting(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let order = roster_order(&self.fleet);
+        let order = self.fleet_order();
         let from = self.fleet_selected().map(|agent| agent.pane_id);
         let next = next_waiting(
             &order,
@@ -533,6 +685,67 @@ impl MuxApp {
             Some(pane_id) => self.select_fleet_agent(Some(pane_id), cx),
             None => self.say_in_strip("no agent is waiting on you", false, cx),
         }
+    }
+
+    /// `v`: turn the view into the wall, or back into the roster. The agent
+    /// chosen in one is the one chosen in the other.
+    pub(super) fn set_fleet_wall(&mut self, wall: bool, cx: &mut Context<Self>) {
+        if wall && self.fleet.is_empty() {
+            self.say_in_strip("no agents to show yet", false, cx);
+            return;
+        }
+        let chosen = self.fleet_selected().map(|agent| agent.pane_id);
+        let was_in_view = self.panes_in_view();
+        let Some(view) = self.fleet_view.as_mut() else {
+            return;
+        };
+        if view.wall == wall {
+            return;
+        }
+        view.wall = wall;
+        view.card = None;
+        view.in_pane = false;
+        view.selected = chosen;
+        view.selected_at = Instant::now();
+        view.remote_text = None;
+        if !wall {
+            view.wall_shown.clear();
+        }
+        self.publish_panes_come_into_view(&was_in_view);
+        self.ask_remote_text();
+        cx.notify();
+    }
+
+    /// Open the view as the wall.
+    pub(super) fn open_fleet_wall(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_fleet(window, cx);
+        if self.fleet_view.as_ref().is_some_and(|view| view.in_pane) {
+            self.leave_fleet_pane(window, cx);
+        }
+        self.set_fleet_wall(true, cx);
+    }
+
+    /// An arrow on the wall: the tile that way.
+    fn move_wall_choice(&mut self, key: &str, cx: &mut Context<Self>) {
+        let order = wall_order(&self.fleet);
+        let Some(view) = self.fleet_view.as_ref() else {
+            return;
+        };
+        let at = self
+            .fleet_selected()
+            .and_then(|agent| order.iter().position(|pane_id| *pane_id == agent.pane_id))
+            .unwrap_or(0);
+        let next = wall_step(at, order.len(), view.wall_columns, key);
+        if let Some(pane_id) = order.get(next) {
+            self.select_fleet_agent(Some(*pane_id), cx);
+        }
+    }
+
+    /// Return on the wall: back to the roster and into the chosen agent's
+    /// pane, to type to it.
+    fn enter_wall_tile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_fleet_wall(false, cx);
+        self.enter_fleet_pane(window, cx);
     }
 
     /// Ask for what the chosen agent's pane shows, when it belongs to
@@ -1121,7 +1334,8 @@ impl MuxApp {
             ..bounds
         };
         let chosen = self.fleet_selected();
-        let ended = chosen.is_some_and(|agent| agent.state == FleetState::Ended);
+        let wall = view.wall.then(|| self.wall_layout(bounds));
+        let ended = wall.is_none() && chosen.is_some_and(|agent| agent.state == FleetState::Ended);
         let card = ended.then_some(layout::Rect {
             height: ENDED_CARD_HEIGHT.min(detail.height),
             ..detail
@@ -1154,7 +1368,197 @@ impl MuxApp {
             detail,
             card,
             pane,
+            wall,
         })
+    }
+
+    /// Where the wall's tiles go in `bounds`: the page with the chosen
+    /// agent on it, in rows, over a foot.
+    fn wall_layout(&self, bounds: layout::Rect) -> WallLayout {
+        let gap = layout::PANE_GAP;
+        let foot = layout::Rect {
+            y: bounds.y + bounds.height - WALL_FOOT,
+            height: WALL_FOOT,
+            ..bounds
+        };
+        let room = layout::Rect {
+            height: (bounds.height - WALL_FOOT - gap).max(1.0),
+            ..bounds
+        };
+        let order = wall_order(&self.fleet);
+        let (columns, rows) = wall_grid(order.len(), room.width, room.height);
+        let per_page = columns * rows;
+        let pages = order.len().div_ceil(per_page).max(1);
+        let chosen = self
+            .fleet_selected()
+            .and_then(|agent| order.iter().position(|pane_id| *pane_id == agent.pane_id))
+            .unwrap_or(0);
+        let page = chosen / per_page;
+        let tile_width = (room.width - gap * (columns - 1) as f32) / columns as f32;
+        let tile_height = (room.height - gap * (rows - 1) as f32) / rows as f32;
+        let tiles = order
+            .iter()
+            .skip(page * per_page)
+            .take(per_page)
+            .enumerate()
+            .map(|(index, pane_id)| WallTile {
+                pane_id: *pane_id,
+                frame: layout::Rect {
+                    x: (room.x + (tile_width + gap) * (index % columns) as f32).round(),
+                    y: (room.y + (tile_height + gap) * (index / columns) as f32).round(),
+                    width: tile_width.floor(),
+                    height: tile_height.floor(),
+                },
+            })
+            .collect();
+        WallLayout {
+            tiles,
+            columns,
+            foot,
+            page,
+            pages,
+        }
+    }
+
+    /// Take in the wall as laid out this frame: its panes are the ones in
+    /// view, and one that has just come onto it is drawn afresh.
+    pub(super) fn publish_fleet_wall(&mut self, layout: &FleetLayout) {
+        let Some(view) = self.fleet_view.as_mut() else {
+            return;
+        };
+        let Some(wall) = &layout.wall else {
+            view.wall_shown.clear();
+            return;
+        };
+        let shown: Vec<PaneId> = wall.tiles.iter().map(|tile| tile.pane_id).collect();
+        view.wall_columns = wall.columns;
+        let was = std::mem::replace(&mut view.wall_shown, shown.clone());
+        for pane_id in shown {
+            if !was.contains(&pane_id)
+                && let Some(pane) = self.panes.get_mut(&pane_id)
+            {
+                let _ = pane.publish_frame();
+            }
+        }
+    }
+
+    /// The metrics a pane of `cols` by `rows` is drawn with to fit a tile's
+    /// body: the terminal's own face, smaller, in quarter-point steps so
+    /// tiles of a size share what they shape.
+    fn tile_metrics(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        body: layout::Rect,
+        cx: &mut Context<Self>,
+    ) -> gpui_terminal::GridMetrics {
+        let full = self.metrics;
+        let pad = full.padding_x * 2.0;
+        let scale = ((body.width - pad) / (full.cell_width * f32::from(cols.max(1))))
+            .min((body.height - pad) / (full.cell_height * f32::from(rows.max(1))))
+            .min(1.0);
+        let size = ((full.font_size * scale * 4.0).floor() / 4.0).max(TILE_MIN_FONT);
+        *self
+            .fleet_tile_metrics
+            .entry((self.terminal_font.clone(), size.to_bits()))
+            .or_insert_with(|| {
+                gpui_terminal::GridMetrics::from_font(&self.terminal_font, size, cx.text_system())
+            })
+    }
+
+    /// The terminal views of the wall's tiles, each pane drawn small. A
+    /// view is kept while nothing it draws has changed, as a pane's is.
+    pub(super) fn fleet_tile_panes(
+        &mut self,
+        layout: &FleetLayout,
+        cx: &mut Context<Self>,
+    ) -> HashMap<PaneId, TilePane> {
+        let mut tiles = HashMap::new();
+        let Some(wall) = &layout.wall else {
+            return tiles;
+        };
+        for tile in &wall.tiles {
+            let pane_id = tile.pane_id;
+            let Some((cols, rows)) = self
+                .panes
+                .get(&pane_id)
+                .map(|pane| (pane.frame.cols, pane.frame.rows))
+            else {
+                continue;
+            };
+            let metrics = self.tile_metrics(cols, rows, tile.body(), cx);
+            let Some(pane) = self.panes.get(&pane_id) else {
+                continue;
+            };
+            let props = gpui_terminal::TerminalProps {
+                frame_serial: pane.frame_serial,
+                font_family: self.terminal_font.clone(),
+                metrics,
+                // Nothing is typed into a tile, so it shows no cursor.
+                focused: false,
+                chrome: gpui_terminal::TerminalChrome {
+                    surface: color(SURFACE),
+                    cursor: color(MUTED_TEXT),
+                    hollow_cursor: false,
+                },
+                marks: Rc::default(),
+                opacity: 1.0,
+            };
+            let view = match self.terminal_views.get(&pane_id) {
+                Some(view) if view.read(cx).props() == &props => view.clone(),
+                _ => {
+                    let frame = Rc::clone(&pane.frame);
+                    let cache = Rc::clone(&pane.render_cache);
+                    let view = cx.new(|_| gpui_terminal::TerminalView::new(props, &frame, cache));
+                    self.terminal_views.insert(pane_id, view.clone());
+                    view
+                }
+            };
+            tiles.insert(
+                pane_id,
+                TilePane {
+                    view,
+                    width: metrics.cell_width * f32::from(cols) + metrics.padding_x * 2.0,
+                    height: metrics.cell_height * f32::from(rows) + metrics.padding_y * 2.0,
+                },
+            );
+        }
+        tiles
+    }
+
+    /// What the wall adds to the ground's light: a waiting agent's tile
+    /// calls in peach, as a pane that calls does, and a working one is busy.
+    pub(super) fn fleet_wall_lights(
+        &self,
+        viewport: gpui::Size<gpui::Pixels>,
+        calls: &mut Vec<ground::Call>,
+        busy: &mut Vec<(layout::Rect, f32)>,
+    ) {
+        let Some(wall) = self
+            .fleet_layout(f32::from(viewport.width), f32::from(viewport.height))
+            .and_then(|layout| layout.wall)
+        else {
+            return;
+        };
+        for tile in &wall.tiles {
+            let Some(agent) = self
+                .fleet
+                .iter()
+                .find(|agent| agent.pane_id == tile.pane_id)
+            else {
+                continue;
+            };
+            if agent.state.wants_user() {
+                calls.push(ground::Call {
+                    caller: ground::Caller::Pane(tile.pane_id),
+                    from: tile.frame,
+                    reach: ground::PANE_REACH,
+                    ink: None,
+                });
+            } else if agent.state == FleetState::Working {
+                busy.push((tile.frame, 1.0));
+            }
+        }
     }
 
     /// A pane the view comes to show took in its output unseen until now:
@@ -1186,6 +1590,17 @@ impl MuxApp {
         viewport: gpui::Size<gpui::Pixels>,
     ) -> Option<(Vec<layout::Rect>, Option<layout::Rect>)> {
         let layout = self.fleet_layout(f32::from(viewport.width), f32::from(viewport.height))?;
+        if let Some(wall) = &layout.wall {
+            let chosen = self.fleet_selected().map(|agent| agent.pane_id);
+            let mut slabs: Vec<_> = wall.tiles.iter().map(|tile| tile.frame).collect();
+            slabs.push(wall.foot);
+            let focus = wall
+                .tiles
+                .iter()
+                .find(|tile| Some(tile.pane_id) == chosen)
+                .map(|tile| tile.frame);
+            return Some((slabs, focus));
+        }
         let mut slabs = vec![layout.roster];
         slabs.extend(layout.card);
         if layout.pane.is_none() && self.fleet_selected().is_some() {
@@ -1474,6 +1889,7 @@ impl MuxApp {
                 ("↵", if remote { "go there" } else { "type to it" }),
                 ("g", "its tab"),
                 ("⇥", "next waiting"),
+                ("v", "grid"),
                 ("n", "new"),
                 ("h", "hooks"),
                 ("esc", "close"),
@@ -1997,16 +2413,259 @@ impl MuxApp {
             .into_any_element()
     }
 
+    /// One tile of the wall: a head with the agent's mark, name, what it
+    /// was asked (or what it asks, while it waits) and its state, over its
+    /// pane drawn small. The chosen tile wears the ink a focused pane does,
+    /// and one that waits on the user a peach edge.
+    fn render_wall_tile(
+        &self,
+        tile: &WallTile,
+        agent: &FleetAgent,
+        pane: Option<TilePane>,
+        chosen: bool,
+        now: u64,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let pane_id = tile.pane_id;
+        let frame = tile.frame;
+        let body = tile.body();
+        let ink = self.active_ink();
+        let wants = agent.state.wants_user();
+        let ended = agent.state == FleetState::Ended;
+        let state_tone = match agent.state {
+            FleetState::Blocked | FleetState::Error => SIGNAL,
+            FleetState::Working | FleetState::Done => MUTED_TEXT,
+            _ => FAINT_TEXT,
+        };
+        let beside = if wants {
+            agent.headline().map(str::to_owned).or(agent.task.clone())
+        } else {
+            agent.task.clone()
+        };
+        let head = h_flex()
+            .flex_none()
+            .h(px(TILE_HEAD - 1.0))
+            .px(px(10.0))
+            .gap(px(8.0))
+            .items_center()
+            .text_size(px(12.0))
+            .child(self.fleet_dot(agent))
+            .child(
+                div()
+                    .flex_none()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(color(if chosen { TEXT } else { MUTED_TEXT }))
+                    .child(agent_name(agent.kind)),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .max_w(px(frame.width * 0.3))
+                    .truncate()
+                    .text_color(color(FAINT_TEXT))
+                    .child(agent.project.name.clone()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(color(if wants { MUTED_TEXT } else { FAINT_TEXT }))
+                    .children(beside),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(color(state_tone))
+                    .child(state_and_age(agent, now)),
+            );
+        let shown = match pane {
+            Some(pane) => {
+                // A pane sits in its tile's top left, as its text does in
+                // it; one too big even at the smallest text shows its foot.
+                let top = (body.height - pane.height).min(0.0);
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(top))
+                    .w(px(pane.width))
+                    .h(px(pane.height))
+                    .child(pane.view)
+                    .into_any_element()
+            }
+            None => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(12.0))
+                .text_color(color(FAINT_TEXT))
+                .child("in another session")
+                .into_any_element(),
+        };
+        v_flex()
+            .id(SharedString::from(format!("fleet-tile-{pane_id}")))
+            .absolute()
+            .left(px(frame.x))
+            .top(px(frame.y))
+            .w(px(frame.width))
+            .h(px(frame.height))
+            .rounded(px(10.0))
+            .bg(color(SURFACE))
+            .border_1()
+            .border_color(if chosen {
+                ink.color().opacity(0.55)
+            } else if wants {
+                color(SIGNAL).opacity(0.5)
+            } else {
+                hairline(0.07)
+            })
+            .overflow_hidden()
+            .cursor_pointer()
+            .font_family(EMBEDDED_TERMINAL_FONT)
+            .whitespace_nowrap()
+            .on_click(
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    this.select_fleet_agent(Some(pane_id), cx);
+                    this.focus_fleet_roster(window, cx);
+                    if event.click_count() == 2 {
+                        this.enter_wall_tile(window, cx);
+                    }
+                    cx.notify();
+                }),
+            )
+            .child(head)
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .mx(px(TILE_PAD))
+                    .mb(px(TILE_PAD))
+                    .overflow_hidden()
+                    .when(ended, |body| body.opacity(0.55))
+                    .child(shown),
+            )
+            .when(chosen, |tile| {
+                tile.child(focus_notch(
+                    SharedString::from(format!("fleet-tile-focus-{pane_id}")),
+                    ink,
+                    self.motion,
+                ))
+            })
+            .into_any_element()
+    }
+
+    /// The wall: a tile for each agent on the page, and a foot that sums
+    /// the fleet up and says the keys. It takes the keys the roster does.
+    fn render_fleet_wall(
+        &self,
+        view: &FleetView,
+        wall: &WallLayout,
+        mut panes: HashMap<PaneId, TilePane>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let now = now_ms();
+        let chosen = self.fleet_selected().map(|agent| agent.pane_id);
+        let hints = [
+            ("←↑↓→", "choose"),
+            ("⇥", "next waiting"),
+            ("↵", "type to it"),
+            ("g", "its tab"),
+            ("v", "roster"),
+        ];
+        let foot = h_flex()
+            .absolute()
+            .left(px(wall.foot.x))
+            .top(px(wall.foot.y))
+            .w(px(wall.foot.width))
+            .h(px(wall.foot.height))
+            .px(px(18.0))
+            .gap(px(12.0))
+            .items_center()
+            .rounded(px(10.0))
+            .bg(color(SURFACE))
+            .border_1()
+            .border_color(hairline(0.07))
+            .overflow_hidden()
+            .text_size(px(12.0))
+            .text_color(color(FAINT_TEXT))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(color(TEXT))
+                    .child("fleet"),
+            )
+            .child(div().min_w_0().truncate().child(summary(&self.fleet)))
+            .when(wall.pages > 1, |foot| {
+                foot.child(
+                    div()
+                        .flex_none()
+                        .text_color(color(MUTED_TEXT))
+                        .child(format!("page {} of {}", wall.page + 1, wall.pages)),
+                )
+            })
+            .child(div().flex_1())
+            .children(hints.into_iter().map(|(key, label)| {
+                h_flex()
+                    .flex_none()
+                    .gap(px(6.0))
+                    .child(kbd(key, color(MUTED_TEXT)))
+                    .child(label)
+            }));
+        div()
+            .id("fleet-wall")
+            .key_context("MuxFleet")
+            .track_focus(&view.focus)
+            .on_key_down(cx.listener(Self::fleet_key))
+            .on_action(cx.listener(|this, _: &ForwardTerminalTab, _, cx| {
+                this.choose_next_waiting(true, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ForwardTerminalBacktab, _, cx| {
+                this.choose_next_waiting(false, cx);
+            }))
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .font_family(EMBEDDED_TERMINAL_FONT)
+            .text_size(px(13.0))
+            .text_color(color(TEXT))
+            .whitespace_nowrap()
+            .children(wall.tiles.iter().filter_map(|tile| {
+                let agent = self
+                    .fleet
+                    .iter()
+                    .find(|agent| agent.pane_id == tile.pane_id)?;
+                Some(self.render_wall_tile(
+                    tile,
+                    agent,
+                    panes.remove(&tile.pane_id),
+                    chosen == Some(tile.pane_id),
+                    now,
+                    cx,
+                ))
+            }))
+            .child(foot)
+            .into_any_element()
+    }
+
     /// Everything of the view but the chosen agent's live pane, which the
     /// window draws as it draws any pane.
     pub(super) fn render_fleet(
         &self,
         layout: &FleetLayout,
+        tiles: HashMap<PaneId, TilePane>,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
         let Some(view) = self.fleet_view.as_ref() else {
             return Vec::new();
         };
+        if let Some(wall) = &layout.wall {
+            return vec![self.render_fleet_wall(view, wall, tiles, cx)];
+        }
         let mut parts = vec![self.render_fleet_roster(view, layout.roster, cx)];
         let chosen = self.fleet_selected();
         if let (Some(card), Some(agent)) = (layout.card, chosen) {
@@ -2045,6 +2704,23 @@ impl MuxApp {
             }
             return;
         }
+        if view.wall {
+            if !bare {
+                return;
+            }
+            match key {
+                "escape" | "v" => self.set_fleet_wall(false, cx),
+                "left" | "right" | "up" | "down" | "h" | "j" | "k" | "l" => {
+                    self.move_wall_choice(key, cx);
+                }
+                "enter" => self.enter_wall_tile(window, cx),
+                "g" => self.go_to_chosen_agent(window, cx),
+                _ => return,
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         // The roster is the pane on the left: the keys that go right from
         // a pane step into the agent's.
         let goes_right = key_chord(keystroke).is_some_and(|chord| {
@@ -2076,6 +2752,7 @@ impl MuxApp {
                 self.open_fleet_start(here, window, cx);
             }
             "h" => self.open_fleet_hooks(window, cx),
+            "v" => self.set_fleet_wall(true, cx),
             _ => return,
         }
         cx.stop_propagation();
@@ -2289,6 +2966,60 @@ mod tests {
         );
         assert_eq!(next_waiting(&order, |_| false, Some(order[0]), true), None);
         assert_eq!(next_waiting(&[], |_| true, None, true), None);
+    }
+
+    #[test]
+    fn the_wall_tiles_what_waits_first() {
+        let agents = vec![
+            agent("mux", FleetState::Idle, 1),
+            agent("gofer", FleetState::Working, 2),
+            agent("atlas", FleetState::Blocked, 9),
+            agent("mux", FleetState::Ended, 3),
+            agent("gofer", FleetState::Blocked, 4),
+        ];
+        let order = wall_order(&agents);
+        assert_eq!(
+            order,
+            vec![
+                agents[4].pane_id,
+                agents[2].pane_id,
+                agents[1].pane_id,
+                agents[0].pane_id,
+                agents[3].pane_id,
+            ]
+        );
+    }
+
+    #[test]
+    fn the_wall_shares_its_room_by_how_many_agents_there_are() {
+        // A window of 1440 by 800 or so.
+        let (width, height) = (1400.0, 760.0);
+        assert_eq!(wall_grid(1, width, height), (1, 1));
+        // Two sit side by side in a wide window, and one over the other in
+        // a tall one.
+        assert_eq!(wall_grid(2, width, height), (2, 1));
+        assert_eq!(wall_grid(2, 700.0, 1000.0), (1, 2));
+        assert_eq!(wall_grid(6, width, height), (3, 2));
+        assert_eq!(wall_grid(12, width, height), (4, 3));
+        // More than fit at the least size go a page at a time.
+        let (columns, rows) = wall_grid(40, width, height);
+        assert_eq!((columns, rows), (4, 3));
+        // A window too small for two tiles still shows one.
+        assert_eq!(wall_grid(5, 200.0, 100.0), (1, 1));
+    }
+
+    #[test]
+    fn the_arrows_walk_the_wall_and_stop_at_its_edges() {
+        // Seven tiles, three to a row: the last row has one.
+        assert_eq!(wall_step(0, 7, 3, "right"), 1);
+        assert_eq!(wall_step(2, 7, 3, "right"), 3);
+        assert_eq!(wall_step(6, 7, 3, "right"), 6);
+        assert_eq!(wall_step(0, 7, 3, "left"), 0);
+        assert_eq!(wall_step(1, 7, 3, "down"), 4);
+        assert_eq!(wall_step(4, 7, 3, "down"), 6);
+        assert_eq!(wall_step(6, 7, 3, "down"), 6);
+        assert_eq!(wall_step(6, 7, 3, "up"), 3);
+        assert_eq!(wall_step(1, 7, 3, "k"), 1);
     }
 
     #[test]

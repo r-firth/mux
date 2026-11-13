@@ -102,6 +102,7 @@ enum Command {
     OpenHistory,
     RevealDirectory,
     Fleet,
+    FleetWall,
     StartFleetAgent,
     FleetHooks,
 }
@@ -431,6 +432,10 @@ impl MuxApp {
             }
             Command::Fleet => {
                 self.toggle_fleet(window, cx);
+                return;
+            }
+            Command::FleetWall => {
+                self.open_fleet_wall(window, cx);
                 return;
             }
             Command::StartFleetAgent => {
@@ -866,7 +871,7 @@ impl MuxApp {
     /// What mux can do, each with the keys that do it and other words it
     /// answers to. Some say what they will do to the pane or tab on screen.
     #[allow(clippy::too_many_lines)] // One entry per command.
-    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 37] {
+    fn palette_commands(&self) -> [(Command, &'static str, &'static str, &'static str); 38] {
         let zoomed = self.active_tab_zoomed();
         let agent_here = self
             .active_agent_pane()
@@ -1034,6 +1039,12 @@ impl MuxApp {
                     "show the fleet"
                 },
                 "agents roster claude codex copilot running waiting",
+            ),
+            (
+                Command::FleetWall,
+                "",
+                "show the fleet as a grid",
+                "agents wall tiles panes all overview claude codex copilot",
             ),
             (
                 Command::StartFleetAgent,
