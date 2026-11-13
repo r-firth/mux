@@ -93,6 +93,10 @@ pub(super) struct FleetLayout {
     pub(super) pane: Option<layout::PaneGeometry>,
 }
 
+/// What a pane's head says of the agent in it: its name, what it was
+/// asked, and its state with the colour that state is said in.
+pub(super) type FleetHead = (String, Option<String>, Option<(&'static str, Hsla)>);
+
 /// One project's agents in the roster.
 #[derive(Debug, PartialEq)]
 struct Group<'a> {
@@ -437,8 +441,8 @@ impl MuxApp {
         self.layout_motion = motion::LayoutMotion::default();
         // Events may have been missed while it was shut.
         self.backend.send(CommandMessage::ListFleet);
-        self.refresh_fleet_hooks(cx);
-        self.find_fleet_launchers(cx);
+        Self::refresh_fleet_hooks(cx);
+        Self::find_fleet_launchers(cx);
         self.ask_remote_text();
         cx.notify();
     }
@@ -739,7 +743,7 @@ impl MuxApp {
     }
 
     /// Look for the agents on this machine, for `n` to offer.
-    fn find_fleet_launchers(&mut self, cx: &mut Context<Self>) {
+    fn find_fleet_launchers(cx: &mut Context<Self>) {
         cx.spawn(async move |entity, cx| {
             let found = cx
                 .background_executor()
@@ -754,7 +758,7 @@ impl MuxApp {
     }
 
     /// Read whether Mux's hooks are in each agent it has them for.
-    pub(super) fn refresh_fleet_hooks(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn refresh_fleet_hooks(cx: &mut Context<Self>) {
         cx.spawn(async move |entity, cx| {
             let statuses = cx
                 .background_executor()
@@ -795,7 +799,7 @@ impl MuxApp {
             view.card = Some(Card::Start { choice: 0, here });
         }
         if self.fleet_launchers.as_ref().is_none_or(Vec::is_empty) {
-            self.find_fleet_launchers(cx);
+            Self::find_fleet_launchers(cx);
         }
         cx.notify();
     }
@@ -815,7 +819,7 @@ impl MuxApp {
         if let Some(view) = self.fleet_view.as_mut() {
             view.card = Some(Card::Hooks { choice });
         }
-        self.refresh_fleet_hooks(cx);
+        Self::refresh_fleet_hooks(cx);
         cx.notify();
     }
 
@@ -894,7 +898,7 @@ impl MuxApp {
 
     /// Put Mux's hooks into an agent, or take them out, and say what came
     /// of it and what the agent needs next.
-    fn set_fleet_hooks(&mut self, kind: AgentKind, hooked: bool, cx: &mut Context<Self>) {
+    fn set_fleet_hooks(kind: AgentKind, hooked: bool, cx: &mut Context<Self>) {
         cx.spawn(async move |entity, cx| {
             let result = cx
                 .background_executor()
@@ -931,7 +935,7 @@ impl MuxApp {
                         this.say_in_strip(format!("couldn't hook {name}: {error}"), true, cx);
                     }
                 }
-                this.refresh_fleet_hooks(cx);
+                Self::refresh_fleet_hooks(cx);
             });
         })
         .detach();
@@ -1081,14 +1085,10 @@ impl MuxApp {
 
     /// What a pane's head says of the agent in it: its name, what it was
     /// asked, and its state in the head's words, when it has said one.
-    pub(super) fn fleet_head(
-        &self,
-        pane_id: PaneId,
-    ) -> Option<(String, Option<String>, Option<(&'static str, Hsla)>)> {
+    pub(super) fn fleet_head(&self, pane_id: PaneId) -> Option<FleetHead> {
         let agent = self.fleet_agent_in(pane_id)?;
         let state = match agent.state {
-            FleetState::Blocked => Some((agent.state.word(), color(SIGNAL))),
-            FleetState::Error => Some((agent.state.word(), color(SIGNAL))),
+            FleetState::Blocked | FleetState::Error => Some((agent.state.word(), color(SIGNAL))),
             FleetState::Working => Some((agent.state.word(), color(MUTED_TEXT))),
             FleetState::Done => Some((agent.state.word(), self.active_ink().color())),
             FleetState::Idle => Some((agent.state.word(), color(FAINT_TEXT))),
@@ -1201,7 +1201,7 @@ impl MuxApp {
 
     /// Where the fleet's chip sits in the strip, near enough for the
     /// ground's light to start from.
-    pub(super) fn fleet_chip_rect(&self) -> layout::Rect {
+    pub(super) fn fleet_chip_rect() -> layout::Rect {
         let lead = if cfg!(target_os = "macos") {
             82.0
         } else {
@@ -1310,6 +1310,7 @@ impl MuxApp {
     /// One agent in the roster, on two lines: its mark, name, what it was
     /// asked, and its state and for how long; then what it is at, and the
     /// branch it is on.
+    #[allow(clippy::too_many_lines)]
     fn fleet_row(
         &self,
         agent: &FleetAgent,
@@ -2134,7 +2135,7 @@ impl MuxApp {
                             cx,
                         );
                     } else {
-                        self.set_fleet_hooks(kind, key == "enter", cx);
+                        Self::set_fleet_hooks(kind, key == "enter", cx);
                     }
                 }
                 return;

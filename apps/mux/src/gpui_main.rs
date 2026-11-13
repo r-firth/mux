@@ -707,6 +707,8 @@ enum MotionPreference {
     Reduced,
 }
 
+// Each flag is a fact of its own: a clock that runs, a readout that shows.
+#[allow(clippy::struct_excessive_bools)]
 struct MuxApp {
     focus_handle: FocusHandle,
     /// Where each pane's prompts are, as of the frame it last drew.
@@ -5744,6 +5746,7 @@ impl UserEvent {
 }
 
 impl Render for MuxApp {
+    #[allow(clippy::too_many_lines)]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_animations(cx);
         self.sync_window_title(window);

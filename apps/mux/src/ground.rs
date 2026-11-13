@@ -1634,7 +1634,7 @@ impl MuxApp {
         // While the fleet is on screen its chip is the one in front, and
         // the tab beneath it is out of sight like the rest.
         let fleet = self.fleet_open();
-        let mut chip = fleet.then(|| self.fleet_chip_rect());
+        let mut chip = fleet.then(Self::fleet_chip_rect);
         for (position, tab) in session.tabs.iter().enumerate() {
             let Some(bounds) = self.tab_strip_scroll.bounds_for_item(position) else {
                 continue;
