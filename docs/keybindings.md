@@ -332,7 +332,7 @@ not renewed for 15 seconds goes away, as in Ghostty.
 
 ## Fleet
 
-A coding agent run from a shell in a pane, `claude`, `codex`, `copilot` or
+A coding agent run from a shell in a pane, `claude`, `codex`, `copilot`, `pi` or
 another Mux knows by name, is followed where it runs. Its pane's head says
 its name, what it was asked and its state, `waiting on you` in peach, and
 while any are running a `fleet` chip sits at the head of the strip, with a
@@ -387,7 +387,7 @@ Click a tile to choose it, and double-click to type to its agent.
 
 Mux knows an agent is there from the process in front of the pane's shell.
 What it is doing comes from the agent itself: with Mux's hooks in Claude
-Code, Codex or Copilot, each prompt, tool, request for permission and end
+Code, Codex, Copilot or pi, each prompt, tool, request for permission and end
 of a turn; otherwise OSC 7501, a notification or a bell. The hooks do
 nothing outside a Mux pane, and `h` in the fleet, or `muxctl hooks`, puts
 them in and takes them out.

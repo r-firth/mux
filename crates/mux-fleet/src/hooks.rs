@@ -6,7 +6,8 @@
 //! says the same things in camel case. So one reader takes all three,
 //! going by the event's name and looking for each field under the names
 //! any of them gives it. A field an agent stops sending, or a new event,
-//! costs a detail rather than the report.
+//! costs a detail rather than the report. Mux's extension for pi says pi's
+//! events in Claude Code's names, so it is read the same way.
 
 use std::path::PathBuf;
 

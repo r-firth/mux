@@ -84,7 +84,7 @@ pub fn hooks(command: Option<HooksCommand>) -> Result<()> {
                 AgentKind::from_command(name)
                     .filter(|kind| AgentKind::HOOKED.contains(kind))
                     .with_context(|| {
-                        format!("Mux has no hooks for `{name}` (claude, codex, copilot)")
+                        format!("Mux has no hooks for `{name}` (claude, codex, copilot, pi)")
                     })
             })
             .collect()
@@ -104,7 +104,7 @@ pub fn hooks(command: Option<HooksCommand>) -> Result<()> {
         HooksCommand::Install { agents } => {
             let kinds = named(&agents)?;
             if kinds.is_empty() {
-                println!("No agents found to hook (Claude Code, Codex, Copilot).");
+                println!("No agents found to hook (Claude Code, Codex, Copilot, pi).");
             }
             for kind in kinds {
                 let changed = install::install(kind, &homes)?;
@@ -118,6 +118,9 @@ pub fn hooks(command: Option<HooksCommand>) -> Result<()> {
                         "  Codex runs a new hook only once you trust it. It asks when it next \
                          starts; in one already running, /hooks then t."
                     );
+                }
+                if changed && kind == AgentKind::Pi {
+                    println!("  pi loads its extensions as it starts: restart it, or /reload.");
                 }
                 if changed && kind == AgentKind::Copilot {
                     println!(

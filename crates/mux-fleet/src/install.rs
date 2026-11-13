@@ -26,6 +26,9 @@
 //!   that is running, and trusts it by its text, so
 //!   the command is kept the same from one Mux to the next.
 //! - Copilot: a file of Mux's own, `~/.copilot/hooks/mux.json`.
+//! - pi: an extension of Mux's own, `~/.pi/agent/extensions/mux-fleet.ts`,
+//!   which runs the same command at pi's events. pi loads it when it next
+//!   starts, or at `/reload`.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -41,12 +44,21 @@ const MARK: &str = "\"$MUX_CTL\" hook ";
 /// Seconds an agent waits on a hook before going on without it.
 const TIMEOUT_SECONDS: u64 = 5;
 
+/// pi has no hooks to list in a settings file: it loads the extensions in
+/// its folder, so Mux's is a file of its own there.
+const PI_EXTENSION: &str = include_str!("pi-extension.ts");
+const PI_EXTENSION_NAME: &str = "mux-fleet.ts";
+/// What marks an extension file as Mux's.
+const PI_MARK: &str = "mux-fleet-extension";
+
 /// Where each agent keeps its settings.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Homes {
     pub claude: PathBuf,
     pub codex: PathBuf,
     pub copilot: PathBuf,
+    /// pi's agent folder, `~/.pi/agent`.
+    pub pi: PathBuf,
 }
 
 impl Homes {
@@ -63,6 +75,9 @@ impl Homes {
             claude: place("CLAUDE_CONFIG_DIR", ".claude"),
             codex: place("CODEX_HOME", ".codex"),
             copilot: place("COPILOT_HOME", ".copilot"),
+            pi: variable("PI_CODING_AGENT_DIR")
+                .filter(|path| path.is_absolute())
+                .unwrap_or_else(|| home.join(".pi").join("agent")),
         }
     }
 
@@ -84,6 +99,7 @@ impl Homes {
             AgentKind::Claude => Some(&self.claude),
             AgentKind::Codex => Some(&self.codex),
             AgentKind::Copilot => Some(&self.copilot),
+            AgentKind::Pi => Some(&self.pi),
             _ => None,
         }
     }
@@ -95,6 +111,7 @@ impl Homes {
             AgentKind::Claude => Some(self.claude.join("settings.json")),
             AgentKind::Codex => Some(self.codex.join("hooks.json")),
             AgentKind::Copilot => Some(self.copilot.join("hooks").join("mux.json")),
+            AgentKind::Pi => Some(self.pi.join("extensions").join(PI_EXTENSION_NAME)),
             _ => None,
         }
     }
@@ -209,6 +226,13 @@ pub fn status(kind: AgentKind, homes: &Homes) -> HookStatus {
     if !home.is_dir() {
         return HookStatus::Absent;
     }
+    if kind == AgentKind::Pi {
+        return match std::fs::read_to_string(&file) {
+            Ok(text) if text == PI_EXTENSION => HookStatus::Installed,
+            Ok(text) if text.contains(PI_MARK) => HookStatus::Outdated,
+            _ => HookStatus::Missing,
+        };
+    }
     let Ok(Some(current)) = read(&file) else {
         return HookStatus::Missing;
     };
@@ -227,6 +251,9 @@ pub fn install(kind: AgentKind, homes: &Homes) -> Result<bool, InstallError> {
     let file = homes
         .hooks_file(kind)
         .ok_or(InstallError::Unsupported(kind.name()))?;
+    if kind == AgentKind::Pi {
+        return install_extension(&file);
+    }
     let current = read(&file)?;
     let wanted = with_hooks(kind, &file, current.as_ref().unwrap_or(&json!({})))?;
     if current.as_ref() == Some(&wanted) {
@@ -242,6 +269,9 @@ pub fn uninstall(kind: AgentKind, homes: &Homes) -> Result<bool, InstallError> {
     let file = homes
         .hooks_file(kind)
         .ok_or(InstallError::Unsupported(kind.name()))?;
+    if kind == AgentKind::Pi {
+        return uninstall_extension(&file);
+    }
     let Some(current) = read(&file)? else {
         return Ok(false);
     };
@@ -269,6 +299,55 @@ pub fn uninstall(kind: AgentKind, homes: &Homes) -> Result<bool, InstallError> {
         write(&file, &wanted, true)?;
     }
     Ok(true)
+}
+
+/// Write Mux's extension for pi, unless a file of that name is someone
+/// else's.
+fn install_extension(file: &Path) -> Result<bool, InstallError> {
+    let failed = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| InstallError::Io { path, source }
+    };
+    match std::fs::read_to_string(file) {
+        Ok(text) if text == PI_EXTENSION => return Ok(false),
+        Ok(text) if !text.contains(PI_MARK) => {
+            return Err(InstallError::Unexpected {
+                path: file.to_path_buf(),
+                reason: "it is not Mux's extension".to_owned(),
+            });
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => return Err(failed(file)(source)),
+    }
+    let directory = file.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(directory).map_err(failed(directory))?;
+    let temporary = directory.join(format!(".{PI_EXTENSION_NAME}.mux-{}", std::process::id()));
+    std::fs::write(&temporary, PI_EXTENSION).map_err(failed(&temporary))?;
+    std::fs::rename(&temporary, file).map_err(|source| {
+        let _ = std::fs::remove_file(&temporary);
+        failed(file)(source)
+    })?;
+    Ok(true)
+}
+
+/// Remove Mux's extension for pi, and only Mux's.
+fn uninstall_extension(file: &Path) -> Result<bool, InstallError> {
+    match std::fs::read_to_string(file) {
+        Ok(text) if text.contains(PI_MARK) => {
+            std::fs::remove_file(file).map_err(|source| InstallError::Io {
+                path: file.to_path_buf(),
+                source,
+            })?;
+            Ok(true)
+        }
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(InstallError::Io {
+            path: file.to_path_buf(),
+            source,
+        }),
+    }
 }
 
 /// `current` with Mux's hooks for `kind` in it, and none of its old ones.
@@ -677,5 +756,40 @@ mod tests {
         assert!(install(AgentKind::Claude, &homes).expect("install"));
         assert!(std::fs::symlink_metadata(&link).expect("link").is_symlink());
         assert!(mentions_mux(&read_json(&dotfiles.join("claude.json"))));
+    }
+
+    #[test]
+    fn pi_gets_an_extension_of_muxs_own_and_only_that_is_removed() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let homes = homes(root.path());
+        assert_eq!(status(AgentKind::Pi, &homes), HookStatus::Absent);
+        std::fs::create_dir_all(&homes.pi).expect("pi's folder");
+        assert_eq!(status(AgentKind::Pi, &homes), HookStatus::Missing);
+
+        assert!(install(AgentKind::Pi, &homes).expect("install"));
+        assert!(!install(AgentKind::Pi, &homes).expect("install again"));
+        let file = homes.pi.join("extensions/mux-fleet.ts");
+        assert_eq!(status(AgentKind::Pi, &homes), HookStatus::Installed);
+        let text = std::fs::read_to_string(&file).expect("extension");
+        assert!(text.contains("\"hook\", \"pi\""));
+
+        // One from another Mux is brought up to date.
+        std::fs::write(&file, "// mux-fleet-extension 0\n").expect("older extension");
+        assert_eq!(status(AgentKind::Pi, &homes), HookStatus::Outdated);
+        assert!(install(AgentKind::Pi, &homes).expect("update"));
+
+        // A user's own extension beside it is never touched.
+        let theirs = homes.pi.join("extensions/theirs.ts");
+        std::fs::write(&theirs, "export default function () {}\n").expect("their extension");
+        assert!(uninstall(AgentKind::Pi, &homes).expect("uninstall"));
+        assert!(!file.exists());
+        assert!(theirs.exists());
+        assert!(!uninstall(AgentKind::Pi, &homes).expect("uninstall again"));
+
+        // Nor a file of the same name that is not Mux's.
+        std::fs::write(&file, "export default function () {}\n").expect("someone's file");
+        assert!(install(AgentKind::Pi, &homes).is_err());
+        assert!(!uninstall(AgentKind::Pi, &homes).expect("uninstall theirs"));
+        assert!(file.exists());
     }
 }
