@@ -853,7 +853,8 @@ impl MuxApp {
         current: bool,
     ) -> Option<(String, u32)> {
         if let Some(call) = self.pane_call(pane_id) {
-            return Some((pane_calls::call_words(call).to_owned(), SIGNAL));
+            let said = self.fleet_said_in(pane_id, pane_calls::call_words(call));
+            return Some((said, SIGNAL));
         }
         if let Some(status) = self.pane_exits.get(&pane_id) {
             let tone = if status.success { FAINT_TEXT } else { SIGNAL };

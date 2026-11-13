@@ -5444,6 +5444,9 @@ impl MuxApp {
                     div()
                         .min_w(px(0.0))
                         .truncate()
+                        // An agent's name is short, and is what the rest
+                        // of the head is about: it is never the part cut.
+                        .when(fleet_head.is_some(), Styled::flex_none)
                         .font_weight(FontWeight::BOLD)
                         .text_color(color(if focused { TEXT } else { MUTED_TEXT }))
                         .child(title)
@@ -5476,7 +5479,7 @@ impl MuxApp {
                     .max_w(px(frame.width * 0.6))
                     .truncate()
                     .text_color(call_tone)
-                    .child(said.clone()),
+                    .child(self.fleet_said_in(pane_id, said)),
             );
         }
         if let Some((state, tone)) = agent.and_then(|agent| agent_view::agent_state(agent.status)) {
