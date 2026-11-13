@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use mux_acp::{
     AgentConfigValueSelection, AgentEvent, AgentPrompt, AgentSessionSnapshot, AgentSpec,
 };
+use mux_fleet::{AgentReport, FleetAgent, FleetEvent};
 use mux_terminal::{TerminalAttachment, TerminalSize};
 use mux_workspace::{AgentSessionId, PaneId, Session, SessionId, WorkspaceCommand};
 use serde::de::DeserializeOwned;
@@ -31,7 +32,12 @@ use tokio::task::JoinHandle;
 /// Version 10 adds a request to reset a pane's terminal.
 /// Version 11 moves both sides to libghostty 1.4, whose pane checkpoints an
 /// older daemon cannot make, so a new window replaces the old daemon.
-pub const PROTOCOL_VERSION: u16 = 11;
+/// Version 12 adds the fleet: the coding agents running in terminal panes,
+/// with requests to list them, to report what one is doing from its hooks,
+/// to mark one seen or let an ended one go, and to read a pane's text, and
+/// an event for each change. Panes are started with `MUX_PANE_ID`,
+/// `MUX_SOCKET` and `MUX_CTL` in their environment.
+pub const PROTOCOL_VERSION: u16 = 12;
 /// Request id zero is reserved for latency-sensitive messages whose successful
 /// completion does not require a response.
 pub const UNACKNOWLEDGED_REQUEST_ID: u64 = 0;
@@ -157,6 +163,27 @@ pub enum Request {
     ResetPane {
         pane_id: PaneId,
     },
+    /// Every coding agent running in a terminal pane, in any session.
+    ListFleet,
+    /// What an agent's hook says the agent in this pane has just done.
+    ReportAgent {
+        pane_id: PaneId,
+        report: AgentReport,
+    },
+    /// The user has looked at this pane: what its agent finished is no
+    /// longer news.
+    FleetSeen {
+        pane_id: PaneId,
+    },
+    /// Let go of an ended agent session kept for this pane.
+    ForgetFleetAgent {
+        pane_id: PaneId,
+    },
+    /// The last `lines` lines a pane shows, history first, as plain text.
+    PaneText {
+        pane_id: PaneId,
+        lines: u32,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -192,6 +219,8 @@ pub enum Response {
     WorkingDirectory(PathBuf),
     Ack,
     RunningPrograms(Vec<RunningProgram>),
+    Fleet(Vec<FleetAgent>),
+    PaneText(String),
 }
 
 /// A program a pane is running in front of its shell, by its process name.
@@ -272,6 +301,9 @@ pub enum ServerEvent {
         pane_id: PaneId,
         secret: bool,
     },
+    /// An agent in a terminal pane has changed, or gone. Sent to every
+    /// client, whichever session it is attached to.
+    Fleet(FleetEvent),
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -283,7 +283,7 @@ fn read_saved_workspace(path: &Path) -> Option<(SavedWorkspace, String)> {
 
 /// Write `text` to `name` in `directory`, readable only by its owner, by way
 /// of a file beside it so a crash never leaves half of it.
-fn write_private(directory: &Path, name: &str, text: &str) -> std::io::Result<()> {
+pub(super) fn write_private(directory: &Path, name: &str, text: &str) -> std::io::Result<()> {
     fs::create_dir_all(directory)?;
     let temporary = directory.join(format!("{name}.tmp-{}", std::process::id()));
     let file = File::create(&temporary)?;

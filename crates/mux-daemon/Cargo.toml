@@ -16,6 +16,7 @@ clap.workspace = true
 directories.workspace = true
 mux-protocol = { path = "../mux-protocol" }
 mux-acp = { path = "../mux-acp" }
+mux-fleet = { path = "../mux-fleet" }
 mux-terminal = { path = "../mux-terminal" }
 mux-terminal-ghostty = { path = "../mux-terminal-ghostty", optional = true }
 mux-workspace = { path = "../mux-workspace" }
