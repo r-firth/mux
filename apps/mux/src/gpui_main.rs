@@ -7010,7 +7010,30 @@ fn run_graphical_application(
         });
 }
 
+/// `mux hook <agent> <event>`: what a coding agent's hook runs when there is
+/// no `muxctl` beside this executable. It reports and goes, saying nothing.
+fn run_agent_hook(arguments: &[std::ffi::OsString]) {
+    let Some(agent) = arguments.get(2).and_then(|agent| agent.to_str()) else {
+        return;
+    };
+    let event = arguments.get(3).and_then(|event| event.to_str());
+    if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        runtime.block_on(mux_client::hook::run(agent, event));
+    }
+}
+
 fn main() -> Result<()> {
+    // A hook runs inside an agent's turn: before anything else, so that it
+    // prints nothing and always succeeds.
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    if arguments.get(1).is_some_and(|argument| argument == "hook") {
+        run_agent_hook(&arguments);
+        return Ok(());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
