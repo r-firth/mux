@@ -1603,6 +1603,7 @@ impl MuxApp {
                 focus = fleet_focus;
             }
         }
+        self.fleet_wall_lights(viewport, &mut calls, &mut busy);
         let mut running = Vec::new();
         let chip = self.ground_chips(&mut calls, &mut running);
         Scene {

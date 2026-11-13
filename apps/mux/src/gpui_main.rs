@@ -793,6 +793,8 @@ struct MuxApp {
     fleet_goto: Option<PaneId>,
     /// An agent whose command is typed once its new tab has come.
     fleet_start: Option<fleet::FleetStart>,
+    /// The metrics the wall's tiles draw their panes with, by face and size.
+    fleet_tile_metrics: HashMap<(String, u32), GridMetrics>,
     /// GUI-local tab colours. New tabs take the next ink by position and keep
     /// it, so closing a tab never repaints its neighbours.
     tab_rename: Option<TabRename>,
@@ -1030,6 +1032,7 @@ impl MuxApp {
             fleet_clock_running: false,
             fleet_goto: None,
             fleet_start: None,
+            fleet_tile_metrics: HashMap::new(),
             tab_rename: None,
             pane_rename: None,
             tab_strip_scroll: ScrollHandle::new(),
@@ -1988,7 +1991,7 @@ impl MuxApp {
     fn terminal_pane_is_visible(&self, pane_id: PaneId) -> bool {
         // The fleet's view shows one pane, whatever its tab.
         if self.fleet_open() {
-            return self.fleet_shown_pane() == Some(pane_id);
+            return self.fleet_shown_pane() == Some(pane_id) || self.fleet_wall_shows(pane_id);
         }
         let Some(session) = self.session.as_ref() else {
             return false;
@@ -4334,6 +4337,7 @@ impl MuxApp {
                     seams: Vec::new(),
                 };
                 self.publish_fleet_pane();
+                self.publish_fleet_wall(&fleet);
                 if !self.fleet_pane_settled() {
                     return geometry;
                 }
@@ -5865,13 +5869,19 @@ impl Render for MuxApp {
                 ));
             }
         }
+        // The wall draws its agents' panes itself, small.
+        let tile_panes = match &fleet {
+            Some(fleet) => self.fleet_tile_panes(fleet, cx),
+            None => HashMap::new(),
+        };
+        shown_terminals.extend(tile_panes.keys().copied());
         self.terminal_views
             .retain(|pane_id, _| shown_terminals.contains(pane_id));
         for (index, seam) in geometry.seams.into_iter().enumerate() {
             root = root.child(self.render_seam(index, seam, cx));
         }
         if let Some(fleet) = &fleet {
-            root = root.children(self.render_fleet(fleet, cx));
+            root = root.children(self.render_fleet(fleet, tile_panes, cx));
         }
         root.children(self.render_seam_drag_shield())
             .children(self.render_session_sheet(cx))
