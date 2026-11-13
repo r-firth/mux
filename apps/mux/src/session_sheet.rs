@@ -60,7 +60,9 @@ impl MuxApp {
     /// Give the keyboard back to the focused pane: its composer when it is
     /// showing an agent, else its shell.
     pub(super) fn restore_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self
+        if self.fleet_roster_has_keys() {
+            self.focus_fleet_roster(window, cx);
+        } else if self
             .active_agent_pane()
             .is_some_and(|pane_id| Some(pane_id) == self.focused_pane_id())
         {

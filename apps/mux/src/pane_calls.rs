@@ -54,9 +54,7 @@ impl MuxApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let watched = self
-            .terminal_input_pane_id()
-            .filter(|_| window.is_window_active());
+        let watched = self.looked_at_pane().filter(|_| window.is_window_active());
         let mut fresh = false;
         let mut changed = false;
         let mut rung = None;
@@ -138,11 +136,21 @@ impl MuxApp {
     /// Go to the pane that called last and has not been looked at since,
     /// in whatever tab it is; failing that, to an agent in another tab
     /// waiting for you to allow something or sign in.
-    pub(super) fn go_to_call(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn go_to_call(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // An agent in a terminal pane waiting on you comes first, the one
+        // that has waited the shortest while, in whatever tab or session.
+        if let Some((pane_id, session_id)) = self.fleet_agent_calling() {
+            self.close_fleet(false, window, cx);
+            self.go_to_fleet_agent(pane_id, session_id, cx);
+            return;
+        }
         let calls = &self.pane_calls;
         self.call_order
             .retain(|pane_id| calls.contains_key(pane_id));
-        let here = self.terminal_input_pane_id();
+        // Behind the fleet's roster no pane is where you are.
+        let here = self
+            .terminal_input_pane_id()
+            .filter(|_| !self.fleet_roster_has_keys());
         let called = self
             .call_order
             .iter()
@@ -177,6 +185,7 @@ impl MuxApp {
             self.say_in_strip("nothing is calling", false, cx);
             return;
         };
+        self.close_fleet(false, window, cx);
         if Some(tab_id) != active {
             self.send_workspace(WorkspaceCommand::SelectTab(tab_id));
         }
@@ -235,7 +244,7 @@ impl MuxApp {
     /// The pane with the keys, in a window in front, has been seen.
     pub(super) fn clear_seen_pane_call(&mut self, window: &Window) {
         if window.is_window_active()
-            && let Some(pane_id) = self.terminal_input_pane_id()
+            && let Some(pane_id) = self.looked_at_pane()
         {
             self.pane_calls.remove(&pane_id);
             self.news_calls.remove(&pane_id);
