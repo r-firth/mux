@@ -215,8 +215,13 @@ pub async fn run(client: &mut Client, command: Option<FleetCommand>, json: bool)
                 )
                 .await?;
                 report_wait(reached.as_deref(), json)?;
-            } else if !json {
-                println!("sent to {}", agent.kind.name());
+            } else {
+                // A `wait` run straight after must find the agent at work on
+                // this, not still as it was before it.
+                taken_up(client, &agent).await?;
+                if !json {
+                    println!("sent to {}", agent.kind.name());
+                }
             }
         }
         FleetCommand::Read { pane, lines } => {
@@ -361,6 +366,33 @@ async fn wait(
             Err(_) if tokio::time::Instant::now() >= deadline => return Ok(None),
             // Some other event, or the wait to take the prompt up ran out.
             Ok(Ok(_)) | Err(_) => {}
+        }
+    }
+}
+
+/// Give an agent a moment to take a prompt up: until it says it is at
+/// work, or has begun another turn, or a little while has gone by, for an
+/// agent that says nothing of itself.
+async fn taken_up(client: &mut Client, before: &FleetAgent) -> Result<()> {
+    const A_MOMENT: Duration = Duration::from_millis(2_500);
+    let deadline = tokio::time::Instant::now() + A_MOMENT;
+    loop {
+        match tokio::time::timeout_at(deadline, client.next_event()).await {
+            Ok(Ok(ServerEvent::Fleet(FleetEvent::Changed(agent))))
+                if agent.pane_id == before.pane_id
+                    && (matches!(agent.state, FleetState::Working | FleetState::Blocked)
+                        || agent.turns != before.turns) =>
+            {
+                return Ok(());
+            }
+            Ok(Ok(ServerEvent::Fleet(FleetEvent::Removed { pane_id })))
+                if pane_id == before.pane_id =>
+            {
+                return Ok(());
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => return Err(error.into()),
+            Err(_) => return Ok(()),
         }
     }
 }
